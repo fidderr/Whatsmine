@@ -1,0 +1,18 @@
+[workspace]
+resolver = "3"
+members = ["core", "cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+authors = ["fidderr"]
+
+# Size-first release builds, same reasoning as AlarmFree: the UI runs in a
+# WebView, so native speed barely matters and the .so is the download size.
+# `lto = "thin"`, not "fat": dx 0.7.10 on Windows writes its linker response
+# file with unescaped backslashes and fat LTO trips over it.
+[profile.release]
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
