@@ -24,7 +24,6 @@
   --border: rgba(255, 255, 255, 0.1);
   --bubble-out: #2b4f86;
   --bubble-out-text: #f0f0f5;
-  --bubble-in: var(--surface);
   --read-tick: #64d2ff;
   --radius: 12px;
   --radius-sm: 8px;
@@ -1041,7 +1040,7 @@ textarea {
 
 .bubble.in {
   align-self: flex-start;
-  background: var(--bubble-in);
+  background: var(--surface);
   border-bottom-left-radius: 4px;
 }
 
@@ -1194,4 +1193,32 @@ textarea {
   .bubble {
     max-width: 86%;
   }
+}
+
+/* ===== System status bar (Android edge-to-edge) =====
+   A strip behind the status bar icons. Those icons are white, so in light
+   themes the strip takes the accent colour to keep them readable. */
+.status-bar-bg {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--safe-top);
+  background: var(--bg);
+  z-index: 500;
+  pointer-events: none;
+}
+
+.theme-light .status-bar-bg {
+  background: var(--primary);
+}
+
+@media (prefers-color-scheme: light) {
+  .theme-system .status-bar-bg {
+    background: var(--primary);
+  }
+}
+
+.bubble.in {
+  box-shadow: 0 1px 1px rgba(0, 0, 0, 0.06);
 }

@@ -47,7 +47,17 @@ pub enum Frame {
         ids: Vec<[u8; 16]>,
     },
     Typing,
+    /// Heartbeat. A peer that stays silent longer than [`PEER_TIMEOUT`] is
+    /// treated as gone, so "online" stops showing within seconds when an app
+    /// is killed without closing its connection.
+    Ping,
 }
+
+/// How often an idle connection sends a [`Frame::Ping`].
+pub const PING_EVERY: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// Silence after which the peer counts as offline.
+pub const PEER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReceiptKind {
@@ -73,14 +83,17 @@ pub async fn write_frame(send: &mut SendStream, frame: &Frame) -> anyhow::Result
     Ok(())
 }
 
-pub async fn read_frame(recv: &mut RecvStream) -> anyhow::Result<Frame> {
+/// Reads one frame. The outer error means the stream is broken; the inner
+/// one means the frame was unreadable (for example a newer peer sending a
+/// kind we don't know), which callers should skip, not hang up on.
+pub async fn read_frame(recv: &mut RecvStream) -> anyhow::Result<anyhow::Result<Frame>> {
     let mut len = [0u8; 4];
     recv.read_exact(&mut len).await?;
     let len = u32::from_be_bytes(len) as usize;
     anyhow::ensure!(len <= MAX_FRAME, "frame too large: {len}");
     let mut body = vec![0u8; len];
     recv.read_exact(&mut body).await?;
-    decode(&body)
+    Ok(decode(&body))
 }
 
 pub fn id_to_bytes(id: &str) -> Option<[u8; 16]> {
@@ -117,6 +130,7 @@ mod tests {
                 ids: vec![[1; 16], [2; 16]],
             },
             Frame::Typing,
+            Frame::Ping,
         ];
         for f in frames {
             let bytes = encode(&f).unwrap();

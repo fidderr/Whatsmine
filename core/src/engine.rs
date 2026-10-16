@@ -609,6 +609,8 @@ impl Engine {
                     emit(&self.events, CoreEvent::Typing { contact_id: id });
                 }
             }
+            // Only keeps the session alive; see the reader's timeout.
+            Frame::Ping => {}
         }
     }
 
@@ -778,7 +780,16 @@ fn spawn_online_watch(ep: Endpoint, tx: mpsc::UnboundedSender<Internal>) {
 
 fn spawn_writer(mut send: SendStream, mut rx: mpsc::UnboundedReceiver<Frame>, conn: Connection) {
     tokio::spawn(async move {
-        while let Some(frame) = rx.recv().await {
+        let mut ping = tokio::time::interval(protocol::PING_EVERY);
+        ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            let frame = tokio::select! {
+                frame = rx.recv() => match frame {
+                    Some(f) => f,
+                    None => break,
+                },
+                _ = ping.tick() => Frame::Ping,
+            };
             if let Err(e) = protocol::write_frame(&mut send, &frame).await {
                 tracing::debug!("write failed: {e:#}");
                 conn.close(2u32.into(), b"write error");
@@ -798,12 +809,17 @@ fn spawn_reader(
 ) {
     tokio::spawn(async move {
         loop {
-            match protocol::read_frame(&mut recv).await {
-                Ok(frame) => {
+            let read =
+                tokio::time::timeout(protocol::PEER_TIMEOUT, protocol::read_frame(&mut recv))
+                    .await
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("peer silent too long")));
+            match read {
+                Ok(Ok(frame)) => {
                     if tx.send(Internal::Frame { peer, frame }).is_err() {
                         return;
                     }
                 }
+                Ok(Err(e)) => tracing::debug!("skipping unreadable frame: {e:#}"),
                 Err(e) => {
                     tracing::debug!("session {sid} with {} ended: {e:#}", peer.fmt_short());
                     conn.close(0u32.into(), b"closed");

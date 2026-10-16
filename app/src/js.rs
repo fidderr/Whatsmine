@@ -3,45 +3,15 @@
 
 use dioxus::prelude::*;
 
-/// Copies text to the clipboard. Uses the async Clipboard API when allowed,
-/// falling back to a hidden textarea + execCommand (older WebViews).
+/// Copies text to the system clipboard. Done natively: the WebView's
+/// clipboard API is blocked on the app's (non-https) origin.
 pub fn copy_text(text: &str) {
-    let arg = serde_json::to_string(text).unwrap_or_default();
-    document::eval(&format!(
-        r#"
-        const text = {arg};
-        const fallback = () => {{
-            const ta = document.createElement('textarea');
-            ta.value = text;
-            ta.style.position = 'fixed';
-            ta.style.opacity = '0';
-            document.body.appendChild(ta);
-            ta.select();
-            try {{ document.execCommand('copy'); }} catch (e) {{}}
-            ta.remove();
-        }};
-        if (navigator.clipboard && window.isSecureContext) {{
-            navigator.clipboard.writeText(text).catch(fallback);
-        }} else {{
-            fallback();
-        }}
-        "#
-    ));
+    crate::clipboard::set(text);
 }
 
-/// Reads text from the clipboard, if the platform allows it.
+/// Reads text from the system clipboard, if any.
 pub async fn paste_text() -> Option<String> {
-    let mut ev = document::eval(
-        r#"
-        try {
-            const t = await navigator.clipboard.readText();
-            dioxus.send(t || "");
-        } catch (e) {
-            dioxus.send("");
-        }
-        "#,
-    );
-    ev.recv::<String>().await.ok().filter(|s| !s.is_empty())
+    crate::clipboard::get().filter(|s| !s.trim().is_empty())
 }
 
 /// Scrolls an element to its end after the next paint.

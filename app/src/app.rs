@@ -147,7 +147,15 @@ fn Main(core: AppCore) -> Element {
             let mut rx = core.subscribe();
             loop {
                 match rx.recv().await {
-                    Ok(CoreEvent::MessageAdded(_)) | Ok(CoreEvent::MessageStatus { .. }) => {
+                    Ok(CoreEvent::MessageAdded(m)) => {
+                        // Their message arrived: they are done typing it.
+                        if !m.outgoing {
+                            typing.write().remove(&m.contact_id);
+                        }
+                        *msg_rev.write() += 1;
+                        *rev.write() += 1;
+                    }
+                    Ok(CoreEvent::MessageStatus { .. }) => {
                         *msg_rev.write() += 1;
                         *rev.write() += 1;
                     }
@@ -179,7 +187,7 @@ fn Main(core: AppCore) -> Element {
                     Ok(CoreEvent::Presence {
                         contact_id, online, ..
                     }) => {
-                        if online {
+                        if !online {
                             typing.write().remove(&contact_id);
                         }
                         *rev.write() += 1;
@@ -204,6 +212,24 @@ fn Main(core: AppCore) -> Element {
     };
     let onboarded = s.onboarded;
     drop(s);
+    let safe_area = use_hook(crate::platform::safe_area_style);
+
+    // Closing the window: hang up properly so contacts see us go offline
+    // right away instead of after the heartbeat timeout.
+    #[cfg(feature = "desktop")]
+    {
+        let core = core.0.clone();
+        dioxus::desktop::use_wry_event_handler(move |event, _| {
+            use dioxus::desktop::tao::event::{Event, WindowEvent};
+            if let Event::WindowEvent {
+                event: WindowEvent::CloseRequested | WindowEvent::Destroyed,
+                ..
+            } = event
+            {
+                core.shutdown();
+            }
+        });
+    }
 
     rsx! {
         document::Link { rel: "stylesheet", href: asset!("/assets/style.css") }
@@ -211,7 +237,8 @@ fn Main(core: AppCore) -> Element {
             name: "viewport",
             content: "width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content",
         }
-        div { class: "app-root {theme_class}",
+        div { class: "app-root {theme_class}", style: "{safe_area}",
+            div { class: "status-bar-bg" }
             if onboarded {
                 Router::<Route> {}
             } else {
