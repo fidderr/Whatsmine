@@ -146,12 +146,12 @@ impl Core {
     }
 
     /// Shuts down and deletes the identity and every message on this device.
-    /// There is no copy anywhere else, so this cannot be undone.
-    pub fn wipe_everything(self) -> anyhow::Result<()> {
+    /// There is no copy anywhere else, so this cannot be undone. The next
+    /// `Core::start` on this directory creates a brand-new identity.
+    pub fn wipe_everything(&self) -> anyhow::Result<()> {
         self.shutdown();
-        let dir = self.inner.dir.clone();
-        drop(self);
-        std::fs::remove_dir_all(&dir)?;
+        self.inner.db.wipe()?;
+        std::fs::remove_file(self.inner.dir.join(identity::KEY_FILE))?;
         Ok(())
     }
 

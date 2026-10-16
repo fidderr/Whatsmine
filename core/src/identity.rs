@@ -7,7 +7,7 @@ use std::path::Path;
 
 use iroh::{PublicKey, SecretKey};
 
-const KEY_FILE: &str = "identity.key";
+pub(crate) const KEY_FILE: &str = "identity.key";
 
 pub fn load_or_create(dir: &Path) -> anyhow::Result<SecretKey> {
     let path = dir.join(KEY_FILE);

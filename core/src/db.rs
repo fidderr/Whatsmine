@@ -114,6 +114,14 @@ impl Database {
         self.conn.lock().unwrap_or_else(|p| p.into_inner())
     }
 
+    /// Deletes every row and compacts the file so nothing lingers on disk.
+    pub fn wipe(&self) -> rusqlite::Result<()> {
+        self.lock().execute_batch(
+            "DELETE FROM drafts; DELETE FROM messages; DELETE FROM contacts;
+             DELETE FROM settings; PRAGMA wal_checkpoint(TRUNCATE); VACUUM;",
+        )
+    }
+
     // ---- settings ----
 
     pub fn settings(&self) -> Settings {
@@ -571,6 +579,25 @@ mod tests {
         assert_eq!(c.their_name, "Jara");
         assert_eq!(c.display_name(), "Jaar");
         assert_eq!(c.state, ContactState::Accepted);
+    }
+
+    #[test]
+    fn wipe_removes_everything() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_settings(&Settings {
+            display_name: "Roy".into(),
+            ..Settings::default()
+        })
+        .unwrap();
+        db.upsert_contact("k", ContactState::Accepted, None, None)
+            .unwrap();
+        db.insert_message(&msg("m", "k", true, 1)).unwrap();
+        db.set_draft("k", "x");
+        db.wipe().unwrap();
+        assert_eq!(db.settings(), Settings::default());
+        assert!(db.contact("k").is_none());
+        assert!(db.message("m").is_none());
+        assert_eq!(db.draft("k"), "");
     }
 
     #[test]
