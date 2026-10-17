@@ -179,5 +179,7 @@
   "settings.size_500": "500 Mo",
   "settings.size_2048": "2 Go",
   "settings.size_10240": "10 Go",
-  "settings.size_0": "Aucune limite"
+  "settings.size_0": "Aucune limite",
+  "settings.photo": "Photo de profil",
+  "attach.preparing": "Préparation de {name}…"
 }

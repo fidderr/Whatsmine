@@ -60,7 +60,9 @@ pub fn AttachmentView(message: Message, on_view: EventHandler<String>) -> Elemen
     let id = message.id.clone();
     let progress = transfers.read().get(&id).copied();
     let have_file = att.path.is_some();
-    let kind = if broken() {
+    // Media the host cannot stream inline (huge files on Android) and media the
+    // player rejected both fall back to a file card with Open / Save.
+    let kind = if broken() || !crate::media_server::inline_ok(att.size) {
         MediaKind::File
     } else {
         att.kind()

@@ -41,6 +41,16 @@ async fn send_and_report(
     tr: Translations,
     mut toast_sig: ToastSig,
 ) {
+    // Copying and hashing a big file takes a few seconds before it shows up
+    // in the chat; say so, so it does not look like nothing happened.
+    if media::total_size(&files) > 16 * 1024 * 1024 {
+        let name = files.first().map(|f| f.name.clone()).unwrap_or_default();
+        toast(
+            &mut toast_sig,
+            t(&tr, "attach.preparing").replace("{name}", &name),
+            ToastLevel::Info,
+        );
+    }
     let errors = media::send_files(core, id, files, caption).await;
     if let Some(e) = errors.first() {
         toast(
@@ -195,7 +205,8 @@ fn ChatView(id: String) -> Element {
                 }
                 Attach::Photo | Attach::Video if media::NATIVE_CAMERA => {
                     spawn(async move {
-                        if let Some(file) = media::capture(what == Attach::Video).await {
+                        let got = media::capture(what == Attach::Video).await;
+                        if let Some(file) = got {
                             let caption = take_caption();
                             send_and_report(core, id, vec![file], caption, tr, toast_sig).await;
                         }

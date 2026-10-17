@@ -74,6 +74,14 @@ pub async fn capture(video: bool) -> Option<Picked> {
         } else {
             mobile_sentinel::camera::capture_photo()
         };
+        log::info!(
+            "media: system camera finished: {}",
+            if result.is_ok() {
+                "got a file"
+            } else {
+                "cancelled or unavailable"
+            }
+        );
         let path = PathBuf::from(result.ok()?);
         let (name, mime) = if video {
             ("video.mp4", "video/mp4")
@@ -99,15 +107,26 @@ pub async fn send_files(
     files: Vec<Picked>,
     caption: String,
 ) -> Vec<String> {
+    log::info!("media: sending {} file(s)", files.len());
     blocking(move || {
         let mut errors = Vec::new();
         for (i, f) in files.iter().enumerate() {
             let caption = if i == 0 { caption.as_str() } else { "" };
-            match core.send_file(&contact, &f.path, &f.name, &f.mime, caption, f.duration_ms) {
+            let scratch = is_scratch(&f.path);
+            match core.send_file_from(
+                &contact,
+                &f.path,
+                &f.name,
+                &f.mime,
+                caption,
+                f.duration_ms,
+                scratch,
+            ) {
                 Ok(_) => {}
                 Err(e) => errors.push(e.to_string()),
             }
-            if is_scratch(&f.path) {
+            if scratch {
+                // Moved already on success; clean up if it was copied or failed.
                 let _ = std::fs::remove_file(&f.path);
             }
         }
@@ -210,4 +229,33 @@ pub async fn save_to_downloads(path: String, name: String, mime: String) -> Opti
     blocking(move || mobile_sentinel::share::save_to_downloads(&path, &name, &mime).ok())
         .await
         .flatten()
+}
+
+/// Removes leftovers in the scratch folders (a camera capture or import that
+/// was never sent because the app was closed or killed). Run once at start,
+/// when nothing can be in flight.
+pub fn clean_scratch(core: &Core) {
+    let media = core.media_dir();
+    let data = media.parent().map(Path::to_path_buf).unwrap_or_default();
+    for dir in [
+        data.join("sentinel_camera"),
+        data.join("sentinel_imports"),
+        media.join("captures"),
+        media.join("recordings"),
+    ] {
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for e in entries.flatten() {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+}
+
+/// Total size of files, for deciding whether to say "preparing…".
+pub fn total_size(files: &[Picked]) -> u64 {
+    files
+        .iter()
+        .filter_map(|f| std::fs::metadata(&f.path).ok())
+        .map(|m| m.len())
+        .sum()
 }

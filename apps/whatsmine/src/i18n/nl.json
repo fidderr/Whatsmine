@@ -179,5 +179,7 @@
   "settings.size_500": "500 MB",
   "settings.size_2048": "2 GB",
   "settings.size_10240": "10 GB",
-  "settings.size_0": "Geen limiet"
+  "settings.size_0": "Geen limiet",
+  "settings.photo": "Profielfoto",
+  "attach.preparing": "{name} voorbereiden…"
 }

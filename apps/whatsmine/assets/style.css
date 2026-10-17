@@ -1494,7 +1494,7 @@ textarea {
 .viewer {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.95);
+  background: #000;
   z-index: 1500;
   display: flex;
   align-items: center;

@@ -21,6 +21,23 @@ const WHOLE_FILE_MAX: u64 = 64 * 1024 * 1024;
 /// Upper bound for a camera upload.
 const MAX_CAPTURE: usize = 512 * 1024 * 1024;
 
+/// Android's WebView treats the stream it is given as the *whole* file and
+/// applies the `Range` header to it itself. Answering with an already-sliced
+/// range makes it skip the start offset a second time (short or empty bodies,
+/// failed seeks). So on Android we return the entire file and let it slice, and
+/// because that body lives in memory, only files up to this size are shown
+/// inline there; bigger ones are a file card (Open plays them in the system
+/// player). Other hosts (WebView2) honour ranges properly.
+pub const ANDROID_INLINE_MAX: u64 = 64 * 1024 * 1024;
+
+/// Does this host leave range handling to us?
+pub const HOST_HONOURS_RANGES: bool = !cfg!(target_os = "android");
+
+/// Can a file of `size` be shown inline (image, video, audio) on this host?
+pub fn inline_ok(size: u64) -> bool {
+    HOST_HONOURS_RANGES || size <= ANDROID_INLINE_MAX
+}
+
 /// An answer, independent of the WebView's HTTP types.
 #[derive(Debug, PartialEq)]
 pub struct Served {
@@ -100,6 +117,16 @@ fn safe_mime(mime: &str) -> &str {
 }
 
 pub fn serve_file(path: &Path, mime: &str, range: Option<&str>) -> Served {
+    serve_file_for(path, mime, range, HOST_HONOURS_RANGES)
+}
+
+/// [`serve_file`] with the host's range behaviour spelled out (for tests).
+pub fn serve_file_for(
+    path: &Path,
+    mime: &str,
+    range: Option<&str>,
+    host_honours_ranges: bool,
+) -> Served {
     let Ok(mut file) = std::fs::File::open(path) else {
         return Served::empty(404);
     };
@@ -112,6 +139,15 @@ pub fn serve_file(path: &Path, mime: &str, range: Option<&str>) -> Served {
         ("X-Content-Type-Options", "nosniff".to_string()),
         ("Cache-Control", "private, max-age=3600".to_string()),
     ];
+
+    // A host that slices ranges itself gets the whole file, never a range.
+    if !host_honours_ranges {
+        if size > ANDROID_INLINE_MAX {
+            return Served::empty(413);
+        }
+        headers.retain(|(k, _)| *k != "Accept-Ranges");
+    }
+    let range = if host_honours_ranges { range } else { None };
 
     let (status, start, end) = match parse_range(range, size) {
         Range::Unsatisfiable => {
@@ -309,6 +345,44 @@ mod tests {
             serve_file(&dir.path().join("nope"), "x/y", None).status,
             404
         );
+    }
+
+    #[test]
+    fn android_style_hosts_get_the_whole_file_and_a_size_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("v.mp4");
+        let data: Vec<u8> = (0..10_000u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&p, &data).unwrap();
+
+        // The host slices ranges itself, so a Range header must not be applied twice.
+        for range in [
+            None,
+            Some("bytes=100-199"),
+            Some("bytes=9000-"),
+            Some("bytes=-50"),
+        ] {
+            let s = serve_file_for(&p, "video/mp4", range, false);
+            assert_eq!(
+                (s.status, s.body.as_slice()),
+                (200, data.as_slice()),
+                "{range:?}"
+            );
+            assert!(
+                s.headers
+                    .iter()
+                    .all(|(k, _)| *k != "Content-Range" && *k != "Accept-Ranges")
+            );
+        }
+        // Too big to hold in memory: refused (the UI shows a file card instead).
+        let big = dir.path().join("big.bin");
+        let f = std::fs::File::create(&big).unwrap();
+        f.set_len(ANDROID_INLINE_MAX + 1).unwrap();
+        assert_eq!(serve_file_for(&big, "video/mp4", None, false).status, 413);
+        assert_eq!(
+            serve_file_for(&big, "video/mp4", Some("bytes=0-9"), true).status,
+            206
+        );
+        assert!(HOST_HONOURS_RANGES || !inline_ok(ANDROID_INLINE_MAX + 1));
     }
 
     #[test]

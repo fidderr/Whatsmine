@@ -421,6 +421,25 @@ impl Core {
         caption: &str,
         duration_ms: Option<u64>,
     ) -> anyhow::Result<Message> {
+        self.send_file_from(contact_id, src, name, mime, caption, duration_ms, false)
+    }
+
+    /// Like [`send_file`](Self::send_file), but when `take_ownership` is set
+    /// the file is *moved* into WhatsMine's storage when possible (same
+    /// filesystem) instead of copied. Use it for scratch files the caller
+    /// would delete anyway, such as a fresh recording or a camera capture:
+    /// it saves writing a 100 MB file twice.
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_file_from(
+        &self,
+        contact_id: &str,
+        src: &Path,
+        name: &str,
+        mime: &str,
+        caption: &str,
+        duration_ms: Option<u64>,
+        take_ownership: bool,
+    ) -> anyhow::Result<Message> {
         let caption = caption.trim();
         ensure!(caption.len() <= protocol::MAX_TEXT, "too_long");
         let peer = self.peer(contact_id)?;
@@ -431,7 +450,7 @@ impl Core {
         let id = uuid::Uuid::now_v7().to_string();
         let name = files::clean_file_name(name);
         let dest = files::final_path(&self.media_dir(), &id, &name);
-        let (size, sha) = files::copy_and_hash(src, &dest).context("file_unreadable")?;
+        let (size, sha) = files::import(src, &dest, take_ownership).context("file_unreadable")?;
         if size == 0 {
             let _ = std::fs::remove_file(&dest);
             bail!("empty_file");

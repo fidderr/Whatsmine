@@ -130,6 +130,22 @@ pub fn copy_and_hash(src: &Path, dest: &Path) -> std::io::Result<(u64, [u8; 32])
     Ok((size, hasher.finalize().into()))
 }
 
+/// Brings `src` into `dest` and returns its size and SHA-256. With
+/// `take_ownership` the file is renamed (instant, no second copy) when that
+/// works, else copied.
+pub fn import(src: &Path, dest: &Path, take_ownership: bool) -> std::io::Result<(u64, [u8; 32])> {
+    if take_ownership {
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        if std::fs::rename(src, dest).is_ok() {
+            let size = std::fs::metadata(dest)?.len();
+            return Ok((size, hash_file(dest)?));
+        }
+    }
+    copy_and_hash(src, dest)
+}
+
 pub fn hash_file(path: &Path) -> std::io::Result<[u8; 32]> {
     let mut input = std::fs::File::open(path)?;
     let mut hasher = Sha256::new();
@@ -401,6 +417,27 @@ mod tests {
         assert_eq!(size, 200_000);
         assert_eq!(h, hash_file(&dest).unwrap());
         assert_eq!(h, hash_file(&src).unwrap());
+    }
+
+    #[test]
+    fn import_moves_scratch_files_and_copies_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("scratch.bin");
+        std::fs::write(&src, vec![7u8; 100_000]).unwrap();
+        let want = hash_file(&src).unwrap();
+
+        let kept = dir.path().join("media/kept.bin");
+        let (size, h) = import(&src, &kept, false).unwrap();
+        assert_eq!((size, h), (100_000, want));
+        assert!(src.exists(), "a normal import leaves the original alone");
+
+        let moved = dir.path().join("media/moved.bin");
+        let (size, h) = import(&src, &moved, true).unwrap();
+        assert_eq!((size, h), (100_000, want));
+        assert!(!src.exists(), "a scratch file is moved, not copied");
+        assert_eq!(hash_file(&moved).unwrap(), want);
+
+        assert!(import(&dir.path().join("missing"), &dir.path().join("x"), true).is_err());
     }
 
     #[test]

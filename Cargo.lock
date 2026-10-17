@@ -7806,6 +7806,7 @@ dependencies = [
  "chrono",
  "dioxus",
  "jni 0.21.1",
+ "log",
  "mobile-sentinel",
  "ndk-context",
  "qrcode",

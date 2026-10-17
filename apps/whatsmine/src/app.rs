@@ -89,6 +89,7 @@ pub fn App() -> Element {
         #[cfg(target_os = "android")]
         mobile_sentinel::init(mobile_sentinel::InitConfig {
             log_tag: "WhatsMine".to_string(),
+            log_level: log::LevelFilter::Info,
             ..Default::default()
         });
         let profile = std::env::var("WHATSMINE_PROFILE").ok();
@@ -142,6 +143,10 @@ fn Main(core: AppCore) -> Element {
     use_context_provider(|| toast_sig);
 
     crate::media_server::use_media_server(core.0.clone());
+    use_hook(|| {
+        let core = core.0.clone();
+        std::thread::spawn(move || crate::media::clean_scratch(&core));
+    });
 
     // Tell the user if the database had to be reset or cannot persist.
     use_hook(|| {

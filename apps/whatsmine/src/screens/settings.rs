@@ -127,6 +127,28 @@ pub fn SettingsScreen() -> Element {
 
             div { class: "settings-section",
                 label { class: "section-label", "{t(&tr, \"settings.profile\")}" }
+                div { class: "input-row",
+                    input {
+                        r#type: "text",
+                        maxlength: "64",
+                        value: "{name}",
+                        oninput: move |e| name.set(e.value()),
+                    }
+                    button {
+                        class: "secondary-btn",
+                        onclick: move |_| {
+                            let n: String = name.peek().trim().chars().take(64).collect();
+                            update.call(Box::new(move |s: &mut Settings| s.display_name = n.clone()));
+                            toast(&mut toast_sig, t(&tr, "common.saved"), ToastLevel::Info);
+                        },
+                        "{t(&tr, \"common.save\")}"
+                    }
+                }
+                p { class: "setting-hint", "{t(&tr, \"settings.name_hint\")}" }
+            }
+
+            div { class: "settings-section",
+                label { class: "section-label", "{t(&tr, \"settings.photo\")}" }
                 div { class: "profile-photo",
                     Avatar {
                         id: "me".to_string(),
@@ -157,24 +179,6 @@ pub fn SettingsScreen() -> Element {
                     }
                 }
                 p { class: "setting-hint", "{t(&tr, \"settings.photo_hint\")}" }
-                div { class: "input-row",
-                    input {
-                        r#type: "text",
-                        maxlength: "64",
-                        value: "{name}",
-                        oninput: move |e| name.set(e.value()),
-                    }
-                    button {
-                        class: "secondary-btn",
-                        onclick: move |_| {
-                            let n: String = name.peek().trim().chars().take(64).collect();
-                            update.call(Box::new(move |s: &mut Settings| s.display_name = n.clone()));
-                            toast(&mut toast_sig, t(&tr, "common.saved"), ToastLevel::Info);
-                        },
-                        "{t(&tr, \"common.save\")}"
-                    }
-                }
-                p { class: "setting-hint", "{t(&tr, \"settings.name_hint\")}" }
             }
 
             div { class: "settings-section",
