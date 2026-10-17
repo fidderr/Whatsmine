@@ -15,6 +15,7 @@ It runs on Windows and Android from one Rust codebase (the code is portable to m
 
 - 1:1 chats with history saved on your device
 - **Photos, videos, voice messages and any file**, shown inline (images and GIFs, video and audio players) or as a file card. Take a photo, record a video or a voice note right in the chat, or pick from the gallery. Files up to 2 GB by default; each person sets the largest file they accept, and bigger ones are declined with a message to the sender. Transfers resume where they stopped and are checked with a SHA-256 hash.
+- **Voice and video calls**, peer to peer like everything else: audio (Opus) goes as datagrams and video (VP8) as one short stream per frame, straight between the two devices, encrypted by the same connection. No call servers. Mute, camera on/off, and a call screen with ringing, accept and decline. Only contacts who are online can be called.
 - **Profile pictures** that your contacts see
 - Contact requests: accept, decline or block
 - Sent ✓, delivered ✓✓ and read ✓✓ (blue) ticks
