@@ -75,6 +75,26 @@ pub fn apply_background(on: bool) {
     }
 }
 
+/// Asks for the notification permission the first time the app runs (the
+/// system dialog), and never again on its own: after that it is the button in
+/// Settings.
+pub fn ask_for_notifications_once(core: &whatsmine_core::Core) {
+    use mobile_sentinel::permissions::{PermissionState, request, status};
+    const PERMISSION: &str = "android.permission.POST_NOTIFICATIONS";
+    let Some(dir) = core.media_dir().parent().map(Path::to_path_buf) else {
+        return;
+    };
+    let marker = dir.join("asked-notifications");
+    if marker.exists() || status(PERMISSION) != PermissionState::Denied {
+        return;
+    }
+    let _ = std::fs::write(&marker, b"1");
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        let _ = request(PERMISSION);
+    });
+}
+
 // ---- the Back button ----
 
 static BACK: OnceLock<(

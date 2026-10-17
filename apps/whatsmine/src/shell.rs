@@ -41,6 +41,12 @@ pub fn Shell() -> Element {
             crate::android::apply_texts(&s.locale);
             crate::android::apply_background(s.background);
         });
+        // Android 13+ needs the user's yes before any notification shows:
+        // ask once, a moment after the first screen is up.
+        {
+            let core = core.clone();
+            use_hook(move || crate::android::ask_for_notifications_once(&core));
+        }
         // A notification may have started the app: open what it asked for.
         use_hook(|| {
             spawn(async move {
@@ -75,7 +81,7 @@ pub fn Shell() -> Element {
 }
 
 #[cfg(target_os = "android")]
-fn open_requested(nav: Navigator) {
+fn open_requested(nav: dioxus::router::Navigator) {
     if let Some(what) = mobile_sentinel::background_service::take_open_request() {
         if let Some(chat) = what.strip_prefix("chat:") {
             nav.push(Route::Chat {
