@@ -42,7 +42,14 @@ fn start(dir: &std::path::Path, lookup: &MemoryLookup, name: &str) -> Core {
 
 async fn online_pair(
     lookup: &MemoryLookup,
-) -> (Core, Core, String, String, tempfile::TempDir, tempfile::TempDir) {
+) -> (
+    Core,
+    Core,
+    String,
+    String,
+    tempfile::TempDir,
+    tempfile::TempDir,
+) {
     let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let a = start(da.path(), lookup, "Alice");
     let b = start(db.path(), lookup, "Bob");
@@ -81,7 +88,10 @@ async fn call_lifecycle_with_media() {
 
     // Ring -> answer.
     let call = a.call_invite(&kb, true).unwrap();
-    let inc = call_event(&mut rb, "incoming", |e| matches!(e, CallEvent::Incoming { .. })).await;
+    let inc = call_event(&mut rb, "incoming", |e| {
+        matches!(e, CallEvent::Incoming { .. })
+    })
+    .await;
     assert_eq!(
         inc,
         CallEvent::Incoming {
@@ -91,8 +101,14 @@ async fn call_lifecycle_with_media() {
         }
     );
     b.call_answer(true);
-    call_event(&mut ra, "caller connected", |e| matches!(e, CallEvent::Connected { .. })).await;
-    call_event(&mut rb, "callee connected", |e| matches!(e, CallEvent::Connected { .. })).await;
+    call_event(&mut ra, "caller connected", |e| {
+        matches!(e, CallEvent::Connected { .. })
+    })
+    .await;
+    call_event(&mut rb, "callee connected", |e| {
+        matches!(e, CallEvent::Connected { .. })
+    })
+    .await;
 
     // Audio datagrams both ways, video frames both ways.
     for i in 0..10u32 {
@@ -116,17 +132,34 @@ async fn call_lifecycle_with_media() {
             }
         }
     };
-    tokio::time::timeout(WAIT, collect).await.expect("media arrives");
+    tokio::time::timeout(WAIT, collect)
+        .await
+        .expect("media arrives");
 
     // Camera toggle is announced.
     b.call_video_on(false);
-    call_event(&mut ra, "peer video off", |e| matches!(e, CallEvent::PeerVideo { on: false, .. })).await;
+    call_event(&mut ra, "peer video off", |e| {
+        matches!(e, CallEvent::PeerVideo { on: false, .. })
+    })
+    .await;
 
     // Hang up from the callee.
     b.call_end();
-    let ended = call_event(&mut ra, "caller sees end", |e| matches!(e, CallEvent::Ended { .. })).await;
-    assert!(matches!(ended, CallEvent::Ended { reason: CallEndReason::Hangup, .. }));
-    call_event(&mut rb, "callee sees end", |e| matches!(e, CallEvent::Ended { .. })).await;
+    let ended = call_event(&mut ra, "caller sees end", |e| {
+        matches!(e, CallEvent::Ended { .. })
+    })
+    .await;
+    assert!(matches!(
+        ended,
+        CallEvent::Ended {
+            reason: CallEndReason::Hangup,
+            ..
+        }
+    ));
+    call_event(&mut rb, "callee sees end", |e| {
+        matches!(e, CallEvent::Ended { .. })
+    })
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -137,31 +170,82 @@ async fn decline_busy_cancel_and_lost() {
 
     // Declined.
     a.call_invite(&kb, false).unwrap();
-    call_event(&mut rb, "incoming", |e| matches!(e, CallEvent::Incoming { video: false, .. })).await;
+    call_event(&mut rb, "incoming", |e| {
+        matches!(e, CallEvent::Incoming { video: false, .. })
+    })
+    .await;
     b.call_answer(false);
-    let ev = call_event(&mut ra, "declined", |e| matches!(e, CallEvent::Ended { .. })).await;
-    assert!(matches!(ev, CallEvent::Ended { reason: CallEndReason::Declined, .. }));
+    let ev = call_event(&mut ra, "declined", |e| {
+        matches!(e, CallEvent::Ended { .. })
+    })
+    .await;
+    assert!(matches!(
+        ev,
+        CallEvent::Ended {
+            reason: CallEndReason::Declined,
+            ..
+        }
+    ));
 
     // Cancelled while ringing: the callee sees a missed call.
     a.call_invite(&kb, false).unwrap();
-    call_event(&mut rb, "incoming 2", |e| matches!(e, CallEvent::Incoming { .. })).await;
+    call_event(&mut rb, "incoming 2", |e| {
+        matches!(e, CallEvent::Incoming { .. })
+    })
+    .await;
     a.call_end();
     let ev = call_event(&mut rb, "missed", |e| matches!(e, CallEvent::Ended { .. })).await;
-    assert!(matches!(ev, CallEvent::Ended { reason: CallEndReason::Missed, .. }));
-    let ev = call_event(&mut ra, "cancelled", |e| matches!(e, CallEvent::Ended { .. })).await;
-    assert!(matches!(ev, CallEvent::Ended { reason: CallEndReason::Cancelled, .. }));
+    assert!(matches!(
+        ev,
+        CallEvent::Ended {
+            reason: CallEndReason::Missed,
+            ..
+        }
+    ));
+    let ev = call_event(&mut ra, "cancelled", |e| {
+        matches!(e, CallEvent::Ended { .. })
+    })
+    .await;
+    assert!(matches!(
+        ev,
+        CallEvent::Ended {
+            reason: CallEndReason::Cancelled,
+            ..
+        }
+    ));
 
     // Busy: Bob is ringing, so his own attempt to call out is refused at once.
     a.call_invite(&kb, false).unwrap();
-    call_event(&mut rb, "incoming 3", |e| matches!(e, CallEvent::Incoming { .. })).await;
+    call_event(&mut rb, "incoming 3", |e| {
+        matches!(e, CallEvent::Incoming { .. })
+    })
+    .await;
     b.call_invite(&_ka, false).unwrap();
-    let ev = call_event(&mut rb, "busy", |e| matches!(e, CallEvent::Ended { reason: CallEndReason::Busy, .. })).await;
+    let ev = call_event(&mut rb, "busy", |e| {
+        matches!(
+            e,
+            CallEvent::Ended {
+                reason: CallEndReason::Busy,
+                ..
+            }
+        )
+    })
+    .await;
     assert!(matches!(ev, CallEvent::Ended { .. }));
 
     // Lost: the answered call ends when the connection goes away.
     b.call_answer(true);
-    call_event(&mut ra, "connected", |e| matches!(e, CallEvent::Connected { .. })).await;
+    call_event(&mut ra, "connected", |e| {
+        matches!(e, CallEvent::Connected { .. })
+    })
+    .await;
     a.shutdown();
     let ev = call_event(&mut rb, "lost", |e| matches!(e, CallEvent::Ended { .. })).await;
-    assert!(matches!(ev, CallEvent::Ended { reason: CallEndReason::Lost, .. }));
+    assert!(matches!(
+        ev,
+        CallEvent::Ended {
+            reason: CallEndReason::Lost,
+            ..
+        }
+    ));
 }

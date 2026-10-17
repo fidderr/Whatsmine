@@ -1621,3 +1621,121 @@ textarea {
   width: 64px;
   height: 64px;
 }
+
+/* ===== Calls ===== */
+#wm-call-media {
+  position: fixed;
+  inset: 0;
+  z-index: 1050;
+  display: none;
+  background: linear-gradient(160deg, #1b2a3a, #0c1118);
+}
+#wm-call-media.active {
+  display: block;
+}
+#wm-call-media .wm-remote {
+  display: none;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  background: #000;
+}
+#wm-call-media.has-remote .wm-remote {
+  display: block;
+}
+#wm-call-media .wm-local {
+  display: none;
+  position: absolute;
+  right: 12px;
+  top: calc(12px + var(--safe-top, 0px));
+  width: 96px;
+  height: 128px;
+  object-fit: cover;
+  border-radius: 12px;
+  border: 2px solid rgba(255, 255, 255, 0.5);
+  transform: scaleX(-1);
+  background: #000;
+  z-index: 2;
+}
+#wm-call-media.has-local .wm-local {
+  display: block;
+}
+#wm-call-media:not(.has-remote).has-local .wm-local {
+  width: 60%;
+  max-width: 280px;
+  height: auto;
+  aspect-ratio: 3 / 4;
+  right: auto;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%) scaleX(-1);
+}
+
+.call-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+  padding: calc(48px + var(--safe-top, 0px)) 24px calc(40px + var(--safe-bottom, 0px));
+  background: linear-gradient(160deg, #1b2a3a, #0c1118);
+  color: white;
+  text-align: center;
+}
+.call-overlay.video-live {
+  background: transparent;
+  pointer-events: none;
+}
+.call-overlay.video-live .call-controls,
+.call-overlay.video-live .call-top {
+  pointer-events: auto;
+}
+.call-top {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+.call-avatar {
+  margin-bottom: 16px;
+}
+.call-name {
+  font-size: 26px;
+  font-weight: 700;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+}
+.call-status {
+  font-size: 16px;
+  opacity: 0.85;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+}
+.call-controls {
+  display: flex;
+  gap: 28px;
+  align-items: center;
+  justify-content: center;
+}
+.call-btn {
+  width: 68px;
+  height: 68px;
+  border-radius: 50%;
+  border: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  cursor: pointer;
+  background: rgba(255, 255, 255, 0.18);
+}
+.call-btn.toggle.on {
+  background: white;
+  color: #111;
+}
+.call-btn.decline {
+  background: #e5484d;
+}
+.call-btn.accept {
+  background: #2fb344;
+}

@@ -44,6 +44,35 @@ async fn main() -> anyhow::Result<()> {
     println!("your key: {}", core.my_key());
     println!("/help for commands");
 
+    // Calls: whatever media arrives is echoed back, and counted, so a phone
+    // calling this peer hears and sees itself and the test can tell that
+    // every stage of the pipeline worked.
+    if let Some(mut media) = core.take_call_media() {
+        let echo = core.clone();
+        tokio::spawn(async move {
+            use whatsmine_core::calls::MediaKind;
+            let (mut audio, mut video, mut bytes) = (0u64, 0u64, 0u64);
+            let mut last = std::time::Instant::now();
+            while let Some(m) = media.recv().await {
+                bytes += m.data.len() as u64;
+                match m.kind {
+                    MediaKind::Audio => {
+                        audio += 1;
+                        echo.call_audio(m.ts, m.data);
+                    }
+                    MediaKind::Video => {
+                        video += 1;
+                        echo.call_video(m.ts, m.key, m.data);
+                    }
+                }
+                if last.elapsed() >= std::time::Duration::from_secs(2) {
+                    println!("  · call media in: {audio} audio, {video} video, {bytes} bytes");
+                    last = std::time::Instant::now();
+                }
+            }
+        });
+    }
+
     let mut events = core.subscribe();
     let ev_core = core.clone();
     tokio::spawn(async move {
@@ -175,6 +204,14 @@ fn run(
                 core.set_avatar(std::path::Path::new(&format!("{a1} {a2}").trim()))?;
             }
         }
+        "call" => {
+            let id = need(a1)?;
+            core.call_invite(&id, a2 == "video")?;
+            println!("· calling…");
+        }
+        "answer" => core.call_answer(true),
+        "refuse" => core.call_answer(false),
+        "hangup" => core.call_end(),
         "chats" => {
             for c in core.chats() {
                 let online = if core.is_online(&c.contact.id) {
@@ -201,7 +238,7 @@ fn run(
         "help" => println!(
             "/whoami  /name <name>  /add <key> [nick]  /accept <who> [nick]  /decline <who>\n\
              /block <who>  /rename <who> <nick>  /open <who>  /to <who> <text>  /read\n\
-             /chats  /quit      <who> = nickname, name or key prefix; plain text → current chat"
+             /chats  /quit  /call <who> [video]  /answer  /refuse  /hangup      <who> = nickname, name or key prefix; plain text → current chat"
         ),
         _ => anyhow::bail!("unknown command, try /help"),
     }
@@ -293,6 +330,27 @@ fn print_event(core: &Core, ev: &CoreEvent) {
         ),
         CoreEvent::Accepted { contact_id } => {
             println!("· {} accepted — you can chat", label(core, contact_id))
+        }
+        CoreEvent::Call(e) => {
+            use whatsmine_core::calls::CallEvent;
+            match e {
+                CallEvent::Incoming {
+                    contact_id, video, ..
+                } => println!(
+                    "☎ incoming {} call from {} — /answer or /refuse",
+                    if *video { "video" } else { "voice" },
+                    label(core, contact_id)
+                ),
+                CallEvent::Connected { .. } => println!("☎ call connected"),
+                CallEvent::PeerVideo { on, .. } => {
+                    println!("☎ their camera is {}", if *on { "on" } else { "off" })
+                }
+                CallEvent::Ended {
+                    reason,
+                    duration_ms,
+                    ..
+                } => println!("☎ call ended: {reason:?} after {} s", duration_ms / 1000),
+            }
         }
         CoreEvent::Net(s) => println!(
             "· network: {}",

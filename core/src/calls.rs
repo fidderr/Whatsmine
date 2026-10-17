@@ -22,9 +22,7 @@ use iroh::PublicKey;
 use iroh::endpoint::{Connection, RecvStream};
 use tokio::sync::mpsc;
 
-use crate::protocol::{
-    AUDIO_DATAGRAM_MAGIC, MAX_VIDEO_FRAME, VIDEO_STREAM_MAGIC, id_from_bytes,
-};
+use crate::protocol::{AUDIO_DATAGRAM_MAGIC, MAX_VIDEO_FRAME, VIDEO_STREAM_MAGIC, id_from_bytes};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaKind {
@@ -143,7 +141,8 @@ pub(crate) async fn receive_video(
     }
     let ts = u32::from_be_bytes(header[20..24].try_into().expect("4 bytes"));
     let flags = u32::from_be_bytes(header[24..28].try_into().expect("4 bytes"));
-    let read = tokio::time::timeout(Duration::from_secs(5), recv.read_to_end(MAX_VIDEO_FRAME)).await;
+    let read =
+        tokio::time::timeout(Duration::from_secs(5), recv.read_to_end(MAX_VIDEO_FRAME)).await;
     let Ok(Ok(data)) = read else {
         let _ = recv.stop(1u32.into());
         return;

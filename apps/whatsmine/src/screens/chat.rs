@@ -4,6 +4,7 @@ use whatsmine_core::{ContactState, Core, Message};
 use crate::app::{
     MsgRev, Rev, Route, SettingsSig, ToastSig, Translations, Typing, t, toast, use_core, use_tr,
 };
+use crate::call::{self, CallBridge, CallUi};
 use crate::components::{
     AttachmentView, Avatar, CameraMode, CameraOverlay, Icon, IconName, ImageViewer, ToastLevel,
     VoiceBar, open_file, save_file,
@@ -70,6 +71,8 @@ fn ChatView(id: String) -> Element {
     let typing = use_context::<Typing>().0;
     let settings = use_context::<SettingsSig>().0;
     let mut toast_sig = use_context::<ToastSig>();
+    let bridge = use_context::<CallBridge>();
+    let call_phase = use_context::<CallUi>().0;
     let nav = use_navigator();
 
     let mut limit = use_signal(|| PAGE);
@@ -274,6 +277,30 @@ fn ChatView(id: String) -> Element {
                         if !status.is_empty() {
                             span { class: if live { "chat-peer-status live" } else { "chat-peer-status" }, "{status}" }
                         }
+                    }
+                }
+                if contact.state == ContactState::Accepted {
+                    button {
+                        class: "header-icon-btn call-start",
+                        aria_label: "{t(&tr, \"call.voice\")}",
+                        onclick: {
+                            let (core, id, bridge) = (core.clone(), id.clone(), bridge.clone());
+                            move |_| {
+                                call::start_call(&core, &id, false, call_phase, &bridge, &mut toast_sig, &tr)
+                            }
+                        },
+                        Icon { name: IconName::Phone, size: 20 }
+                    }
+                    button {
+                        class: "header-icon-btn call-start-video",
+                        aria_label: "{t(&tr, \"call.video\")}",
+                        onclick: {
+                            let (core, id, bridge) = (core.clone(), id.clone(), bridge.clone());
+                            move |_| {
+                                call::start_call(&core, &id, true, call_phase, &bridge, &mut toast_sig, &tr)
+                            }
+                        },
+                        Icon { name: IconName::Video, size: 20 }
                     }
                 }
             }

@@ -9,6 +9,7 @@ use whatsmine_core::{
     Core, CoreEvent, DbRecovery, NetMode, NetStatus, Settings, TransferState, paths,
 };
 
+use crate::call::{self, CallOverlay, CallUi, Phase};
 use crate::components::{Toast, ToastLevel, ToastMessage};
 use crate::i18n;
 use crate::screens::{AddContact, Chat, Chats, ContactInfo, Onboarding, Requests, SettingsScreen};
@@ -142,6 +143,11 @@ fn Main(core: AppCore) -> Element {
     use_context_provider(|| Transfers(transfers));
     use_context_provider(|| toast_sig);
 
+    let call_phase = use_signal(|| Phase::Idle);
+    use_context_provider(|| CallUi(call_phase));
+    let bridge = call::use_call_bridge(&core.0, call_phase, toast_sig, translations);
+    use_context_provider(|| bridge.clone());
+
     crate::media_server::use_media_server(core.0.clone());
     use_hook(|| {
         let core = core.0.clone();
@@ -160,8 +166,10 @@ fn Main(core: AppCore) -> Element {
 
     // Pump core events into signals.
     let pump_core = core.0.clone();
+    let pump_bridge = bridge.clone();
     use_future(move || {
         let core = pump_core.clone();
+        let bridge = pump_bridge.clone();
         async move {
             use tokio::sync::broadcast::error::RecvError;
             let mut rx = core.subscribe();
@@ -230,6 +238,14 @@ fn Main(core: AppCore) -> Element {
                         }
                         *rev.write() += 1;
                     }
+                    Ok(CoreEvent::Call(ev)) => call::on_event(
+                        ev,
+                        &core,
+                        call_phase,
+                        &bridge,
+                        &mut toast_sig,
+                        &translations,
+                    ),
                     Ok(CoreEvent::Net(status)) => net.set(status),
                     Ok(_) => *rev.write() += 1,
                     Err(RecvError::Lagged(_)) => {
@@ -282,6 +298,7 @@ fn Main(core: AppCore) -> Element {
             } else {
                 Onboarding {}
             }
+            CallOverlay {}
             if let Some(msg) = toast_sig.read().clone() {
                 Toast {
                     msg,

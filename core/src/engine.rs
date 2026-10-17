@@ -177,6 +177,7 @@ fn emit(events: &broadcast::Sender<CoreEvent>, ev: CoreEvent) {
 }
 
 impl Engine {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn run(
         db: Arc<Database>,
         key: SecretKey,
@@ -477,7 +478,11 @@ impl Engine {
     }
 
     fn call_answer(&mut self, accept: bool) {
-        let Some(c) = self.call.as_mut().filter(|c| !c.outgoing && c.connected.is_none()) else {
+        let Some(c) = self
+            .call
+            .as_mut()
+            .filter(|c| !c.outgoing && c.connected.is_none())
+        else {
             return;
         };
         let (peer, call) = (c.peer, c.id);
@@ -571,11 +576,9 @@ impl Engine {
                 });
             }
             Frame::CallAnswer { call, result } => {
-                let Some(c) = self
-                    .call
-                    .as_mut()
-                    .filter(|c| c.id == call && c.peer == peer && c.outgoing && c.connected.is_none())
-                else {
+                let Some(c) = self.call.as_mut().filter(|c| {
+                    c.id == call && c.peer == peer && c.outgoing && c.connected.is_none()
+                }) else {
                     return;
                 };
                 match result {
@@ -591,7 +594,11 @@ impl Engine {
                 }
             }
             Frame::CallEnd { call } => {
-                let Some(c) = self.call.as_ref().filter(|c| c.id == call && c.peer == peer) else {
+                let Some(c) = self
+                    .call
+                    .as_ref()
+                    .filter(|c| c.id == call && c.peer == peer)
+                else {
                     return;
                 };
                 let reason = if !c.outgoing && c.connected.is_none() {
@@ -601,13 +608,16 @@ impl Engine {
                 };
                 self.end_call(reason);
             }
-            Frame::CallVideo { call, on } => {
-                if self.call.as_ref().is_some_and(|c| c.id == call && c.peer == peer) {
-                    self.emit_call(CallEvent::PeerVideo {
-                        call_id: id_from_bytes(&call),
-                        on,
-                    });
-                }
+            Frame::CallVideo { call, on }
+                if self
+                    .call
+                    .as_ref()
+                    .is_some_and(|c| c.id == call && c.peer == peer) =>
+            {
+                self.emit_call(CallEvent::PeerVideo {
+                    call_id: id_from_bytes(&call),
+                    on,
+                });
             }
             _ => {}
         }
@@ -1471,15 +1481,16 @@ fn spawn_file_acceptor(
                 }
                 let progress_tx = tx.clone();
                 let contact_id = ctx.peer_id.clone();
-                let (message_id, result) = files::receive(recv, header, &ctx, move |id, done, total| {
-                    let _ = progress_tx.send(Internal::Progress {
-                        contact_id: contact_id.clone(),
-                        message_id: id.to_string(),
-                        done,
-                        total,
-                    });
-                })
-                .await;
+                let (message_id, result) =
+                    files::receive(recv, header, &ctx, move |id, done, total| {
+                        let _ = progress_tx.send(Internal::Progress {
+                            contact_id: contact_id.clone(),
+                            message_id: id.to_string(),
+                            done,
+                            total,
+                        });
+                    })
+                    .await;
                 let _ = tx.send(Internal::Download {
                     peer,
                     message_id,
