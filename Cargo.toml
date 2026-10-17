@@ -24,3 +24,5 @@ codegen-units = 1
 inherits = "dev"
 opt-level = 2
 debug = "line-tables-only"
+# no dev-server hot-reload client or toast overlay in on-device builds
+debug-assertions = false
