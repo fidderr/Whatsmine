@@ -209,6 +209,46 @@ fn run(
             core.call_invite(&id, a2 == "video")?;
             println!("· calling…");
         }
+        "newgroup" => {
+            let members: Vec<String> = a2
+                .split_whitespace()
+                .map(&need)
+                .collect::<anyhow::Result<_>>()?;
+            let g = core.create_group(a1, &members)?;
+            *current = Some(g.id.clone());
+            println!("· group {} created ({})", g.display_name(), g.id);
+        }
+        "gadd" => {
+            core.group_add(&need(a1)?, &need(a2)?)?;
+        }
+        "gremove" => {
+            core.group_remove(&need(a1)?, &need(a2)?)?;
+        }
+        "grename" => {
+            core.group_rename(&need(a1)?, a2)?;
+        }
+        "gleave" => core.leave_group(&need(a1)?)?,
+        "gdelete" => core.delete_contact(&need(a1)?)?,
+        "gjoin" => core.call_join(&need(a1)?),
+        "ginfo" => {
+            let id = need(a1)?;
+            let info = core
+                .group_info(&id)
+                .ok_or_else(|| anyhow::anyhow!("not a group"))?;
+            println!(
+                "· group {} active:{} admin:{}",
+                info.name, info.active, info.i_am_admin
+            );
+            for m in info.members {
+                println!(
+                    "    {}{}{} {}",
+                    m.name,
+                    if m.is_me { " (me)" } else { "" },
+                    if m.is_admin { " (admin)" } else { "" },
+                    if m.online { "online" } else { "" }
+                );
+            }
+        }
         "answer" => core.call_answer(true),
         "refuse" => core.call_answer(false),
         "hangup" => core.call_end(),
@@ -238,7 +278,9 @@ fn run(
         "help" => println!(
             "/whoami  /name <name>  /add <key> [nick]  /accept <who> [nick]  /decline <who>\n\
              /block <who>  /rename <who> <nick>  /open <who>  /to <who> <text>  /read\n\
-             /chats  /quit  /call <who> [video]  /answer  /refuse  /hangup      <who> = nickname, name or key prefix; plain text → current chat"
+             /chats  /quit  /call <who|group> [video]  /answer  /refuse  /hangup\n\
+             /newgroup <name> <who>...  /gadd <group> <who>  /gremove <group> <who>  /grename <group> <name>\n\
+             /gleave <group>  /gdelete <group>  /ginfo <group>  /gjoin <group>  (groups work with /to and /file too)       <who> = nickname, name or key prefix; plain text → current chat"
         ),
         _ => anyhow::bail!("unknown command, try /help"),
     }
@@ -275,6 +317,8 @@ fn label(core: &Core, id: &str) -> String {
 fn print_message(core: &Core, m: &whatsmine_core::Message) {
     let who = if m.outgoing {
         "me".to_string()
+    } else if let Some(sender) = &m.sender {
+        format!("{} in {}", label(core, sender), label(core, &m.contact_id))
     } else {
         label(core, &m.contact_id)
     };
@@ -334,6 +378,21 @@ fn print_event(core: &Core, ev: &CoreEvent) {
         CoreEvent::Call(e) => {
             use whatsmine_core::calls::CallEvent;
             match e {
+                CallEvent::Participants { peers, .. } => println!(
+                    "☎ in the call: {}",
+                    peers
+                        .iter()
+                        .map(|p| label(core, p))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                CallEvent::GroupCall {
+                    group_id, active, ..
+                } => println!(
+                    "☎ group call in {} is {}",
+                    label(core, group_id),
+                    if *active { "going on (/gjoin)" } else { "over" }
+                ),
                 CallEvent::Incoming {
                     contact_id, video, ..
                 } => println!(
@@ -342,9 +401,11 @@ fn print_event(core: &Core, ev: &CoreEvent) {
                     label(core, contact_id)
                 ),
                 CallEvent::Connected { .. } => println!("☎ call connected"),
-                CallEvent::PeerVideo { on, .. } => {
-                    println!("☎ their camera is {}", if *on { "on" } else { "off" })
-                }
+                CallEvent::PeerVideo { on, from, .. } => println!(
+                    "☎ {}'s camera is {}",
+                    label(core, from),
+                    if *on { "on" } else { "off" }
+                ),
                 CallEvent::Ended {
                     reason,
                     duration_ms,

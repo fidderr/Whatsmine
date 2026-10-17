@@ -22,6 +22,7 @@ pub fn Avatar(
     #[props(default)] size: String,
     #[props(default)] online: bool,
     #[props(default)] image: Option<String>,
+    #[props(default)] group: bool,
 ) -> Element {
     let mut broken = use_signal(|| false);
     let initial = name
@@ -40,7 +41,11 @@ pub fn Avatar(
         div {
             class: "avatar {size}",
             style: "background: hsl({hue}, 50%, 42%);",
-            "{initial}"
+            if group {
+                super::Icon { name: super::IconName::Users, size: if size == "large" { 44 } else { 22 } }
+            } else {
+                "{initial}"
+            }
             if let (Some(src), false) = (src, broken()) {
                 img {
                     class: "avatar-img",

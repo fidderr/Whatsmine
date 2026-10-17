@@ -570,18 +570,17 @@ impl Engine {
                     self.call_peer_gone(peer, false);
                 }
             }
-            Frame::CallVideo { call, on } => {
+            Frame::CallVideo { call, on }
                 if self
                     .call
                     .as_ref()
-                    .is_some_and(|c| c.id == call && c.peers.contains(&peer))
-                {
-                    self.emit_call(CallEvent::PeerVideo {
-                        call_id: id_from_bytes(&call),
-                        from: id,
-                        on,
-                    });
-                }
+                    .is_some_and(|c| c.id == call && c.peers.contains(&peer)) =>
+            {
+                self.emit_call(CallEvent::PeerVideo {
+                    call_id: id_from_bytes(&call),
+                    from: id,
+                    on,
+                });
             }
             _ => {}
         }

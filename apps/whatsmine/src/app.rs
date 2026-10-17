@@ -12,7 +12,10 @@ use whatsmine_core::{
 use crate::call::{self, CallOverlay, CallUi, Phase};
 use crate::components::{Toast, ToastLevel, ToastMessage};
 use crate::i18n;
-use crate::screens::{AddContact, Chat, Chats, ContactInfo, Onboarding, Requests, SettingsScreen};
+use crate::screens::{
+    AddContact, Chat, Chats, ContactInfo, GroupInfoScreen, NewGroup, Onboarding, Requests,
+    SettingsScreen,
+};
 
 pub type Translations = Signal<HashMap<String, String>>;
 
@@ -37,6 +40,10 @@ pub enum Route {
     Requests {},
     #[route("/contact/:id")]
     ContactInfo { id: String },
+    #[route("/group/new")]
+    NewGroup {},
+    #[route("/group/:id")]
+    GroupInfoScreen { id: String },
     #[route("/settings")]
     SettingsScreen {},
 }
@@ -238,14 +245,17 @@ fn Main(core: AppCore) -> Element {
                         }
                         *rev.write() += 1;
                     }
-                    Ok(CoreEvent::Call(ev)) => call::on_event(
-                        ev,
-                        &core,
-                        call_phase,
-                        &bridge,
-                        &mut toast_sig,
-                        &translations,
-                    ),
+                    Ok(CoreEvent::Call(ev)) => {
+                        call::on_event(
+                            ev,
+                            &core,
+                            call_phase,
+                            &bridge,
+                            &mut toast_sig,
+                            &translations,
+                        );
+                        *rev.write() += 1;
+                    }
                     Ok(CoreEvent::Net(status)) => net.set(status),
                     Ok(_) => *rev.write() += 1,
                     Err(RecvError::Lagged(_)) => {

@@ -1633,14 +1633,53 @@ textarea {
 #wm-call-media.active {
   display: block;
 }
-#wm-call-media .wm-remote {
+#wm-call-media .wm-tiles {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  grid-auto-rows: 1fr;
+  gap: 2px;
+}
+#wm-call-media .wm-tile {
+  position: relative;
+  overflow: hidden;
+  background: transparent;
+}
+#wm-call-media .wm-tile video {
   display: none;
   width: 100%;
   height: 100%;
   object-fit: cover;
   background: #000;
 }
-#wm-call-media.has-remote .wm-remote {
+#wm-call-media .wm-tile.cam video {
+  display: block;
+}
+#wm-call-media .wm-letter {
+  display: none;
+  position: absolute;
+  inset: 0;
+  align-items: center;
+  justify-content: center;
+  font-size: 56px;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.85);
+}
+#wm-call-media.group .wm-tile:not(.cam) .wm-letter {
+  display: flex;
+}
+#wm-call-media .wm-label {
+  display: none;
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.5);
+  color: white;
+  font-size: 13px;
+}
+#wm-call-media.group .wm-label {
   display: block;
 }
 #wm-call-media .wm-local {
@@ -1660,7 +1699,7 @@ textarea {
 #wm-call-media.has-local .wm-local {
   display: block;
 }
-#wm-call-media:not(.has-remote).has-local .wm-local {
+#wm-call-media:not(.peer-cam):not(.group).has-local .wm-local {
   width: 60%;
   max-width: 280px;
   height: auto;
@@ -1738,4 +1777,52 @@ textarea {
 }
 .call-btn.accept {
   background: #2fb344;
+}
+
+/* ===== Groups ===== */
+.secondary-fab {
+  bottom: calc(var(--nav-height) + 96px + var(--safe-bottom));
+  width: 44px;
+  height: 44px;
+  right: calc(30px + var(--safe-right));
+  background: var(--surface);
+  color: var(--primary);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+}
+.card.pick {
+  cursor: pointer;
+  align-items: center;
+}
+.card.pick.on {
+  outline: 2px solid var(--primary);
+}
+.card.member {
+  align-items: center;
+}
+.bubble-sender {
+  font-size: 12px;
+  font-weight: 700;
+  margin-bottom: 2px;
+}
+.call-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 14px;
+  background: #2fb344;
+  color: white;
+  font-size: 14px;
+}
+.call-join {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: none;
+  border-radius: 16px;
+  padding: 6px 12px;
+  background: white;
+  color: #1c7a2c;
+  font-weight: 700;
+  cursor: pointer;
 }

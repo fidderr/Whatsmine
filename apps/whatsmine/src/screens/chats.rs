@@ -1,5 +1,5 @@
 use dioxus::prelude::*;
-use whatsmine_core::{ChatSummary, ContactState, MediaKind, MessageStatus};
+use whatsmine_core::{ChatSummary, ContactKind, ContactState, MediaKind, MessageStatus};
 
 use crate::app::{Rev, Route, Typing, t, use_core, use_tr};
 use crate::components::{Avatar, BottomNav, Icon, IconName, NetBanner, Tab};
@@ -62,6 +62,14 @@ pub fn Chats() -> Element {
                 }
             }
             button {
+                class: "fab secondary-fab",
+                title: "{t(&tr, \"group.new\")}",
+                onclick: move |_| {
+                    nav.push(Route::NewGroup {});
+                },
+                Icon { name: IconName::Users, size: 22 }
+            }
+            button {
                 class: "fab",
                 title: "{t(&tr, \"add.title\")}",
                 onclick: move |_| {
@@ -81,8 +89,20 @@ fn ChatRow(chat: ChatSummary) -> Element {
     let typing = use_context::<Typing>().0;
     let c = &chat.contact;
     let name = c.display_name();
-    let online = core.is_online(&c.id);
+    let is_group = c.kind == ContactKind::Group;
+    let online = !is_group && core.is_online(&c.id);
     let is_typing = typing.read().contains_key(&c.id);
+    // In a group, say who wrote the last message.
+    let author = chat
+        .last_message
+        .as_ref()
+        .and_then(|m| m.sender.as_ref())
+        .map(|s| {
+            core.contact(s)
+                .map(|c| c.display_name())
+                .unwrap_or_default()
+        })
+        .filter(|n| !n.is_empty());
     let time = chat
         .last_message
         .as_ref()
@@ -92,7 +112,13 @@ fn ChatRow(chat: ChatSummary) -> Element {
 
     rsx! {
         Link { to: Route::Chat { id: c.id.clone() }, class: "card",
-            Avatar { id: c.id.clone(), name: name.clone(), online, image: c.avatar.clone() }
+            Avatar {
+                id: c.id.clone(),
+                name: name.clone(),
+                online,
+                image: c.avatar.clone(),
+                group: is_group,
+            }
             div { class: "card-main",
                 div { class: "card-row",
                     span { class: "card-title", "{name}" }
@@ -107,6 +133,9 @@ fn ChatRow(chat: ChatSummary) -> Element {
                         span { class: "card-sub",
                             if m.outgoing {
                                 StatusTicks { status: m.status }
+                            }
+                            if let Some(a) = author.clone() {
+                                "{a}: "
                             }
                             Preview { message: m.clone() }
                         }

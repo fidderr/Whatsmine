@@ -1,10 +1,10 @@
 use dioxus::prelude::*;
-use whatsmine_core::{ContactState, Core, Message};
+use whatsmine_core::{ContactKind, ContactState, Core, Message};
 
 use crate::app::{
     MsgRev, Rev, Route, SettingsSig, ToastSig, Translations, Typing, t, toast, use_core, use_tr,
 };
-use crate::call::{self, CallBridge, CallUi};
+use crate::call::{self, CallBridge, CallUi, Phase};
 use crate::components::{
     AttachmentView, Avatar, CameraMode, CameraOverlay, Icon, IconName, ImageViewer, ToastLevel,
     VoiceBar, open_file, save_file,
@@ -126,11 +126,38 @@ fn ChatView(id: String) -> Element {
     let messages = core.messages(&id, None, limit());
     let has_more = messages.len() as u32 >= limit();
     let name = contact.display_name();
-    let online = core.is_online(&id);
+    let is_group = contact.kind == ContactKind::Group;
+    let group_info = if is_group { core.group_info(&id) } else { None };
+    let can_write = !is_group || group_info.as_ref().is_some_and(|g| g.active);
+    let call_ready = if is_group {
+        can_write
+    } else {
+        contact.state == ContactState::Accepted
+    };
+    let ongoing_call = if is_group { core.group_call(&id) } else { None };
+    let group_status = group_info.as_ref().map(|g| {
+        if g.active {
+            t(&tr, "group.status")
+                .replace("{n}", &g.members.len().to_string())
+                .replace(
+                    "{online}",
+                    &g.members
+                        .iter()
+                        .filter(|m| m.online || m.is_me)
+                        .count()
+                        .to_string(),
+                )
+        } else {
+            t(&tr, "group.inactive_short")
+        }
+    });
+    let online = !is_group && core.is_online(&id);
     let is_typing = typing.read().contains_key(&id);
     let show_last_seen = settings.read().share_last_seen;
 
-    let (status, live) = if is_typing {
+    let (status, live) = if let Some(s) = group_status {
+        (s, false)
+    } else if is_typing {
         (t(&tr, "chat.typing"), true)
     } else if contact.state == ContactState::PendingOut {
         (t(&tr, "chat.waiting"), false)
@@ -263,7 +290,11 @@ fn ChatView(id: String) -> Element {
                 div {
                     class: "chat-peer",
                     onclick: move |_| {
-                        nav.push(Route::ContactInfo { id: contact_id.clone() });
+                        if is_group {
+                            nav.push(Route::GroupInfoScreen { id: contact_id.clone() });
+                        } else {
+                            nav.push(Route::ContactInfo { id: contact_id.clone() });
+                        }
                     },
                     Avatar {
                         id: id.clone(),
@@ -271,6 +302,7 @@ fn ChatView(id: String) -> Element {
                         size: "small",
                         online,
                         image: contact.avatar.clone(),
+                        group: is_group,
                     }
                     div { class: "chat-peer-text",
                         span { class: "chat-peer-name", "{name}" }
@@ -279,7 +311,7 @@ fn ChatView(id: String) -> Element {
                         }
                     }
                 }
-                if contact.state == ContactState::Accepted {
+                if call_ready {
                     button {
                         class: "header-icon-btn call-start",
                         aria_label: "{t(&tr, \"call.voice\")}",
@@ -304,6 +336,20 @@ fn ChatView(id: String) -> Element {
                     }
                 }
             }
+            if ongoing_call.is_some() && *call_phase.read() == Phase::Idle {
+                div { class: "call-banner",
+                    span { "{t(&tr, \"group.call_going\")}" }
+                    button {
+                        class: "call-join",
+                        onclick: {
+                            let (core, id) = (core.clone(), id.clone());
+                            move |_| core.call_join(&id)
+                        },
+                        Icon { name: IconName::Phone, size: 16 }
+                        "{t(&tr, \"group.join_call\")}"
+                    }
+                }
+            }
             div { id: "msgs", class: "messages",
                 if has_more {
                     button {
@@ -325,6 +371,15 @@ fn ChatView(id: String) -> Element {
                         }
                         Bubble {
                             message: m.clone(),
+                            sender: m.sender.as_ref().map(|s| {
+                                let name = group_info
+                                    .as_ref()
+                                    .and_then(|g| g.members.iter().find(|x| x.id == *s))
+                                    .map(|x| x.name.clone())
+                                    .or_else(|| core.contact(s).map(|c| c.display_name()))
+                                    .unwrap_or_default();
+                                (s.clone(), name)
+                            }),
                             on_menu: move |m| menu.set(Some(m)),
                             on_view: {
                                 let core = view_core.clone();
@@ -334,7 +389,9 @@ fn ChatView(id: String) -> Element {
                     }
                 }
             }
-            if recording() {
+            if !can_write {
+                div { class: "pending-note", "{t(&tr, \"group.inactive\")}" }
+            } else if recording() {
                 VoiceBar {
                     on_send: move |file: Picked| {
                         recording.set(false);
@@ -476,6 +533,7 @@ fn ChatView(id: String) -> Element {
 #[component]
 fn Bubble(
     message: Message,
+    #[props(default)] sender: Option<(String, String)>,
     on_menu: EventHandler<Message>,
     on_view: EventHandler<String>,
 ) -> Element {
@@ -495,6 +553,13 @@ fn Bubble(
                 e.prevent_default();
                 on_menu.call(m.clone());
             },
+            if let Some((sid, sname)) = sender.clone() {
+                div {
+                    class: "bubble-sender",
+                    style: "color: hsl({sender_hue(&sid)}, 60%, 55%);",
+                    "{sname}"
+                }
+            }
             if has_media {
                 AttachmentView { message: message.clone(), on_view }
                 if !message.body.is_empty() {
@@ -519,6 +584,13 @@ fn Bubble(
             }
         }
     }
+}
+
+/// A stable colour for each person in a group chat.
+fn sender_hue(id: &str) -> u32 {
+    id.bytes()
+        .fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32))
+        % 360
 }
 
 #[component]

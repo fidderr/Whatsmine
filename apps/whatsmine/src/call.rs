@@ -1,4 +1,4 @@
-//! Voice and video calls in the app.
+//! Voice and video calls in the app, 1:1 and group.
 //!
 //! The core does signalling and moves opaque media packets over the network.
 //! The page (see `call.js`) captures, encodes, decodes and plays them. This
@@ -26,15 +26,19 @@ pub enum Phase {
     },
     Incoming {
         contact_id: String,
+        from: String,
         video: bool,
     },
     Active {
         contact_id: String,
-        call_id: String,
         since: i64,
         my_cam: bool,
-        peer_cam: bool,
+        /// Everyone else who is in the call.
+        peers: Vec<String>,
+        /// Those of them whose camera is on.
+        cams: Vec<String>,
         muted: bool,
+        group: bool,
     },
 }
 
@@ -128,7 +132,9 @@ pub fn use_call_bridge(
                     MediaKind::Audio => "a",
                     MediaKind::Video => "v",
                 };
-                bridge.send(json!({ "t": t, "ts": m.ts, "key": m.key, "d": B64.encode(&m.data) }));
+                bridge.send(json!({
+                    "t": t, "from": m.from, "ts": m.ts, "key": m.key, "d": B64.encode(&m.data)
+                }));
             }
         }
     });
@@ -153,10 +159,17 @@ pub fn on_event(
 ) {
     match ev {
         CallEvent::Incoming {
-            contact_id, video, ..
+            contact_id,
+            from,
+            video,
+            ..
         } => {
             bridge.send(json!({ "t": "ring", "kind": "in" }));
-            phase.set(Phase::Incoming { contact_id, video });
+            phase.set(Phase::Incoming {
+                contact_id,
+                from,
+                video,
+            });
         }
         CallEvent::Connected {
             call_id,
@@ -166,23 +179,40 @@ pub fn on_event(
                 Phase::Outgoing { video, .. } | Phase::Incoming { video, .. } => *video,
                 _ => false,
             };
+            let group = contact_id.starts_with("g:");
             bridge.send(json!({ "t": "ring", "kind": Value::Null }));
-            bridge.send(json!({ "t": "start", "call": call_id, "video": video }));
+            bridge.send(json!({ "t": "start", "call": call_id, "video": video, "group": group }));
             phase.set(Phase::Active {
                 contact_id,
-                call_id,
                 since: now_ms(),
                 my_cam: false,
-                peer_cam: false,
+                peers: Vec::new(),
+                cams: Vec::new(),
                 muted: false,
+                group,
             });
         }
-        CallEvent::PeerVideo { on, .. } => {
-            if let Phase::Active { peer_cam, .. } = &mut *phase.write() {
-                *peer_cam = on;
+        CallEvent::Participants { peers: now, .. } => {
+            let named: Vec<Value> = now
+                .iter()
+                .map(|p| json!({ "id": p, "name": name_of(core, p) }))
+                .collect();
+            if let Phase::Active { peers, cams, .. } = &mut *phase.write() {
+                cams.retain(|c| now.contains(c));
+                *peers = now;
             }
-            bridge.send(json!({ "t": "peerVideo", "on": on }));
+            bridge.send(json!({ "t": "peers", "peers": named }));
         }
+        CallEvent::PeerVideo { from, on, .. } => {
+            if let Phase::Active { cams, .. } = &mut *phase.write() {
+                cams.retain(|c| *c != from);
+                if on {
+                    cams.push(from.clone());
+                }
+            }
+            bridge.send(json!({ "t": "peerVideo", "from": from, "on": on }));
+        }
+        CallEvent::GroupCall { .. } => {}
         CallEvent::Ended {
             contact_id, reason, ..
         } => {
@@ -210,7 +240,7 @@ pub fn on_event(
     }
 }
 
-/// Rings a contact. Returns whether the call was started.
+/// Rings a contact, or everyone online in a group.
 pub fn start_call(
     core: &Core,
     contact_id: &str,
@@ -270,32 +300,45 @@ pub fn CallOverlay() -> Element {
     let (contact_id, status, video_ui) = match &current {
         Phase::Idle => return rsx! {},
         Phase::Outgoing { contact_id, .. } => (contact_id.clone(), t(&tr, "call.calling"), false),
-        Phase::Incoming { contact_id, video } => (
-            contact_id.clone(),
-            t(
+        Phase::Incoming {
+            contact_id,
+            from,
+            video,
+        } => {
+            let mut s = t(
                 &tr,
                 if *video {
                     "call.incoming_video"
                 } else {
                     "call.incoming_voice"
                 },
-            ),
-            false,
-        ),
+            );
+            if contact_id != from {
+                s = format!("{s} · {}", name_of(&core, from));
+            }
+            (contact_id.clone(), s, false)
+        }
         Phase::Active {
             contact_id,
             since,
             my_cam,
-            peer_cam,
+            cams,
+            peers,
+            group,
             ..
-        } => (
-            contact_id.clone(),
-            clock(now() - since),
-            *my_cam || *peer_cam,
-        ),
+        } => {
+            let mut s = clock(now() - since);
+            if *group {
+                s = format!("{s} · {}", peers.len() + 1);
+            }
+            (contact_id.clone(), s, *group || *my_cam || !cams.is_empty())
+        }
     };
     let name = name_of(&core, &contact_id);
     let image = core.contact(&contact_id).and_then(|c| c.avatar);
+    let is_group = contact_id.starts_with("g:");
+    let hide_avatar =
+        matches!(&current, Phase::Active { cams, group, .. } if *group || !cams.is_empty());
     let class = if video_ui {
         "call-overlay video-live"
     } else {
@@ -305,13 +348,14 @@ pub fn CallOverlay() -> Element {
     rsx! {
         div { class: "{class}",
             div { class: "call-top",
-                if !matches!(current, Phase::Active { peer_cam: true, .. }) {
+                if !hide_avatar {
                     div { class: "call-avatar",
                         Avatar {
                             id: contact_id.clone(),
                             name: name.clone(),
                             size: "large",
                             image,
+                            group: is_group,
                         }
                     }
                 }
@@ -364,39 +408,39 @@ pub fn CallOverlay() -> Element {
                         let mute_label = t(&tr, if muted { "call.unmute" } else { "call.mute" });
                         let cam_label = t(&tr, if my_cam { "call.camera_off" } else { "call.camera_on" });
                         rsx! {
-                        button {
-                            class: if muted { "call-btn toggle on" } else { "call-btn toggle" },
-                            aria_label: "{mute_label}",
-                            onclick: {
-                                let bridge = bridge.clone();
-                                move |_| {
-                                    let on = !muted;
-                                    if let Phase::Active { muted, .. } = &mut *phase.write() {
-                                        *muted = on;
+                            button {
+                                class: if muted { "call-btn toggle on" } else { "call-btn toggle" },
+                                aria_label: "{mute_label}",
+                                onclick: {
+                                    let bridge = bridge.clone();
+                                    move |_| {
+                                        let on = !muted;
+                                        if let Phase::Active { muted, .. } = &mut *phase.write() {
+                                            *muted = on;
+                                        }
+                                        bridge.send(json!({ "t": "mute", "on": on }));
                                     }
-                                    bridge.send(json!({ "t": "mute", "on": on }));
-                                }
-                            },
-                            Icon { name: if muted { IconName::MicOff } else { IconName::Mic }, size: 26 }
-                        }
-                        button {
-                            class: if my_cam { "call-btn toggle" } else { "call-btn toggle on" },
-                            aria_label: "{cam_label}",
-                            onclick: {
-                                let bridge = bridge.clone();
-                                move |_| bridge.send(json!({ "t": "cam", "on": !my_cam }))
-                            },
-                            Icon { name: if my_cam { IconName::Video } else { IconName::VideoOff }, size: 26 }
-                        }
-                        button {
-                            class: "call-btn decline",
-                            aria_label: "{t(&tr, \"call.hangup\")}",
-                            onclick: {
-                                let core = core.clone();
-                                move |_| core.call_end()
-                            },
-                            Icon { name: IconName::PhoneOff, size: 28 }
-                        }
+                                },
+                                Icon { name: if muted { IconName::MicOff } else { IconName::Mic }, size: 26 }
+                            }
+                            button {
+                                class: if my_cam { "call-btn toggle" } else { "call-btn toggle on" },
+                                aria_label: "{cam_label}",
+                                onclick: {
+                                    let bridge = bridge.clone();
+                                    move |_| bridge.send(json!({ "t": "cam", "on": !my_cam }))
+                                },
+                                Icon { name: if my_cam { IconName::Video } else { IconName::VideoOff }, size: 26 }
+                            }
+                            button {
+                                class: "call-btn decline",
+                                aria_label: "{t(&tr, \"call.hangup\")}",
+                                onclick: {
+                                    let core = core.clone();
+                                    move |_| core.call_end()
+                                },
+                                Icon { name: IconName::PhoneOff, size: 28 }
+                            }
                         }
                     }
                     Phase::Idle => rsx! {},
