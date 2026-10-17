@@ -53,6 +53,10 @@ case "$MODE" in
     RELEASE=""
     [ "$MODE" = "android-release" ] && RELEASE="--release"
 
+    # An icon in another format left in the generated project by an earlier run
+    # would clash with the one dx writes (duplicate resources). Ours is .webp.
+    rm -f target/dx/whatsmine/*/android/app/app/src/main/res/mipmap-*/ic_launcher.png
+
     echo "=== [1/2] Building the Rust library (dx build) ==="
     (cd "$APP_DIR" && dx build --platform android --target aarch64-linux-android --package whatsmine $RELEASE)
 

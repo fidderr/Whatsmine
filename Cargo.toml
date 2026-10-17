@@ -16,3 +16,11 @@ authors = ["fidderr"]
 opt-level = "s"
 lto = "thin"
 codegen-units = 1
+
+# `dx build --platform android` (debug) compiles with this profile. Unoptimised
+# code makes hashing, encryption and image decoding painfully slow on a phone
+# and a full-debuginfo APK is >600 MB, so keep it light but still debuggable.
+[profile.android-dev]
+inherits = "dev"
+opt-level = 2
+debug = "line-tables-only"
