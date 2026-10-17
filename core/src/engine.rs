@@ -18,6 +18,7 @@ use tokio::sync::{broadcast, mpsc};
 use tokio::time::Instant;
 
 use crate::NetMode;
+use crate::calls::{self, ActiveCall, CallEndReason, CallEvent, CallMedia, MediaIn};
 use crate::db::Database;
 use crate::files::{self, ReceiveCtx, Received};
 use crate::identity::key_to_string;
@@ -26,7 +27,8 @@ use crate::model::{
     TransferState, now_ms,
 };
 use crate::protocol::{
-    self, ALPN, Frame, MAX_TEXT, PROTO_VERSION, ReceiptKind, id_from_bytes, id_to_bytes,
+    self, ALPN, CallResult, Frame, MAX_TEXT, PROTO_VERSION, RING_TIMEOUT, ReceiptKind,
+    VIDEO_STREAM_MAGIC, id_from_bytes, id_to_bytes,
 };
 
 const DIAL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -58,7 +60,39 @@ pub(crate) enum Cmd {
         contact: PublicKey,
         message_id: String,
     },
+    /// Start a call to this contact (id chosen by the caller).
+    CallInvite {
+        peer: PublicKey,
+        call: [u8; 16],
+        video: bool,
+    },
+    /// Answer the call that is ringing.
+    CallAnswer {
+        accept: bool,
+    },
+    /// Hang up, or cancel while ringing.
+    CallEnd,
+    CallAudio {
+        ts: u32,
+        data: Vec<u8>,
+    },
+    CallVideo {
+        ts: u32,
+        key: bool,
+        data: Vec<u8>,
+    },
+    /// Our camera went on or off.
+    CallVideoOn(bool),
     Shutdown(std::sync::mpsc::Sender<()>),
+}
+
+/// The one call this device is in (ringing or connected).
+struct CallState {
+    id: [u8; 16],
+    peer: PublicKey,
+    outgoing: bool,
+    started: Instant,
+    connected: Option<Instant>,
 }
 
 /// Events from the connection tasks back into the engine.
@@ -132,6 +166,9 @@ pub(crate) struct Engine {
     downloads: Arc<Mutex<HashSet<String>>>,
     /// How often a download failed its hash check (retried once).
     corrupt_retries: HashMap<String, u8>,
+    call: Option<CallState>,
+    media_in: MediaIn,
+    video_inflight: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 fn emit(events: &broadcast::Sender<CoreEvent>, ev: CoreEvent) {
@@ -147,6 +184,7 @@ impl Engine {
         events: broadcast::Sender<CoreEvent>,
         shared: Shared,
         media: PathBuf,
+        call_media: mpsc::Sender<CallMedia>,
         mut cmds: mpsc::UnboundedReceiver<Cmd>,
     ) {
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -156,6 +194,12 @@ impl Engine {
             uploads: HashSet::new(),
             downloads: Arc::new(Mutex::new(HashSet::new())),
             corrupt_retries: HashMap::new(),
+            call: None,
+            media_in: MediaIn {
+                active: ActiveCall::default(),
+                tx: call_media,
+            },
+            video_inflight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             db,
             key,
             me,
@@ -218,7 +262,10 @@ impl Engine {
                     }
                 },
                 Some(ev) = rx.recv() => engine.handle_internal(ev),
-                _ = tick.tick() => engine.dial_due(&ep),
+                _ = tick.tick() => {
+                    engine.dial_due(&ep);
+                    engine.call_tick();
+                }
             }
         }
     }
@@ -343,7 +390,226 @@ impl Engine {
                 }
                 self.want_file(contact, &message_id);
             }
+            Cmd::CallInvite { peer, call, video } => self.call_invite(peer, call, video),
+            Cmd::CallAnswer { accept } => self.call_answer(accept),
+            Cmd::CallEnd => self.call_hangup(),
+            Cmd::CallAudio { ts, data } => {
+                if let Some((call, conn)) = self.live_call_conn() {
+                    calls::send_audio(&conn, call, ts, &data);
+                }
+            }
+            Cmd::CallVideo { ts, key, data } => {
+                if let Some((call, conn)) = self.live_call_conn() {
+                    calls::send_video(conn, call, ts, key, data, self.video_inflight.clone());
+                }
+            }
+            Cmd::CallVideoOn(on) => {
+                if let Some(c) = self.call.as_ref().filter(|c| c.connected.is_some()) {
+                    let (peer, call) = (c.peer, c.id);
+                    self.send(peer, Frame::CallVideo { call, on });
+                }
+            }
             Cmd::Shutdown(_) => unreachable!("handled in run loop"),
+        }
+    }
+
+    // ---- calls ----
+
+    fn emit_call(&self, ev: CallEvent) {
+        emit(&self.events, CoreEvent::Call(ev));
+    }
+
+    /// The connected call and the connection its media should use.
+    fn live_call_conn(&self) -> Option<([u8; 16], Connection)> {
+        let c = self.call.as_ref().filter(|c| c.connected.is_some())?;
+        let conn = self.sessions.get(&c.peer)?.conn.clone();
+        Some((c.id, conn))
+    }
+
+    fn set_active_call(&self, value: Option<([u8; 16], PublicKey)>) {
+        *self
+            .media_in
+            .active
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = value;
+    }
+
+    /// Ends whatever call there is and tells the UI why.
+    fn end_call(&mut self, reason: CallEndReason) {
+        let Some(c) = self.call.take() else { return };
+        self.set_active_call(None);
+        let duration_ms = c
+            .connected
+            .map(|t| t.elapsed().as_millis() as u64)
+            .unwrap_or(0);
+        self.emit_call(CallEvent::Ended {
+            call_id: id_from_bytes(&c.id),
+            contact_id: key_to_string(&c.peer),
+            reason,
+            duration_ms,
+        });
+    }
+
+    fn call_invite(&mut self, peer: PublicKey, call: [u8; 16], video: bool) {
+        let ended = |e: &Engine, reason| {
+            e.emit_call(CallEvent::Ended {
+                call_id: id_from_bytes(&call),
+                contact_id: key_to_string(&peer),
+                reason,
+                duration_ms: 0,
+            });
+        };
+        if self.call.is_some() {
+            return ended(self, CallEndReason::Busy);
+        }
+        if !self.sessions.contains_key(&peer) {
+            return ended(self, CallEndReason::Lost);
+        }
+        self.call = Some(CallState {
+            id: call,
+            peer,
+            outgoing: true,
+            started: Instant::now(),
+            connected: None,
+        });
+        self.set_active_call(Some((call, peer)));
+        self.send(peer, Frame::CallInvite { call, video });
+    }
+
+    fn call_answer(&mut self, accept: bool) {
+        let Some(c) = self.call.as_mut().filter(|c| !c.outgoing && c.connected.is_none()) else {
+            return;
+        };
+        let (peer, call) = (c.peer, c.id);
+        if accept {
+            c.connected = Some(Instant::now());
+            self.send(
+                peer,
+                Frame::CallAnswer {
+                    call,
+                    result: CallResult::Accepted,
+                },
+            );
+            self.emit_call(CallEvent::Connected {
+                call_id: id_from_bytes(&call),
+                contact_id: key_to_string(&peer),
+            });
+        } else {
+            self.send(
+                peer,
+                Frame::CallAnswer {
+                    call,
+                    result: CallResult::Declined,
+                },
+            );
+            self.end_call(CallEndReason::Declined);
+        }
+    }
+
+    fn call_hangup(&mut self) {
+        let Some(c) = self.call.as_ref() else { return };
+        let (peer, call) = (c.peer, c.id);
+        let ringing_out = c.outgoing && c.connected.is_none();
+        self.send(peer, Frame::CallEnd { call });
+        self.end_call(if ringing_out {
+            CallEndReason::Cancelled
+        } else {
+            CallEndReason::Hangup
+        });
+    }
+
+    /// Gives up on a call nobody answered.
+    fn call_tick(&mut self) {
+        let Some(c) = self.call.as_ref() else { return };
+        if c.connected.is_some() || c.started.elapsed() < RING_TIMEOUT {
+            return;
+        }
+        let (peer, call, outgoing) = (c.peer, c.id, c.outgoing);
+        if outgoing {
+            self.send(peer, Frame::CallEnd { call });
+        }
+        self.end_call(CallEndReason::Missed);
+    }
+
+    fn on_call_frame(&mut self, peer: PublicKey, frame: Frame) {
+        let id = key_to_string(&peer);
+        match frame {
+            Frame::CallInvite { call, video } => {
+                let accepted = self
+                    .db
+                    .contact(&id)
+                    .is_some_and(|c| c.state == ContactState::Accepted);
+                if !accepted {
+                    return;
+                }
+                if self.call.is_some() {
+                    // A repeated invite for the call we already show is fine.
+                    if self.call.as_ref().is_some_and(|c| c.id == call) {
+                        return;
+                    }
+                    self.send(
+                        peer,
+                        Frame::CallAnswer {
+                            call,
+                            result: CallResult::Busy,
+                        },
+                    );
+                    return;
+                }
+                self.call = Some(CallState {
+                    id: call,
+                    peer,
+                    outgoing: false,
+                    started: Instant::now(),
+                    connected: None,
+                });
+                self.set_active_call(Some((call, peer)));
+                self.emit_call(CallEvent::Incoming {
+                    call_id: id_from_bytes(&call),
+                    contact_id: id,
+                    video,
+                });
+            }
+            Frame::CallAnswer { call, result } => {
+                let Some(c) = self
+                    .call
+                    .as_mut()
+                    .filter(|c| c.id == call && c.peer == peer && c.outgoing && c.connected.is_none())
+                else {
+                    return;
+                };
+                match result {
+                    CallResult::Accepted => {
+                        c.connected = Some(Instant::now());
+                        self.emit_call(CallEvent::Connected {
+                            call_id: id_from_bytes(&call),
+                            contact_id: id,
+                        });
+                    }
+                    CallResult::Declined => self.end_call(CallEndReason::Declined),
+                    CallResult::Busy => self.end_call(CallEndReason::Busy),
+                }
+            }
+            Frame::CallEnd { call } => {
+                let Some(c) = self.call.as_ref().filter(|c| c.id == call && c.peer == peer) else {
+                    return;
+                };
+                let reason = if !c.outgoing && c.connected.is_none() {
+                    CallEndReason::Missed
+                } else {
+                    CallEndReason::Hangup
+                };
+                self.end_call(reason);
+            }
+            Frame::CallVideo { call, on } => {
+                if self.call.as_ref().is_some_and(|c| c.id == call && c.peer == peer) {
+                    self.emit_call(CallEvent::PeerVideo {
+                        call_id: id_from_bytes(&call),
+                        on,
+                    });
+                }
+            }
+            _ => {}
         }
     }
 
@@ -581,9 +847,11 @@ impl Engine {
         let (out_tx, out_rx) = mpsc::unbounded_channel();
         spawn_writer(send, out_rx, conn.clone());
         spawn_reader(recv, peer, sid, self.tx.clone(), conn.clone());
+        calls::spawn_datagram_reader(conn.clone(), peer, self.media_in.clone());
         spawn_file_acceptor(
             conn.clone(),
             peer,
+            self.media_in.clone(),
             self.tx.clone(),
             ReceiveCtx {
                 peer_id: id.clone(),
@@ -653,6 +921,9 @@ impl Engine {
         }
         self.sessions.remove(&peer);
         self.typing_sent.remove(&peer);
+        if self.call.as_ref().is_some_and(|c| c.peer == peer) {
+            self.end_call(CallEndReason::Lost);
+        }
         let id = key_to_string(&peer);
         let accepted = self
             .db
@@ -861,6 +1132,10 @@ impl Engine {
                     self.start_upload(peer, &m, offset);
                 }
             }
+            f @ (Frame::CallInvite { .. }
+            | Frame::CallAnswer { .. }
+            | Frame::CallEnd { .. }
+            | Frame::CallVideo { .. }) => self.on_call_frame(peer, f),
             Frame::FileDecline { id: mid } => {
                 let message_id = id_from_bytes(&mid);
                 if let Some(m) = self.db.message(&message_id)
@@ -1173,17 +1448,30 @@ fn spawn_writer(mut send: SendStream, mut rx: mpsc::UnboundedReceiver<Frame>, co
 fn spawn_file_acceptor(
     conn: Connection,
     peer: PublicKey,
+    media_in: MediaIn,
     tx: mpsc::UnboundedSender<Internal>,
     ctx: ReceiveCtx,
 ) {
     let ctx = Arc::new(ctx);
     tokio::spawn(async move {
-        while let Ok(recv) = conn.accept_uni().await {
-            let (tx, ctx) = (tx.clone(), ctx.clone());
+        while let Ok(mut recv) = conn.accept_uni().await {
+            let (tx, ctx, media_in) = (tx.clone(), ctx.clone(), media_in.clone());
             tokio::spawn(async move {
+                let mut header = [0u8; files::STREAM_HEADER];
+                let read =
+                    tokio::time::timeout(Duration::from_secs(20), recv.read_exact(&mut header))
+                        .await;
+                if !matches!(read, Ok(Ok(()))) {
+                    let _ = recv.stop(1u32.into());
+                    return;
+                }
+                if &header[..4] == VIDEO_STREAM_MAGIC {
+                    calls::receive_video(recv, header, peer, &media_in).await;
+                    return;
+                }
                 let progress_tx = tx.clone();
                 let contact_id = ctx.peer_id.clone();
-                let (message_id, result) = files::receive(recv, &ctx, move |id, done, total| {
+                let (message_id, result) = files::receive(recv, header, &ctx, move |id, done, total| {
                     let _ = progress_tx.send(Internal::Progress {
                         contact_id: contact_id.clone(),
                         message_id: id.to_string(),

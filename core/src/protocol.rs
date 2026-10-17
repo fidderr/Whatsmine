@@ -77,7 +77,48 @@ pub enum Frame {
     FileDecline {
         id: [u8; 16],
     },
+    /// "I'm calling you." One call at a time per device.
+    CallInvite {
+        call: [u8; 16],
+        video: bool,
+    },
+    /// The callee's answer to a [`Frame::CallInvite`].
+    CallAnswer {
+        call: [u8; 16],
+        result: CallResult,
+    },
+    /// Hang up (or cancel a call that is still ringing).
+    CallEnd {
+        call: [u8; 16],
+    },
+    /// The sender switched their camera on or off during a call.
+    CallVideo {
+        call: [u8; 16],
+        on: bool,
+    },
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CallResult {
+    Accepted,
+    Declined,
+    /// Already in another call.
+    Busy,
+}
+
+/// First byte of a call-audio datagram: `0xA1 | call id (16) | ts (u32 BE) | opus`.
+pub const AUDIO_DATAGRAM_MAGIC: u8 = 0xA1;
+
+/// First bytes of a call-video uni stream, in the same 28-byte header shape
+/// as file streams: `"WMV1" | call id (16) | ts (u32 BE) | flags (u32 BE)`,
+/// then one encoded frame until the stream ends. Flag bit 0 = key frame.
+pub const VIDEO_STREAM_MAGIC: &[u8; 4] = b"WMV1";
+
+/// Largest encoded video frame we accept.
+pub const MAX_VIDEO_FRAME: usize = 1024 * 1024;
+
+/// How long an unanswered call rings.
+pub const RING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
 
 /// Largest profile picture we send or accept.
 pub const MAX_AVATAR: usize = 128 * 1024;
@@ -182,6 +223,19 @@ mod tests {
                 offset: 1 << 33,
             },
             Frame::FileDecline { id: [3; 16] },
+            Frame::CallInvite {
+                call: [4; 16],
+                video: true,
+            },
+            Frame::CallAnswer {
+                call: [4; 16],
+                result: CallResult::Busy,
+            },
+            Frame::CallEnd { call: [4; 16] },
+            Frame::CallVideo {
+                call: [4; 16],
+                on: false,
+            },
         ];
         for f in frames {
             let bytes = encode(&f).unwrap();

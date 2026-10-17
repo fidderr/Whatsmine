@@ -28,6 +28,10 @@ use crate::model::TransferState;
 use crate::protocol::{FILE_STREAM_MAGIC, MAX_AVATAR, id_from_bytes};
 
 const CHUNK: usize = 64 * 1024;
+
+/// Every uni stream starts with this many header bytes: 4 magic, a 16-byte id
+/// and 8 more (file offset, or call-video timestamp and flags).
+pub(crate) const STREAM_HEADER: usize = 4 + 16 + 8;
 const PROGRESS_EVERY: Duration = Duration::from_millis(250);
 
 /// `<data>/media`: received and sent files, partial downloads, avatars.
@@ -213,12 +217,11 @@ pub(crate) struct ReceiveCtx {
 /// Receives one file stream. `progress(done, total)` is throttled.
 pub(crate) async fn receive(
     mut recv: RecvStream,
+    header: [u8; STREAM_HEADER],
     ctx: &ReceiveCtx,
     progress: impl Fn(&str, u64, u64),
 ) -> (Option<String>, Received) {
-    let mut header = [0u8; 4 + 16 + 8];
-    let read = tokio::time::timeout(Duration::from_secs(20), recv.read_exact(&mut header)).await;
-    if !matches!(read, Ok(Ok(()))) || &header[..4] != FILE_STREAM_MAGIC {
+    if &header[..4] != FILE_STREAM_MAGIC {
         let _ = recv.stop(1u32.into());
         return (None, Received::Rejected);
     }

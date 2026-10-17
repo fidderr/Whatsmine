@@ -12,6 +12,7 @@
 //! (local database work plus a message to the engine), so they can be called
 //! straight from UI event handlers. Updates arrive through [`Core::subscribe`].
 
+pub mod calls;
 pub mod db;
 mod engine;
 pub mod files;
@@ -62,6 +63,8 @@ struct Inner {
     events: broadcast::Sender<CoreEvent>,
     shared: Shared,
     runtime: Mutex<Option<tokio::runtime::Runtime>>,
+    /// Incoming call media, handed out once to whoever plays it.
+    call_media: Mutex<Option<mpsc::Receiver<calls::CallMedia>>>,
 }
 
 impl Drop for Inner {
@@ -95,6 +98,7 @@ impl Core {
 
         let (cmds, cmd_rx) = mpsc::unbounded_channel();
         let (events, _) = broadcast::channel(1024);
+        let (call_media_tx, call_media_rx) = mpsc::channel(256);
         let shared = Shared {
             online: Arc::new(Mutex::new(HashSet::new())),
             net: Arc::new(Mutex::new(NetStatus::Connecting)),
@@ -106,6 +110,7 @@ impl Core {
             events.clone(),
             shared.clone(),
             files::media_dir(dir),
+            call_media_tx,
             cmd_rx,
         ));
 
@@ -119,6 +124,7 @@ impl Core {
                 events,
                 shared,
                 runtime: Mutex::new(Some(runtime)),
+                call_media: Mutex::new(Some(call_media_rx)),
             }),
         })
     }
@@ -129,6 +135,57 @@ impl Core {
 
     fn emit(&self, ev: CoreEvent) {
         let _ = self.inner.events.send(ev);
+    }
+
+    // ---- calls ----
+
+    /// Starts a call. The result is the call id; what happens next arrives as
+    /// [`CoreEvent::Call`] (`Connected` or `Ended`).
+    pub fn call_invite(&self, contact_id: &str, video: bool) -> anyhow::Result<String> {
+        let peer = identity::parse_key(contact_id).context("not a valid contact")?;
+        ensure!(
+            self.contact(contact_id)
+                .is_some_and(|c| c.state == ContactState::Accepted),
+            "not a contact"
+        );
+        ensure!(self.is_online(contact_id), "contact is offline");
+        let call = *uuid::Uuid::now_v7().as_bytes();
+        self.cmd(Cmd::CallInvite { peer, call, video });
+        Ok(protocol::id_from_bytes(&call))
+    }
+
+    /// Accepts or declines the call that is ringing.
+    pub fn call_answer(&self, accept: bool) {
+        self.cmd(Cmd::CallAnswer { accept });
+    }
+
+    /// Hangs up, or cancels a call that is still ringing.
+    pub fn call_end(&self) {
+        self.cmd(Cmd::CallEnd);
+    }
+
+    /// Sends one encoded audio packet of the connected call.
+    pub fn call_audio(&self, ts: u32, data: Vec<u8>) {
+        self.cmd(Cmd::CallAudio { ts, data });
+    }
+
+    /// Sends one encoded video frame of the connected call.
+    pub fn call_video(&self, ts: u32, key: bool, data: Vec<u8>) {
+        self.cmd(Cmd::CallVideo { ts, key, data });
+    }
+
+    /// Tells the other side our camera went on or off.
+    pub fn call_video_on(&self, on: bool) {
+        self.cmd(Cmd::CallVideoOn(on));
+    }
+
+    /// The stream of incoming call media. There is one: the first caller gets it.
+    pub fn take_call_media(&self) -> Option<mpsc::Receiver<calls::CallMedia>> {
+        self.inner
+            .call_media
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
     }
 
     /// Stops networking, telling connected peers we left. Blocks up to ~2s.

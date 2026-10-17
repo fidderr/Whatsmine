@@ -252,6 +252,8 @@ pub enum CoreEvent {
     Net(NetStatus),
     /// A message changed in place (attachment progress state, path).
     MessageUpdated(Message),
+    /// Something happened to a voice/video call.
+    Call(crate::calls::CallEvent),
     /// Bytes moved for a file, either direction. Throttled.
     Transfer {
         contact_id: String,
