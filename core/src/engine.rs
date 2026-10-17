@@ -606,7 +606,6 @@ impl Engine {
 
     fn on_session_start(&mut self, peer: PublicKey) {
         self.send_hello(peer);
-        self.send_profile(peer);
         let settings = self.settings();
         match self.db.contact(&key_to_string(&peer)).map(|c| c.state) {
             Some(ContactState::Accepted) => {
@@ -634,6 +633,7 @@ impl Engine {
     /// and catch up on anything that did not get through yet.
     fn on_accepted_session(&mut self, peer: PublicKey) {
         self.set_online(peer, true, None);
+        self.send_profile(peer);
         for m in self.db.undelivered(&key_to_string(&peer)) {
             // A declined file stays declined; don't keep offering it.
             if m.attachment
@@ -806,7 +806,7 @@ impl Engine {
             // Only keeps the session alive; see the reader's timeout.
             Frame::Ping => {}
             Frame::Profile { avatar } => {
-                if contact.is_some() && state != Some(ContactState::Blocked) {
+                if state == Some(ContactState::Accepted) {
                     self.on_profile(&id, contact.and_then(|c| c.avatar), avatar);
                 }
             }
@@ -984,7 +984,16 @@ impl Engine {
         );
     }
 
+    /// Our picture goes only to accepted contacts: a stranger who merely
+    /// asked to connect gets nothing, and gets to store nothing on our side.
     fn send_profile(&self, peer: PublicKey) {
+        let accepted = self
+            .db
+            .contact(&key_to_string(&peer))
+            .is_some_and(|c| c.state == ContactState::Accepted);
+        if !accepted {
+            return;
+        }
         let avatar = self
             .settings()
             .avatar

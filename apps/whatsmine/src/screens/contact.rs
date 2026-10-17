@@ -72,7 +72,7 @@ pub fn ContactInfo(id: String) -> Element {
                 span { class: "config-title", "{t(&tr, \"contact.title\")}" }
             }
             div { class: "profile-head",
-                Avatar { id: id.clone(), name: name.clone(), size: "large", online }
+                Avatar { id: id.clone(), name: name.clone(), size: "large", online, image: contact.avatar.clone() }
                 span { class: "profile-name", "{name}" }
                 if !contact.their_name.is_empty() && contact.their_name != name {
                     span { class: "profile-sub", "{calls_themselves}" }

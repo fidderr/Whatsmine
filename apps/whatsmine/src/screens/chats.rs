@@ -1,5 +1,5 @@
 use dioxus::prelude::*;
-use whatsmine_core::{ChatSummary, ContactState, MessageStatus};
+use whatsmine_core::{ChatSummary, ContactState, MediaKind, MessageStatus};
 
 use crate::app::{Rev, Route, Typing, t, use_core, use_tr};
 use crate::components::{Avatar, BottomNav, Icon, IconName, NetBanner, Tab};
@@ -92,7 +92,7 @@ fn ChatRow(chat: ChatSummary) -> Element {
 
     rsx! {
         Link { to: Route::Chat { id: c.id.clone() }, class: "card",
-            Avatar { id: c.id.clone(), name: name.clone(), online }
+            Avatar { id: c.id.clone(), name: name.clone(), online, image: c.avatar.clone() }
             div { class: "card-main",
                 div { class: "card-row",
                     span { class: "card-title", "{name}" }
@@ -108,7 +108,7 @@ fn ChatRow(chat: ChatSummary) -> Element {
                             if m.outgoing {
                                 StatusTicks { status: m.status }
                             }
-                            "{m.body}"
+                            Preview { message: m.clone() }
                         }
                     }
                     if unread > 0 {
@@ -133,5 +133,29 @@ pub fn StatusTicks(status: MessageStatus) -> Element {
         span { class,
             Icon { name: icon, size: 15 }
         }
+    }
+}
+
+/// One line for the chat list: the text, or an icon and name for a file.
+#[component]
+fn Preview(message: whatsmine_core::Message) -> Element {
+    let tr = use_tr();
+    let Some(att) = message.attachment.as_ref() else {
+        return rsx! { "{message.body}" };
+    };
+    let (icon, label) = match att.kind() {
+        MediaKind::Image => (IconName::Image, t(&tr, "media.photo")),
+        MediaKind::Video => (IconName::Video, t(&tr, "media.video")),
+        MediaKind::Audio => (IconName::Mic, t(&tr, "media.voice")),
+        MediaKind::File => (IconName::File, att.name.clone()),
+    };
+    let text = if message.body.is_empty() {
+        label
+    } else {
+        message.body.clone()
+    };
+    rsx! {
+        Icon { name: icon, size: 15 }
+        "{text}"
     }
 }

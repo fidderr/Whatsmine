@@ -1,5 +1,7 @@
+mod attachment;
 mod avatar;
 mod bottom_nav;
+mod camera;
 mod confirm;
 mod dropdown;
 mod icon;
@@ -7,9 +9,12 @@ mod net_banner;
 mod qr;
 mod toast;
 mod toggle;
+mod voice;
 
+pub use attachment::{AttachmentView, ImageViewer, open_file, save_file};
 pub use avatar::Avatar;
 pub use bottom_nav::{BottomNav, Tab};
+pub use camera::{CameraMode, CameraOverlay};
 pub use confirm::ConfirmDialog;
 pub use dropdown::Dropdown;
 pub use icon::{Icon, IconName};
@@ -17,3 +22,4 @@ pub use net_banner::NetBanner;
 pub use qr::QrCode;
 pub use toast::{Toast, ToastLevel, ToastMessage};
 pub use toggle::ToggleRow;
+pub use voice::VoiceBar;

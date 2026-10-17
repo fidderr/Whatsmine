@@ -24,6 +24,15 @@ pub enum IconName {
     ChevronDown,
     ChevronRight,
     Server,
+    Paperclip,
+    Mic,
+    Camera,
+    Video,
+    Image,
+    File,
+    Download,
+    External,
+    Stop,
 }
 
 /// Inline stroke icon (24×24 grid). No fonts or CDN.
@@ -95,6 +104,43 @@ pub fn Icon(name: IconName, #[props(default = 20)] size: u32) -> Element {
             "M6 6h.01",
             "M6 18h.01",
         ],
+        IconName::Paperclip => &[
+            "M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48",
+        ],
+        IconName::Mic => &[
+            "M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z",
+            "M19 10v2a7 7 0 0 1-14 0v-2",
+            "M12 19v4",
+            "M8 23h8",
+        ],
+        IconName::Camera => &[
+            "M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z",
+            "M12 9a4 4 0 1 0 0 8 4 4 0 1 0 0-8z",
+        ],
+        IconName::Video => &[
+            "M23 7l-7 5 7 5V7z",
+            "M3 5h11a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z",
+        ],
+        IconName::Image => &[
+            "M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z",
+            "M8.5 7a1.5 1.5 0 1 0 0 3 1.5 1.5 0 1 0 0-3z",
+            "M21 15l-5-5L5 21",
+        ],
+        IconName::File => &[
+            "M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z",
+            "M13 2v7h7",
+        ],
+        IconName::Download => &[
+            "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4",
+            "M7 10l5 5 5-5",
+            "M12 15V3",
+        ],
+        IconName::External => &[
+            "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6",
+            "M15 3h6v6",
+            "M10 14L21 3",
+        ],
+        IconName::Stop => &["M6 6h12v12H6z"],
     };
 
     rsx! {

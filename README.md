@@ -9,11 +9,13 @@ WhatsMine is a free, open-source 1:1 messenger with no company in the middle:
 - **You decide who can reach you.** Someone who adds your key sends a request, and nothing gets through until you accept. Blocking is silent.
 - **Nobody can take it away.** No account can be banned and no database can leak, be sold or be subpoenaed. If you delete the app, your data is gone.
 
-It runs on Windows, macOS, Linux and Android from one Rust codebase. iOS builds from the same code but hasn't been tested yet.
+It runs on Windows and Android from one Rust codebase (the code is portable to macOS, Linux and iOS, which haven't been tried). Device features (file picker, camera, microphone, open and save) come from [mobile-sentinel](https://github.com/fidderr/mobile-sentinel).
 
 ## Features
 
 - 1:1 chats with history saved on your device
+- **Photos, videos, voice messages and any file**, shown inline (images and GIFs, video and audio players) or as a file card. Take a photo, record a video or a voice note right in the chat, or pick from the gallery. Files up to 2 GB by default; each person sets the largest file they accept, and bigger ones are declined with a message to the sender. Transfers resume where they stopped and are checked with a SHA-256 hash.
+- **Profile pictures** that your contacts see
 - Contact requests: accept, decline or block
 - Sent ✓, delivered ✓✓ and read ✓✓ (blue) ticks
 - Online, last seen and typing indicators; each can be switched off, and then you don't see other people's either
@@ -49,15 +51,15 @@ It runs on Windows, macOS, Linux and Android from one Rust codebase. iOS builds 
 - **Relays and discovery defaults:** the fallback relays and the DNS discovery service are run by n0. They can't read messages, and the DHT and local discovery work without them. Running your own relay will be supported.
 - **Your contacts see your IP address**, because you connect to them directly.
 - **The local database isn't encrypted at rest.** It relies on the OS's app sandbox.
-- Text only, no files or groups yet.
+- No groups yet. Large files need both of you online (they resume if the connection drops).
 
 ## Build
 
-Requirements: Rust (stable), [`dx`](https://dioxuslabs.com/learn/0.7/getting_started) 0.7 (`cargo install dioxus-cli`), and for Android, the Android SDK, NDK 28 and JDK 17.
+Requirements: Rust (stable), [`dx`](https://dioxuslabs.com/learn/0.7/getting_started) 0.7 (`cargo install dioxus-cli`), a checkout of [mobile-sentinel](https://github.com/fidderr/mobile-sentinel) next to this repo (until 0.2.2 is published), and for Android, the Android SDK, NDK 28 and JDK 17.
 
 ```sh
 ./build.sh                    # desktop app (release)
-./build.sh android install    # Android debug APK, installed over adb
+./build.sh android install    # Android debug APK, installed over adb (keeps chats on update)
 ./build.sh cli                # headless peer for testing
 ./build.sh test               # fmt, clippy, tests
 ```
@@ -74,7 +76,7 @@ WHATSMINE_PROFILE=bob   target/dx/whatsmine/release/windows/app/whatsmine.exe
 | Folder | What |
 |---|---|
 | `core/` | `whatsmine-core`: identity, iroh networking, protocol, SQLite storage. No UI. Integration tests run two real peers over loopback. |
-| `app/` | `whatsmine`: the Dioxus UI. Design and patterns are shared with [AlarmFree](https://github.com/fidderr/alarmfree). |
+| `apps/whatsmine/` | `whatsmine`: the Dioxus UI. Design and patterns are shared with [AlarmFree](https://github.com/fidderr/alarmfree). |
 | `cli/` | `whatsmine-cli`: a terminal peer on the same core, for testing and scripting. |
 
 ## License

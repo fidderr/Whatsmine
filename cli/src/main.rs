@@ -152,6 +152,29 @@ fn run(
                 core.mark_read(id);
             }
         }
+        "file" => {
+            let id = need(a1)?;
+            let path = std::path::Path::new(a2);
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let mime = guess_mime(&name);
+            let m = core.send_file(&id, path, &name, mime, "", None)?;
+            println!(
+                "· sending {} ({} bytes)",
+                name,
+                m.attachment.map(|a| a.size).unwrap_or(0)
+            );
+            *current = Some(id);
+        }
+        "avatar" => {
+            if a1.is_empty() {
+                core.clear_avatar()?;
+            } else {
+                core.set_avatar(std::path::Path::new(&format!("{a1} {a2}").trim()))?;
+            }
+        }
         "chats" => {
             for c in core.chats() {
                 let online = if core.is_online(&c.contact.id) {
@@ -185,6 +208,27 @@ fn run(
     Ok(())
 }
 
+fn guess_mime(name: &str) -> &'static str {
+    match name
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "mp4" => "video/mp4",
+        "webm" => "video/webm",
+        "wav" => "audio/wav",
+        "m4a" => "audio/mp4",
+        "mp3" => "audio/mpeg",
+        "pdf" => "application/pdf",
+        _ => "application/octet-stream",
+    }
+}
+
 fn label(core: &Core, id: &str) -> String {
     core.contact(id)
         .map(|c| c.display_name())
@@ -198,7 +242,14 @@ fn print_message(core: &Core, m: &whatsmine_core::Message) {
         label(core, &m.contact_id)
     };
     let tick = if m.outgoing { ticks(m.status) } else { "" };
-    println!("[{}] {who}: {} {tick}", m.id.get(..8).unwrap_or(""), m.body);
+    let what = match &m.attachment {
+        Some(a) => format!(
+            "[file {} {} bytes {:?}] {}",
+            a.name, a.size, a.state, m.body
+        ),
+        None => m.body.clone(),
+    };
+    println!("[{}] {who}: {what} {tick}", m.id.get(..8).unwrap_or(""));
 }
 
 fn ticks(s: MessageStatus) -> &'static str {
@@ -213,6 +264,16 @@ fn ticks(s: MessageStatus) -> &'static str {
 fn print_event(core: &Core, ev: &CoreEvent) {
     match ev {
         CoreEvent::MessageAdded(m) if !m.outgoing => print_message(core, m),
+        CoreEvent::MessageUpdated(m) => {
+            if let Some(a) = &m.attachment {
+                println!(
+                    "  · file {} {:?} {}",
+                    a.name,
+                    a.state,
+                    a.path.as_deref().unwrap_or("")
+                );
+            }
+        }
         CoreEvent::MessageStatus {
             message_id, status, ..
         } => println!("  · {} {}", &message_id[..8], ticks(*status)),

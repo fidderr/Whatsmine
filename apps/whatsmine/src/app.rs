@@ -5,7 +5,9 @@
 use std::collections::HashMap;
 
 use dioxus::prelude::*;
-use whatsmine_core::{Core, CoreEvent, DbRecovery, NetMode, NetStatus, Settings, paths};
+use whatsmine_core::{
+    Core, CoreEvent, DbRecovery, NetMode, NetStatus, Settings, TransferState, paths,
+};
 
 use crate::components::{Toast, ToastLevel, ToastMessage};
 use crate::i18n;
@@ -54,6 +56,10 @@ pub struct MsgRev(pub Signal<u64>);
 #[derive(Clone, Copy)]
 pub struct Typing(pub Signal<HashMap<String, i64>>);
 
+/// File transfers in progress: message id -> (bytes done, bytes total).
+#[derive(Clone, Copy)]
+pub struct Transfers(pub Signal<HashMap<String, (u64, u64)>>);
+
 #[derive(Clone, Copy)]
 pub struct Net(pub Signal<NetStatus>);
 
@@ -80,6 +86,11 @@ const TYPING_SHOWN_MS: u64 = 5000;
 #[component]
 pub fn App() -> Element {
     let started = use_hook(|| {
+        #[cfg(target_os = "android")]
+        mobile_sentinel::init(mobile_sentinel::InitConfig {
+            log_tag: "WhatsMine".to_string(),
+            ..Default::default()
+        });
         let profile = std::env::var("WHATSMINE_PROFILE").ok();
         paths::data_dir(profile.as_deref())
             .and_then(|dir| Core::start(&dir, NetMode::Internet))
@@ -117,6 +128,7 @@ fn Main(core: AppCore) -> Element {
     let mut msg_rev = use_signal(|| 0u64);
     let mut typing = use_signal(HashMap::<String, i64>::new);
     let mut net = use_signal(|| core.0.net_status());
+    let mut transfers = use_signal(HashMap::<String, (u64, u64)>::new);
     let mut toast_sig: ToastSig = use_signal(|| None);
 
     use_context_provider(|| core.clone());
@@ -126,7 +138,10 @@ fn Main(core: AppCore) -> Element {
     use_context_provider(|| MsgRev(msg_rev));
     use_context_provider(|| Typing(typing));
     use_context_provider(|| Net(net));
+    use_context_provider(|| Transfers(transfers));
     use_context_provider(|| toast_sig);
+
+    crate::media_server::use_media_server(core.0.clone());
 
     // Tell the user if the database had to be reset or cannot persist.
     use_hook(|| {
@@ -158,6 +173,24 @@ fn Main(core: AppCore) -> Element {
                     Ok(CoreEvent::MessageStatus { .. }) => {
                         *msg_rev.write() += 1;
                         *rev.write() += 1;
+                    }
+                    Ok(CoreEvent::MessageUpdated(m)) => {
+                        if m.attachment
+                            .as_ref()
+                            .is_some_and(|a| a.state != TransferState::Transferring)
+                        {
+                            transfers.write().remove(&m.id);
+                        }
+                        *msg_rev.write() += 1;
+                        *rev.write() += 1;
+                    }
+                    Ok(CoreEvent::Transfer {
+                        message_id,
+                        done,
+                        total,
+                        ..
+                    }) => {
+                        transfers.write().insert(message_id, (done, total));
                     }
                     Ok(CoreEvent::Typing { contact_id }) => {
                         let now = whatsmine_core::now_ms();

@@ -253,3 +253,125 @@ async fn profile_pictures_reach_contacts_and_can_be_removed() {
     a.shutdown();
     b.shutdown();
 }
+
+/// Puts a partial download on Bob's disk while he is offline, then brings
+/// him back: a correct partial resumes, a corrupt one is detected by the
+/// hash and the file is fetched again. Either way the result is verified.
+async fn offline_partial_scenario(corrupt: bool) {
+    let lookup = MemoryLookup::new();
+    let (da, db_, src) = (
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+    );
+    let (a, b, mut ra, _rb) = pair(&lookup, [da.path(), db_.path()], |_| {}).await;
+    let kb = b.my_key();
+    let media = b.media_dir();
+    b.shutdown();
+    drop(b);
+    wait_for(&mut ra, "bob offline", |e| {
+        matches!(e, CoreEvent::Presence { online: false, .. })
+    })
+    .await;
+
+    let big = src.path().join("movie.bin");
+    let total = 6 * 1024 * 1024 + 7;
+    write_pattern(&big, total);
+    let sent = a
+        .send_file(&kb, &big, "movie.bin", "video/mp4", "", Some(1000))
+        .unwrap();
+
+    // The first 2 MB "arrived" before the connection dropped.
+    let mut partial: Vec<u8> = std::fs::read(&big).unwrap()[..2 * 1024 * 1024].to_vec();
+    if corrupt {
+        partial[1000] ^= 0xff;
+    }
+    let partial_path = files::partial_path(&media, &sent.id);
+    std::fs::create_dir_all(partial_path.parent().unwrap()).unwrap();
+    std::fs::write(&partial_path, &partial).unwrap();
+
+    let b = Core::start(db_.path(), NetMode::Local(lookup.clone())).unwrap();
+    let mut rb = b.subscribe();
+    wait_for(&mut rb, "file complete", |e| {
+        matches!(e, CoreEvent::MessageUpdated(m)
+            if m.id == sent.id && m.attachment.as_ref().is_some_and(|a| a.state == TransferState::Done))
+    })
+    .await;
+    let got = b.message(&sent.id).unwrap().attachment.unwrap();
+    let path = std::path::PathBuf::from(got.path.unwrap());
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), total as u64);
+    assert_eq!(
+        files::to_hex(&files::hash_file(&path).unwrap()),
+        got.sha256,
+        "result matches the announced hash"
+    );
+    assert_eq!(std::fs::read(&big).unwrap(), std::fs::read(&path).unwrap());
+    assert_eq!(got.duration_ms, Some(1000));
+
+    a.shutdown();
+    b.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_interrupted_download_resumes_from_the_partial_file() {
+    offline_partial_scenario(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_corrupt_partial_is_detected_and_refetched() {
+    offline_partial_scenario(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stranger_cannot_push_a_picture_before_being_accepted() {
+    let lookup = MemoryLookup::new();
+    let (da, ds, src) = (
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+    );
+    let start = |dir: &std::path::Path, name: &str| {
+        let core = Core::start(dir, NetMode::Local(lookup.clone())).unwrap();
+        core.save_settings(&Settings {
+            display_name: name.into(),
+            onboarded: true,
+            ..Settings::default()
+        })
+        .unwrap();
+        core
+    };
+    let a = start(da.path(), "Alice");
+    let stranger = start(ds.path(), "Stranger");
+    let mut ra = a.subscribe();
+
+    let pic = src.path().join("s.png");
+    image::RgbImage::from_fn(64, 64, |x, y| image::Rgb([x as u8, y as u8, 1]))
+        .save(&pic)
+        .unwrap();
+    stranger.set_avatar(&pic).unwrap();
+    stranger.add_contact(&a.my_key(), None).unwrap();
+    wait_for(&mut ra, "request", |e| {
+        matches!(e, CoreEvent::RequestReceived { .. })
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let ks = stranger.my_key();
+    assert!(
+        a.contact(&ks).unwrap().avatar.is_none(),
+        "nothing stored before accepting"
+    );
+    assert!(!files::avatar_dir(&a.media_dir()).exists());
+
+    // Once accepted, the picture arrives without any reconnect.
+    a.accept(&ks).unwrap();
+    for _ in 0..100 {
+        if a.contact(&ks).unwrap().avatar.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(a.contact(&ks).unwrap().avatar.is_some());
+
+    a.shutdown();
+    stranger.shutdown();
+}

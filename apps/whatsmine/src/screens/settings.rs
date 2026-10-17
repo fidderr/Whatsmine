@@ -3,11 +3,13 @@ use whatsmine_core::Settings;
 
 use crate::app::{Net, Rev, SettingsSig, ToastSig, Translations, t, toast, use_core, use_tr};
 use crate::components::{
-    BottomNav, ConfirmDialog, Dropdown, Icon, IconName, Tab, ToastLevel, ToggleRow,
+    Avatar, BottomNav, CameraMode, CameraOverlay, ConfirmDialog, Dropdown, Icon, IconName, Tab,
+    ToastLevel, ToggleRow,
 };
 use crate::fmt;
 use crate::i18n;
 use crate::js;
+use crate::media::{self, Picked};
 
 #[component]
 pub fn SettingsScreen() -> Element {
@@ -20,6 +22,7 @@ pub fn SettingsScreen() -> Element {
     let mut toast_sig = use_context::<ToastSig>();
     let mut name = use_signal(|| settings.peek().display_name.clone());
     let mut confirm_wipe = use_signal(|| false);
+    let mut camera = use_signal(|| false);
 
     let save_core = core.clone();
     let update = use_callback(move |f: Box<dyn Fn(&mut Settings)>| {
@@ -53,6 +56,69 @@ pub fn SettingsScreen() -> Element {
     let copy_key = my_key.clone();
     let wipe_core = core.clone();
 
+    let size_options: Vec<(String, String)> = [
+        ("100", "settings.size_100"),
+        ("500", "settings.size_500"),
+        ("2048", "settings.size_2048"),
+        ("10240", "settings.size_10240"),
+        ("0", "settings.size_0"),
+    ]
+    .iter()
+    .map(|(v, k)| (v.to_string(), t(&tr, k)))
+    .collect();
+
+    // Profile picture: from the gallery, from the camera, or removed.
+    let apply_photo = {
+        let core = core.clone();
+        move |file: Picked| {
+            let core = core.clone();
+            spawn(async move {
+                let ok = media::set_avatar(core.clone(), file).await;
+                settings.set(core.settings());
+                if !ok {
+                    toast(
+                        &mut toast_sig,
+                        t(&tr, "settings.photo_failed"),
+                        ToastLevel::Error,
+                    );
+                }
+            });
+        }
+    };
+    let choose_photo = {
+        let apply = apply_photo.clone();
+        move |_| {
+            let apply = apply.clone();
+            spawn(async move {
+                match media::pick(media::IMAGES, false).await {
+                    None => toast(
+                        &mut toast_sig,
+                        t(&tr, "attach.unavailable"),
+                        ToastLevel::Warning,
+                    ),
+                    Some(mut files) if !files.is_empty() => apply(files.remove(0)),
+                    Some(_) => {}
+                }
+            });
+        }
+    };
+    let take_photo = {
+        let apply = apply_photo.clone();
+        move |_| {
+            if media::NATIVE_CAMERA {
+                let apply = apply.clone();
+                spawn(async move {
+                    if let Some(file) = media::capture(false).await {
+                        apply(file);
+                    }
+                });
+            } else {
+                camera.set(true);
+            }
+        }
+    };
+    let remove_core = core.clone();
+    let camera_apply = apply_photo.clone();
     rsx! {
         div { class: "screen",
             div { class: "header",
@@ -61,6 +127,36 @@ pub fn SettingsScreen() -> Element {
 
             div { class: "settings-section",
                 label { class: "section-label", "{t(&tr, \"settings.profile\")}" }
+                div { class: "profile-photo",
+                    Avatar {
+                        id: "me".to_string(),
+                        name: s.display_name.clone(),
+                        size: "large",
+                        image: s.avatar.clone(),
+                    }
+                    div { class: "photo-actions",
+                        button { class: "secondary-btn", onclick: choose_photo,
+                            Icon { name: IconName::Image, size: 18 }
+                            "{t(&tr, \"settings.photo_choose\")}"
+                        }
+                        button { class: "secondary-btn", onclick: take_photo,
+                            Icon { name: IconName::Camera, size: 18 }
+                            "{t(&tr, \"settings.photo_take\")}"
+                        }
+                        if s.avatar.is_some() {
+                            button {
+                                class: "secondary-btn danger",
+                                onclick: move |_| {
+                                    let _ = remove_core.clear_avatar();
+                                    settings.set(remove_core.settings());
+                                },
+                                Icon { name: IconName::Trash, size: 18 }
+                                "{t(&tr, \"settings.photo_remove\")}"
+                            }
+                        }
+                    }
+                }
+                p { class: "setting-hint", "{t(&tr, \"settings.photo_hint\")}" }
                 div { class: "input-row",
                     input {
                         r#type: "text",
@@ -141,6 +237,20 @@ pub fn SettingsScreen() -> Element {
                 }
             }
 
+            div { class: "settings-section",
+                label { class: "section-label", "{t(&tr, \"settings.files\")}" }
+                p { class: "setting-hint", style: "margin: 0 0 6px;", "{t(&tr, \"settings.max_file\")}" }
+                Dropdown {
+                    value: s.max_file_mb.to_string(),
+                    options: size_options,
+                    on_change: move |v: String| {
+                        let mb = v.parse::<u64>().unwrap_or(2048);
+                        update.call(Box::new(move |s: &mut Settings| s.max_file_mb = mb));
+                    },
+                }
+                p { class: "setting-hint", "{t(&tr, \"settings.max_file_hint\")}" }
+            }
+
             if !blocked.is_empty() {
                 div { class: "settings-section",
                     label { class: "section-label", "{t(&tr, \"settings.blocked\")}" }
@@ -168,6 +278,18 @@ pub fn SettingsScreen() -> Element {
                     "{t(&tr, \"settings.wipe\")}"
                 }
                 p { class: "setting-hint", "{t(&tr, \"settings.wipe_hint\")}" }
+            }
+
+            if camera() {
+                CameraOverlay {
+                    mode: CameraMode::Photo,
+                    on_done: move |file: Option<Picked>| {
+                        camera.set(false);
+                        if let Some(file) = file {
+                            camera_apply(file);
+                        }
+                    },
+                }
             }
 
             if confirm_wipe() {

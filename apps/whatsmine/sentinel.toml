@@ -1,0 +1,10 @@
+# WhatsMine — mobile-sentinel build configuration, used by build_sentinel
+# (run from the workspace root via ./build.sh android, which passes --app whatsmine).
+#
+# The package name comes from Dioxus.toml ([bundle] identifier). Capabilities
+# are NOT listed here: build_sentinel derives them from the `mobile-sentinel`
+# features in apps/whatsmine/Cargo.toml (media_picker, camera, recorder, share).
+
+[android]
+activity = "dev.dioxus.main.MainActivity"
+icon = "apps/whatsmine/assets/icon.png"

@@ -49,7 +49,7 @@ pub fn Requests() -> Element {
                     div { class: "list",
                         for c in outgoing {
                             Link { key: "{c.id}", to: Route::Chat { id: c.id.clone() }, class: "card",
-                                Avatar { id: c.id.clone(), name: c.display_name() }
+                                Avatar { id: c.id.clone(), name: c.display_name(), image: c.avatar.clone() }
                                 div { class: "card-main",
                                     span { class: "card-title", "{c.display_name()}" }
                                     span { class: "card-sub accent", "{t(&tr, \"chats.waiting\")}" }
@@ -79,7 +79,7 @@ fn IncomingRequest(contact: Contact) -> Element {
     rsx! {
         div { class: "card static", style: "flex-direction: column; align-items: stretch;",
             div { style: "display: flex; gap: 12px; align-items: center;",
-                Avatar { id: contact.id.clone(), name: name.clone() }
+                Avatar { id: contact.id.clone(), name: name.clone(), image: contact.avatar.clone() }
                 div { class: "card-main",
                     span { class: "card-title", "{name}" }
                     span { class: "card-sub", "{t(&tr, \"requests.key_starts\")} {short}" }

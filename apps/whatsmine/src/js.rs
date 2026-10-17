@@ -36,3 +36,12 @@ pub fn focus(id: &str) {
         "requestAnimationFrame(() => {{ const el = document.getElementById({arg}); if (el) el.focus(); }});"
     ));
 }
+
+/// Scrolls to the end only if the reader is already near it, so a photo
+/// finishing loading does not yank someone who scrolled up.
+pub fn scroll_if_near_bottom(id: &str) {
+    let arg = serde_json::to_string(id).unwrap_or_default();
+    document::eval(&format!(
+        "requestAnimationFrame(() => {{ const el = document.getElementById({arg}); if (el && el.scrollHeight - el.scrollTop - el.clientHeight < 400) el.scrollTop = el.scrollHeight; }});"
+    ));
+}
