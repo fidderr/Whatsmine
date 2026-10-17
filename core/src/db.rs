@@ -9,10 +9,17 @@ use std::sync::Mutex;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::model::{
-    ChatSummary, Contact, ContactState, Message, MessageStatus, Millis, Settings, now_ms,
+    Attachment, ChatSummary, Contact, ContactState, Message, MessageStatus, Millis, Settings,
+    TransferState, now_ms,
 };
 
-const CURRENT_VERSION: u32 = 1;
+const CURRENT_VERSION: u32 = 2;
+
+/// v1 → v2: attachments (JSON) on messages, profile pictures on contacts.
+const MIGRATE_V2: &str = "
+ALTER TABLE messages ADD COLUMN attachment TEXT;
+ALTER TABLE contacts ADD COLUMN avatar TEXT;
+";
 
 const SCHEMA_V1: &str = "
 CREATE TABLE IF NOT EXISTS settings (
@@ -77,6 +84,9 @@ impl Database {
         let version: u32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if version < 1 {
             conn.execute_batch(SCHEMA_V1)?;
+        }
+        if version < 2 {
+            conn.execute_batch(MIGRATE_V2)?;
         }
         conn.execute_batch(&format!("PRAGMA user_version = {CURRENT_VERSION}"))?;
         Ok(Self {
@@ -151,7 +161,7 @@ impl Database {
     pub fn contact(&self, id: &str) -> Option<Contact> {
         self.lock()
             .query_row(
-                "SELECT id, their_name, nickname, state, last_seen, created_at
+                "SELECT id, their_name, nickname, state, last_seen, created_at, avatar
                  FROM contacts WHERE id = ?1",
                 params![id],
                 contact_from_row,
@@ -165,7 +175,7 @@ impl Database {
         let conn = self.lock();
         let mut stmt = conn
             .prepare(
-                "SELECT id, their_name, nickname, state, last_seen, created_at
+                "SELECT id, their_name, nickname, state, last_seen, created_at, avatar
                  FROM contacts ORDER BY last_activity DESC",
             )
             .expect("valid SQL");
@@ -282,8 +292,8 @@ impl Database {
         let conn = self.lock();
         let n = conn.execute(
             "INSERT OR IGNORE INTO messages
-             (id, contact_id, outgoing, body, sent_at, received_at, status, read)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             (id, contact_id, outgoing, body, sent_at, received_at, status, read, attachment)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 m.id,
                 m.contact_id,
@@ -292,7 +302,10 @@ impl Database {
                 m.sent_at,
                 m.received_at,
                 m.status as i64,
-                m.read
+                m.read,
+                m.attachment
+                    .as_ref()
+                    .map(|a| serde_json::to_string(a).expect("attachment serializes"))
             ],
         )?;
         if n > 0 {
@@ -412,6 +425,48 @@ impl Database {
             .execute("DELETE FROM messages WHERE id = ?1", params![id]);
     }
 
+    /// Replaces a message's attachment metadata.
+    pub fn set_attachment(&self, id: &str, a: &Attachment) {
+        let json = serde_json::to_string(a).expect("attachment serializes");
+        let _ = self.lock().execute(
+            "UPDATE messages SET attachment = ?2 WHERE id = ?1",
+            params![id, json],
+        );
+    }
+
+    /// Updates just the transfer state (and optionally the local path).
+    /// Returns the updated message.
+    pub fn set_transfer(
+        &self,
+        id: &str,
+        state: TransferState,
+        path: Option<&str>,
+    ) -> Option<Message> {
+        let mut m = self.message(id)?;
+        let a = m.attachment.as_mut()?;
+        a.state = state;
+        if let Some(p) = path {
+            a.path = Some(p.to_string());
+        }
+        self.set_attachment(id, a);
+        Some(m)
+    }
+
+    /// Local files of attachments in a chat (to delete with it).
+    pub fn attachment_paths(&self, contact_id: &str) -> Vec<String> {
+        self.messages(contact_id, None, u32::MAX)
+            .into_iter()
+            .filter_map(|m| m.attachment.and_then(|a| a.path))
+            .collect()
+    }
+
+    pub fn set_avatar(&self, contact_id: &str, path: Option<&str>) {
+        let _ = self.lock().execute(
+            "UPDATE contacts SET avatar = ?2 WHERE id = ?1",
+            params![contact_id, path],
+        );
+    }
+
     // ---- drafts ----
 
     pub fn draft(&self, contact_id: &str) -> String {
@@ -441,7 +496,8 @@ impl Database {
     }
 }
 
-const MSG_COLS: &str = "id, contact_id, outgoing, body, sent_at, received_at, status, read";
+const MSG_COLS: &str =
+    "id, contact_id, outgoing, body, sent_at, received_at, status, read, attachment";
 
 fn contact_from_row(r: &Row<'_>) -> rusqlite::Result<Contact> {
     Ok(Contact {
@@ -451,10 +507,12 @@ fn contact_from_row(r: &Row<'_>) -> rusqlite::Result<Contact> {
         state: ContactState::parse(&r.get::<_, String>(3)?),
         last_seen: r.get(4)?,
         created_at: r.get(5)?,
+        avatar: r.get(6)?,
     })
 }
 
 fn message_from_row(r: &Row<'_>) -> rusqlite::Result<Message> {
+    let attachment: Option<String> = r.get(8)?;
     Ok(Message {
         id: r.get(0)?,
         contact_id: r.get(1)?,
@@ -464,6 +522,7 @@ fn message_from_row(r: &Row<'_>) -> rusqlite::Result<Message> {
         received_at: r.get(5)?,
         status: MessageStatus::from_i64(r.get(6)?),
         read: r.get(7)?,
+        attachment: attachment.and_then(|s| serde_json::from_str(&s).ok()),
     })
 }
 
@@ -496,7 +555,60 @@ mod tests {
             received_at: sent_at,
             status: MessageStatus::Queued,
             read: false,
+            attachment: None,
         }
+    }
+
+    #[test]
+    fn attachments_round_trip_and_migration_upgrades_a_v1_file() {
+        let db = Database::open_in_memory().unwrap();
+        db.upsert_contact("k", ContactState::Accepted, None, None)
+            .unwrap();
+        let mut m = msg("f1", "k", true, 1);
+        m.attachment = Some(Attachment {
+            name: "a.pdf".into(),
+            mime: "application/pdf".into(),
+            size: 10,
+            sha256: "00".repeat(32),
+            path: None,
+            state: TransferState::Transferring,
+            duration_ms: Some(5),
+        });
+        db.insert_message(&m).unwrap();
+        assert_eq!(db.message("f1").unwrap().attachment, m.attachment);
+        let done = db
+            .set_transfer("f1", TransferState::Done, Some("/x/f1.pdf"))
+            .unwrap();
+        let a = done.attachment.unwrap();
+        assert_eq!(
+            (a.state, a.path.as_deref()),
+            (TransferState::Done, Some("/x/f1.pdf"))
+        );
+        db.set_avatar("k", Some("/x/k.jpg"));
+        assert_eq!(db.contact("k").unwrap().avatar.as_deref(), Some("/x/k.jpg"));
+
+        // A database written by the previous version (schema v1) upgrades in place.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA_V1).unwrap();
+            conn.execute_batch("PRAGMA user_version = 1").unwrap();
+            conn.execute(
+                "INSERT INTO contacts (id, state, created_at, last_activity) VALUES ('c', 'accepted', 1, 1)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO messages (id, contact_id, outgoing, body, sent_at, received_at) VALUES ('m', 'c', 1, 'hoi', 1, 1)",
+                [],
+            )
+            .unwrap();
+        }
+        let db = Database::open(&path).unwrap();
+        let old = db.message("m").unwrap();
+        assert_eq!((old.body.as_str(), old.attachment), ("hoi", None));
+        assert_eq!(db.contact("c").unwrap().avatar, None);
     }
 
     #[test]

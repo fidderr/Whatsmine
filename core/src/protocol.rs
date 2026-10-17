@@ -51,7 +51,40 @@ pub enum Frame {
     /// treated as gone, so "online" stops showing within seconds when an app
     /// is killed without closing its connection.
     Ping,
+    /// Our profile picture (JPEG, at most [`MAX_AVATAR`] bytes), or `None`
+    /// to remove it. Sent on every session start and when it changes.
+    Profile {
+        avatar: Option<Vec<u8>>,
+    },
+    /// A file message. Re-sent until delivered, like `Msg`. The bytes follow
+    /// on a separate stream once the receiver asks with `FileWant`.
+    FileOffer {
+        id: [u8; 16],
+        sent_at: i64,
+        name: String,
+        mime: String,
+        size: u64,
+        sha256: [u8; 32],
+        caption: String,
+        duration_ms: Option<u64>,
+    },
+    /// "Send me this file, starting at byte `offset`" (resume support).
+    FileWant {
+        id: [u8; 16],
+        offset: u64,
+    },
+    /// "I won't take this file" (over my size limit).
+    FileDecline {
+        id: [u8; 16],
+    },
 }
+
+/// Largest profile picture we send or accept.
+pub const MAX_AVATAR: usize = 128 * 1024;
+
+/// First bytes of every file-data stream, before the 16-byte id and the
+/// 8-byte big-endian offset.
+pub const FILE_STREAM_MAGIC: &[u8; 4] = b"WMF1";
 
 /// How often an idle connection sends a [`Frame::Ping`].
 pub const PING_EVERY: std::time::Duration = std::time::Duration::from_secs(4);
@@ -131,6 +164,24 @@ mod tests {
             },
             Frame::Typing,
             Frame::Ping,
+            Frame::Profile {
+                avatar: Some(vec![0xff, 0xd8, 1, 2]),
+            },
+            Frame::FileOffer {
+                id: [3; 16],
+                sent_at: 5,
+                name: "foto.jpg".into(),
+                mime: "image/jpeg".into(),
+                size: 123_456_789,
+                sha256: [9; 32],
+                caption: "kijk".into(),
+                duration_ms: Some(4200),
+            },
+            Frame::FileWant {
+                id: [3; 16],
+                offset: 1 << 33,
+            },
+            Frame::FileDecline { id: [3; 16] },
         ];
         for f in frames {
             let bytes = encode(&f).unwrap();

@@ -57,6 +57,8 @@ pub struct Contact {
     /// When their last session with us ended. `None` if never seen or hidden.
     pub last_seen: Option<Millis>,
     pub created_at: Millis,
+    /// Local path of their profile picture, if they shared one.
+    pub avatar: Option<String>,
 }
 
 impl Contact {
@@ -115,6 +117,59 @@ pub struct Message {
     pub status: MessageStatus,
     /// For incoming messages: whether we have read it.
     pub read: bool,
+    /// A file (photo, video, voice note, document). `body` is then its
+    /// caption, possibly empty.
+    pub attachment: Option<Attachment>,
+}
+
+/// Where a file transfer stands, on either side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TransferState {
+    /// Waiting for the other device or moving bytes.
+    Transferring,
+    /// The complete, verified file is on the receiver.
+    Done,
+    /// The receiver refused it (over their size limit).
+    Declined,
+    /// Could not be completed (for example the data was corrupt twice).
+    Failed,
+}
+
+/// What kind of viewer an attachment gets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaKind {
+    Image,
+    Video,
+    Audio,
+    File,
+}
+
+/// A file sent or received as a message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Attachment {
+    /// Original file name, display only.
+    pub name: String,
+    pub mime: String,
+    pub size: u64,
+    /// SHA-256 of the content, hex. The receiver verifies it.
+    pub sha256: String,
+    /// The local copy, once we have the whole file (always for our own).
+    pub path: Option<String>,
+    pub state: TransferState,
+    /// Voice notes and videos: length, if known.
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+}
+
+impl Attachment {
+    pub fn kind(&self) -> MediaKind {
+        match self.mime.split('/').next().unwrap_or("") {
+            "image" => MediaKind::Image,
+            "video" => MediaKind::Video,
+            "audio" => MediaKind::Audio,
+            _ => MediaKind::File,
+        }
+    }
 }
 
 /// A chat-list row: contact plus last message and unread count.
@@ -142,7 +197,14 @@ pub struct Settings {
     pub locale: String,
     /// Extra relay URLs on top of the defaults.
     pub extra_relays: Vec<String>,
+    /// Our profile picture (local path), shared with contacts.
+    pub avatar: Option<String>,
+    /// Largest incoming file we accept, in MB. 0 = no limit.
+    pub max_file_mb: u64,
 }
+
+/// Default for [`Settings::max_file_mb`].
+pub const DEFAULT_MAX_FILE_MB: u64 = 2048;
 
 impl Default for Settings {
     fn default() -> Self {
@@ -155,6 +217,8 @@ impl Default for Settings {
             theme: "system".into(),
             locale: "en".into(),
             extra_relays: Vec::new(),
+            avatar: None,
+            max_file_mb: DEFAULT_MAX_FILE_MB,
         }
     }
 }
@@ -186,6 +250,15 @@ pub enum CoreEvent {
         contact_id: String,
     },
     Net(NetStatus),
+    /// A message changed in place (attachment progress state, path).
+    MessageUpdated(Message),
+    /// Bytes moved for a file, either direction. Throttled.
+    Transfer {
+        contact_id: String,
+        message_id: String,
+        done: u64,
+        total: u64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -14,6 +14,7 @@
 
 pub mod db;
 mod engine;
+pub mod files;
 pub mod identity;
 pub mod model;
 pub mod paths;
@@ -104,6 +105,7 @@ impl Core {
             mode,
             events.clone(),
             shared.clone(),
+            files::media_dir(dir),
             cmd_rx,
         ));
 
@@ -151,6 +153,8 @@ impl Core {
     pub fn wipe_everything(&self) -> anyhow::Result<()> {
         self.shutdown();
         self.inner.db.wipe()?;
+        let _ = std::fs::remove_dir_all(self.media_dir());
+        let _ = std::fs::remove_file(self.inner.dir.join("avatar.jpg"));
         std::fs::remove_file(self.inner.dir.join(identity::KEY_FILE))?;
         Ok(())
     }
@@ -300,6 +304,10 @@ impl Core {
     /// Deletes the contact and the whole chat from this device.
     pub fn delete_contact(&self, id: &str) -> anyhow::Result<()> {
         let peer = self.peer(id)?;
+        self.delete_chat_files(id);
+        if let Some(avatar) = self.inner.db.contact(id).and_then(|c| c.avatar) {
+            let _ = std::fs::remove_file(avatar);
+        }
         self.inner.db.delete_contact(id);
         self.cmd(Cmd::Disconnect(peer));
         self.emit(CoreEvent::ContactsChanged);
@@ -308,8 +316,15 @@ impl Core {
 
     /// Clears the messages but keeps the contact.
     pub fn clear_chat(&self, id: &str) {
+        self.delete_chat_files(id);
         self.inner.db.clear_chat(id);
         self.emit(CoreEvent::ContactsChanged);
+    }
+
+    fn delete_chat_files(&self, contact_id: &str) {
+        for m in self.inner.db.messages(contact_id, None, u32::MAX) {
+            self.remove_files(&m);
+        }
     }
 
     fn peer(&self, id: &str) -> anyhow::Result<PublicKey> {
@@ -344,6 +359,7 @@ impl Core {
             received_at: now,
             status: MessageStatus::Queued,
             read: true,
+            attachment: None,
         };
         self.inner.db.insert_message(&message)?;
         self.inner.db.set_draft(contact_id, "");
@@ -374,10 +390,125 @@ impl Core {
         }
     }
 
-    /// Deletes a message on this device only.
+    /// Deletes a message on this device only (and its file, if any).
     pub fn delete_message(&self, message_id: &str) {
+        if let Some(m) = self.inner.db.message(message_id) {
+            self.remove_files(&m);
+        }
         self.inner.db.delete_message(message_id);
         self.emit(CoreEvent::ContactsChanged);
+    }
+
+    pub fn message(&self, message_id: &str) -> Option<Message> {
+        self.inner.db.message(message_id)
+    }
+
+    /// Where files are kept on this device.
+    pub fn media_dir(&self) -> PathBuf {
+        files::media_dir(&self.inner.dir)
+    }
+
+    /// Sends a file (photo, video, voice note, document). It is copied into
+    /// WhatsMine's own storage first, so the original may be moved or
+    /// deleted afterwards. Blocks while copying: call it off the UI thread
+    /// for big files.
+    pub fn send_file(
+        &self,
+        contact_id: &str,
+        src: &Path,
+        name: &str,
+        mime: &str,
+        caption: &str,
+        duration_ms: Option<u64>,
+    ) -> anyhow::Result<Message> {
+        let caption = caption.trim();
+        ensure!(caption.len() <= protocol::MAX_TEXT, "too_long");
+        let peer = self.peer(contact_id)?;
+        match self.inner.db.contact(contact_id).map(|c| c.state) {
+            Some(ContactState::Accepted | ContactState::PendingOut) => {}
+            _ => bail!("not_a_contact"),
+        }
+        let id = uuid::Uuid::now_v7().to_string();
+        let name = files::clean_file_name(name);
+        let dest = files::final_path(&self.media_dir(), &id, &name);
+        let (size, sha) = files::copy_and_hash(src, &dest).context("file_unreadable")?;
+        if size == 0 {
+            let _ = std::fs::remove_file(&dest);
+            bail!("empty_file");
+        }
+        let now = now_ms();
+        let message = Message {
+            id,
+            contact_id: contact_id.to_string(),
+            outgoing: true,
+            body: caption.to_string(),
+            sent_at: now,
+            received_at: now,
+            status: MessageStatus::Queued,
+            read: true,
+            attachment: Some(Attachment {
+                name,
+                mime: files::clean_mime(mime),
+                size,
+                sha256: files::to_hex(&sha),
+                path: Some(dest.to_string_lossy().into_owned()),
+                state: TransferState::Transferring,
+                duration_ms,
+            }),
+        };
+        self.inner.db.insert_message(&message)?;
+        self.emit(CoreEvent::MessageAdded(message.clone()));
+        self.emit(CoreEvent::ContactsChanged);
+        self.cmd(Cmd::SendOne {
+            contact: peer,
+            message_id: message.id.clone(),
+        });
+        Ok(message)
+    }
+
+    /// Asks for a failed incoming file again, from the start.
+    pub fn retry_file(&self, message_id: &str) {
+        let Some(m) = self.inner.db.message(message_id) else {
+            return;
+        };
+        if m.outgoing || m.attachment.is_none() {
+            return;
+        }
+        if let Ok(peer) = self.peer(&m.contact_id) {
+            self.cmd(Cmd::RetryFile {
+                contact: peer,
+                message_id: message_id.to_string(),
+            });
+        }
+    }
+
+    /// Sets our profile picture from any image file (cropped to a square,
+    /// made small) and shares it with contacts.
+    pub fn set_avatar(&self, src: &Path) -> anyhow::Result<()> {
+        let bytes = files::make_avatar(src).context("not_an_image")?;
+        let path = self.inner.dir.join("avatar.jpg");
+        let tmp = self.inner.dir.join("avatar.jpg.tmp");
+        std::fs::write(&tmp, &bytes)?;
+        std::fs::rename(&tmp, &path)?;
+        let mut s = self.settings();
+        s.avatar = Some(path.to_string_lossy().into_owned());
+        self.save_settings(&s)
+    }
+
+    pub fn clear_avatar(&self) -> anyhow::Result<()> {
+        let mut s = self.settings();
+        if let Some(p) = s.avatar.take() {
+            let _ = std::fs::remove_file(p);
+        }
+        self.save_settings(&s)
+    }
+
+    /// Deletes a message's local file and any partial download.
+    fn remove_files(&self, m: &Message) {
+        if let Some(path) = m.attachment.as_ref().and_then(|a| a.path.as_ref()) {
+            let _ = std::fs::remove_file(path);
+        }
+        let _ = std::fs::remove_file(files::partial_path(&self.media_dir(), &m.id));
     }
 
     pub fn draft(&self, contact_id: &str) -> String {

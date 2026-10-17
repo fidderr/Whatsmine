@@ -8,6 +8,7 @@
 //! dedupe by message id, so re-sending is always safe.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -18,8 +19,12 @@ use tokio::time::Instant;
 
 use crate::NetMode;
 use crate::db::Database;
+use crate::files::{self, ReceiveCtx, Received};
 use crate::identity::key_to_string;
-use crate::model::{ContactState, CoreEvent, Message, MessageStatus, NetStatus, Settings, now_ms};
+use crate::model::{
+    Attachment, ContactState, CoreEvent, Message, MessageStatus, NetStatus, Settings,
+    TransferState, now_ms,
+};
 use crate::protocol::{
     self, ALPN, Frame, MAX_TEXT, PROTO_VERSION, ReceiptKind, id_from_bytes, id_to_bytes,
 };
@@ -46,8 +51,13 @@ pub(crate) enum Cmd {
     Typing(PublicKey),
     /// Drop any session with this peer (blocked or deleted).
     Disconnect(PublicKey),
-    /// Name or privacy flags changed; re-announce.
+    /// Name, picture or privacy flags changed; re-announce.
     SettingsChanged,
+    /// Try a failed incoming file again from the start.
+    RetryFile {
+        contact: PublicKey,
+        message_id: String,
+    },
     Shutdown(std::sync::mpsc::Sender<()>),
 }
 
@@ -69,6 +79,20 @@ enum Internal {
         sid: u64,
     },
     Net(NetStatus),
+    Progress {
+        contact_id: String,
+        message_id: String,
+        done: u64,
+        total: u64,
+    },
+    UploadEnded {
+        message_id: String,
+    },
+    Download {
+        peer: PublicKey,
+        message_id: Option<String>,
+        result: Received,
+    },
 }
 
 struct Session {
@@ -101,6 +125,13 @@ pub(crate) struct Engine {
     typing_sent: HashMap<PublicKey, Instant>,
     next_sid: u64,
     tx: mpsc::UnboundedSender<Internal>,
+    media: PathBuf,
+    /// Outgoing file transfers running now (message ids).
+    uploads: HashSet<String>,
+    /// Incoming file transfers running now (shared with receive tasks).
+    downloads: Arc<Mutex<HashSet<String>>>,
+    /// How often a download failed its hash check (retried once).
+    corrupt_retries: HashMap<String, u8>,
 }
 
 fn emit(events: &broadcast::Sender<CoreEvent>, ev: CoreEvent) {
@@ -115,11 +146,16 @@ impl Engine {
         mode: NetMode,
         events: broadcast::Sender<CoreEvent>,
         shared: Shared,
+        media: PathBuf,
         mut cmds: mpsc::UnboundedReceiver<Cmd>,
     ) {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let me = key.public();
         let mut engine = Engine {
+            media,
+            uploads: HashSet::new(),
+            downloads: Arc::new(Mutex::new(HashSet::new())),
+            corrupt_retries: HashMap::new(),
             db,
             key,
             me,
@@ -290,7 +326,22 @@ impl Engine {
                 let peers: Vec<_> = self.sessions.keys().copied().collect();
                 for p in peers {
                     self.send_hello(p);
+                    self.send_profile(p);
                 }
+            }
+            Cmd::RetryFile {
+                contact,
+                message_id,
+            } => {
+                let _ = std::fs::remove_file(files::partial_path(&self.media, &message_id));
+                self.corrupt_retries.remove(&message_id);
+                if let Some(m) =
+                    self.db
+                        .set_transfer(&message_id, TransferState::Transferring, None)
+                {
+                    emit(&self.events, CoreEvent::MessageUpdated(m));
+                }
+                self.want_file(contact, &message_id);
             }
             Cmd::Shutdown(_) => unreachable!("handled in run loop"),
         }
@@ -374,7 +425,118 @@ impl Engine {
             Internal::Frame { peer, frame } => self.on_frame(peer, frame),
             Internal::Closed { peer, sid } => self.on_closed(peer, sid),
             Internal::Net(status) => self.set_net(status),
+            Internal::Progress {
+                contact_id,
+                message_id,
+                done,
+                total,
+            } => emit(
+                &self.events,
+                CoreEvent::Transfer {
+                    contact_id,
+                    message_id,
+                    done,
+                    total,
+                },
+            ),
+            Internal::UploadEnded { message_id } => {
+                self.uploads.remove(&message_id);
+            }
+            Internal::Download {
+                peer,
+                message_id,
+                result,
+            } => {
+                if let Some(id) = message_id {
+                    self.on_download_ended(peer, &id, result);
+                }
+            }
         }
+    }
+
+    fn on_download_ended(&mut self, peer: PublicKey, id: &str, result: Received) {
+        match result {
+            Received::Done(path) => {
+                self.corrupt_retries.remove(id);
+                if let Some(m) =
+                    self.db
+                        .set_transfer(id, TransferState::Done, Some(&path.to_string_lossy()))
+                {
+                    emit(&self.events, CoreEvent::MessageUpdated(m));
+                }
+                if let Some(mid) = id_to_bytes(id) {
+                    self.send(
+                        peer,
+                        Frame::Receipt {
+                            kind: ReceiptKind::Delivered,
+                            ids: vec![mid],
+                        },
+                    );
+                }
+            }
+            Received::Corrupt => {
+                let tries = self.corrupt_retries.entry(id.to_string()).or_insert(0);
+                *tries += 1;
+                if *tries <= 1 {
+                    self.want_file(peer, id);
+                } else if let Some(m) = self.db.set_transfer(id, TransferState::Failed, None) {
+                    emit(&self.events, CoreEvent::MessageUpdated(m));
+                }
+            }
+            // The rest arrives when the sender re-offers on the next session,
+            // or right away if this session is still up.
+            Received::Interrupted => self.want_file(peer, id),
+            Received::Rejected => {}
+        }
+    }
+
+    /// Asks the peer for (the rest of) an incoming file.
+    fn want_file(&self, peer: PublicKey, id: &str) {
+        let Some(mid) = id_to_bytes(id) else { return };
+        if self
+            .downloads
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains(id)
+        {
+            return;
+        }
+        let offset = std::fs::metadata(files::partial_path(&self.media, id))
+            .map(|m| m.len())
+            .unwrap_or(0);
+        self.send(peer, Frame::FileWant { id: mid, offset });
+    }
+
+    fn start_upload(&mut self, peer: PublicKey, m: &Message, offset: u64) {
+        let Some(att) = &m.attachment else { return };
+        let (Some(path), Some(mid)) = (att.path.clone(), id_to_bytes(&m.id)) else {
+            return;
+        };
+        let Some(conn) = self.sessions.get(&peer).map(|s| s.conn.clone()) else {
+            return;
+        };
+        if offset > att.size || !self.uploads.insert(m.id.clone()) {
+            return;
+        }
+        let tx = self.tx.clone();
+        let (contact_id, message_id, size) = (m.contact_id.clone(), m.id.clone(), att.size);
+        tokio::spawn(async move {
+            let progress_tx = tx.clone();
+            let (c, i) = (contact_id.clone(), message_id.clone());
+            let result = files::upload(conn, path.into(), mid, offset, size, move |done, total| {
+                let _ = progress_tx.send(Internal::Progress {
+                    contact_id: c.clone(),
+                    message_id: i.clone(),
+                    done,
+                    total,
+                });
+            })
+            .await;
+            if let Err(e) = result {
+                tracing::debug!("upload {message_id} stopped: {e:#}");
+            }
+            let _ = tx.send(Internal::UploadEnded { message_id });
+        });
     }
 
     fn on_new_conn(
@@ -419,6 +581,17 @@ impl Engine {
         let (out_tx, out_rx) = mpsc::unbounded_channel();
         spawn_writer(send, out_rx, conn.clone());
         spawn_reader(recv, peer, sid, self.tx.clone(), conn.clone());
+        spawn_file_acceptor(
+            conn.clone(),
+            peer,
+            self.tx.clone(),
+            ReceiveCtx {
+                peer_id: id.clone(),
+                db: self.db.clone(),
+                media: self.media.clone(),
+                active: self.downloads.clone(),
+            },
+        );
         self.sessions.insert(
             peer,
             Session {
@@ -433,6 +606,7 @@ impl Engine {
 
     fn on_session_start(&mut self, peer: PublicKey) {
         self.send_hello(peer);
+        self.send_profile(peer);
         let settings = self.settings();
         match self.db.contact(&key_to_string(&peer)).map(|c| c.state) {
             Some(ContactState::Accepted) => {
@@ -461,6 +635,13 @@ impl Engine {
     fn on_accepted_session(&mut self, peer: PublicKey) {
         self.set_online(peer, true, None);
         for m in self.db.undelivered(&key_to_string(&peer)) {
+            // A declined file stays declined; don't keep offering it.
+            if m.attachment
+                .as_ref()
+                .is_some_and(|a| a.state == TransferState::Declined)
+            {
+                continue;
+            }
             self.send_message(peer, &m);
         }
         self.send_read_receipts(peer);
@@ -567,6 +748,7 @@ impl Engine {
                     received_at: now_ms(),
                     status: MessageStatus::Delivered,
                     read: false,
+                    attachment: None,
                 };
                 if self.db.insert_message(&message).unwrap_or(false) {
                     emit(&self.events, CoreEvent::MessageAdded(message));
@@ -592,6 +774,18 @@ impl Engine {
                 };
                 for mid in ids {
                     let message_id = id_from_bytes(&mid);
+                    // A delivered file is complete on their side.
+                    if let Some(m) = self.db.message(&message_id)
+                        && m.outgoing
+                        && m.contact_id == id
+                        && m.attachment
+                            .as_ref()
+                            .is_some_and(|a| a.state == TransferState::Transferring)
+                        && let Some(m) =
+                            self.db.set_transfer(&message_id, TransferState::Done, None)
+                    {
+                        emit(&self.events, CoreEvent::MessageUpdated(m));
+                    }
                     if self.db.advance_status(&id, &message_id, status) {
                         emit(
                             &self.events,
@@ -611,6 +805,148 @@ impl Engine {
             }
             // Only keeps the session alive; see the reader's timeout.
             Frame::Ping => {}
+            Frame::Profile { avatar } => {
+                if contact.is_some() && state != Some(ContactState::Blocked) {
+                    self.on_profile(&id, contact.and_then(|c| c.avatar), avatar);
+                }
+            }
+            Frame::FileOffer {
+                id: mid,
+                sent_at,
+                name,
+                mime,
+                size,
+                sha256,
+                caption,
+                duration_ms,
+            } => {
+                if state != Some(ContactState::Accepted) || caption.len() > MAX_TEXT {
+                    return;
+                }
+                self.on_file_offer(
+                    peer,
+                    Message {
+                        id: id_from_bytes(&mid),
+                        contact_id: id,
+                        outgoing: false,
+                        body: caption,
+                        sent_at,
+                        received_at: now_ms(),
+                        status: MessageStatus::Delivered,
+                        read: false,
+                        attachment: Some(Attachment {
+                            name: files::clean_file_name(&name),
+                            mime: files::clean_mime(&mime),
+                            size,
+                            sha256: files::to_hex(&sha256),
+                            path: None,
+                            state: TransferState::Transferring,
+                            duration_ms,
+                        }),
+                    },
+                );
+            }
+            Frame::FileWant { id: mid, offset } => {
+                if state != Some(ContactState::Accepted) {
+                    return;
+                }
+                let message_id = id_from_bytes(&mid);
+                if let Some(m) = self.db.message(&message_id)
+                    && m.outgoing
+                    && m.contact_id == id
+                    && m.attachment
+                        .as_ref()
+                        .is_some_and(|a| a.state != TransferState::Declined)
+                {
+                    self.start_upload(peer, &m, offset);
+                }
+            }
+            Frame::FileDecline { id: mid } => {
+                let message_id = id_from_bytes(&mid);
+                if let Some(m) = self.db.message(&message_id)
+                    && m.outgoing
+                    && m.contact_id == id
+                    && let Some(m) =
+                        self.db
+                            .set_transfer(&message_id, TransferState::Declined, None)
+                {
+                    emit(&self.events, CoreEvent::MessageUpdated(m));
+                }
+            }
+        }
+    }
+
+    fn on_profile(&self, contact_id: &str, current: Option<String>, avatar: Option<Vec<u8>>) {
+        match avatar {
+            Some(bytes)
+                if bytes.len() <= protocol::MAX_AVATAR && files::looks_like_image(&bytes) =>
+            {
+                let dir = files::avatar_dir(&self.media);
+                let path = dir.join(format!("{contact_id}.jpg"));
+                if std::fs::read(&path).ok().as_deref() == Some(bytes.as_slice())
+                    && current.is_some()
+                {
+                    return;
+                }
+                if std::fs::create_dir_all(&dir).is_ok() && std::fs::write(&path, &bytes).is_ok() {
+                    self.db
+                        .set_avatar(contact_id, Some(&path.to_string_lossy()));
+                    emit(&self.events, CoreEvent::ContactsChanged);
+                }
+            }
+            None if current.is_some() => {
+                if let Some(p) = current {
+                    let _ = std::fs::remove_file(p);
+                }
+                self.db.set_avatar(contact_id, None);
+                emit(&self.events, CoreEvent::ContactsChanged);
+            }
+            _ => {}
+        }
+    }
+
+    fn on_file_offer(&mut self, peer: PublicKey, offered: Message) {
+        let mid = offered.id.clone();
+        if self.db.insert_message(&offered).unwrap_or(false) {
+            emit(&self.events, CoreEvent::MessageAdded(offered.clone()));
+            emit(&self.events, CoreEvent::ContactsChanged);
+        }
+        let Some(m) = self.db.message(&mid) else {
+            return;
+        };
+        let Some(att) = m.attachment.as_ref() else {
+            return;
+        };
+        if m.outgoing || m.contact_id != offered.contact_id {
+            return;
+        }
+        let Some(raw) = id_to_bytes(&mid) else { return };
+        match att.state {
+            // Re-offered after our ack got lost: ack again.
+            TransferState::Done => {
+                self.send(
+                    peer,
+                    Frame::Receipt {
+                        kind: ReceiptKind::Delivered,
+                        ids: vec![raw],
+                    },
+                );
+            }
+            TransferState::Declined => {
+                self.send(peer, Frame::FileDecline { id: raw });
+            }
+            TransferState::Failed => {}
+            TransferState::Transferring => {
+                let limit_mb = self.settings().max_file_mb;
+                if limit_mb > 0 && att.size > limit_mb.saturating_mul(1024 * 1024) {
+                    if let Some(m) = self.db.set_transfer(&mid, TransferState::Declined, None) {
+                        emit(&self.events, CoreEvent::MessageUpdated(m));
+                    }
+                    self.send(peer, Frame::FileDecline { id: raw });
+                } else {
+                    self.want_file(peer, &mid);
+                }
+            }
         }
     }
 
@@ -648,16 +984,40 @@ impl Engine {
         );
     }
 
+    fn send_profile(&self, peer: PublicKey) {
+        let avatar = self
+            .settings()
+            .avatar
+            .and_then(|p| std::fs::read(p).ok())
+            .filter(|b| b.len() <= protocol::MAX_AVATAR);
+        self.send(peer, Frame::Profile { avatar });
+    }
+
     fn send_message(&self, peer: PublicKey, m: &Message) {
         let Some(id) = id_to_bytes(&m.id) else { return };
-        let sent = self.send(
-            peer,
-            Frame::Msg {
+        let frame = match &m.attachment {
+            Some(a) => {
+                let Some(sha256) = files::from_hex32(&a.sha256) else {
+                    return;
+                };
+                Frame::FileOffer {
+                    id,
+                    sent_at: m.sent_at,
+                    name: a.name.clone(),
+                    mime: a.mime.clone(),
+                    size: a.size,
+                    sha256,
+                    caption: m.body.clone(),
+                    duration_ms: a.duration_ms,
+                }
+            }
+            None => Frame::Msg {
                 id,
                 text: m.body.clone(),
                 sent_at: m.sent_at,
             },
-        );
+        };
+        let sent = self.send(peer, frame);
         if sent
             && self
                 .db
@@ -797,6 +1157,39 @@ fn spawn_writer(mut send: SendStream, mut rx: mpsc::UnboundedReceiver<Frame>, co
             }
         }
         let _ = send.finish();
+    });
+}
+
+/// Accepts the file-data streams a peer opens on this connection.
+fn spawn_file_acceptor(
+    conn: Connection,
+    peer: PublicKey,
+    tx: mpsc::UnboundedSender<Internal>,
+    ctx: ReceiveCtx,
+) {
+    let ctx = Arc::new(ctx);
+    tokio::spawn(async move {
+        while let Ok(recv) = conn.accept_uni().await {
+            let (tx, ctx) = (tx.clone(), ctx.clone());
+            tokio::spawn(async move {
+                let progress_tx = tx.clone();
+                let contact_id = ctx.peer_id.clone();
+                let (message_id, result) = files::receive(recv, &ctx, move |id, done, total| {
+                    let _ = progress_tx.send(Internal::Progress {
+                        contact_id: contact_id.clone(),
+                        message_id: id.to_string(),
+                        done,
+                        total,
+                    });
+                })
+                .await;
+                let _ = tx.send(Internal::Download {
+                    peer,
+                    message_id,
+                    result,
+                });
+            });
+        }
     });
 }
 
