@@ -80,6 +80,12 @@
     e.box.classList.toggle('peer-cam', anyCam)
   }
 
+  function setCam (r, p, on) {
+    p.cam = on
+    p.tile.classList.toggle('cam', on)
+    if (r) layout(r)
+  }
+
   function setName (p, name) {
     if (!name) return
     p.label.textContent = name
@@ -108,12 +114,13 @@
     const audio = document.createElement('audio')
     audio.autoplay = true
     e.box.append(audio)
-    p = { id, tile, video, audio, label, letter, aIdx: 0, vIdx: 0, cam: false, vdec: null }
+    p = { id, tile, video, audio, label, letter, aIdx: 0, vIdx: 0, cam: false, vdec: null, nA: 0, nV: 0 }
     setName(p, name)
 
     p.adec = new AudioDecoder({
       output: ad => {
         stats.aDec++
+        p.nA++
         p.agenW.write(ad).catch(() => quiet(() => ad.close()))
       },
       error: err => fail('audio-decoder', err)
@@ -163,6 +170,10 @@
     p.vdec = new VideoDecoder({
       output: f => {
         stats.vDec++
+        p.nV++
+        // Pictures are arriving, so show them (the peer may not have said so).
+        p.lastV = performance.now()
+        if (!p.cam) setCam(run, p, true)
         p.vgenW.write(f).catch(() => quiet(() => f.close()))
       },
       error: e => { note('video-decoder', e); p.vdec = null }
@@ -290,7 +301,7 @@
 
   // ---- call lifecycle ----
   async function start (m) {
-    await stop()
+    stop()
     const e = ensureEls()
     const r = (run = { id: m.call, closed: false, muted: false, camOn: false, peers: new Map() })
     e.box.classList.toggle('group', !!m.group)
@@ -304,16 +315,20 @@
     }
     if (r.closed) { r.mic.getTracks().forEach(t => t.stop()); return }
     try { startAudio(r) } catch (err) { fail('audio', err); return }
+    if (r.closed) return
     e.box.classList.add('active')
+    // A peer whose pictures stop (camera off, or the message was lost) goes back to the letter.
+    r.watch = setInterval(() => r.peers.forEach(p => { if (p.cam && performance.now() - (p.lastV || 0) > 3000) setCam(r, p, false) }), 1000)
     if (m.video) await cameraOn(true)
   }
 
-  async function stop () {
+  function stop () {
     ring(null)
     const r = run
     run = null
     if (!r) return
     r.closed = true
+    clearInterval(r.watch)
     quiet(() => r.micReader && r.micReader.cancel())
     quiet(() => r.camReader && r.camReader.cancel())
     ;[r.mic, r.cam].forEach(s => s && s.getTracks().forEach(t => t.stop()))
@@ -373,9 +388,8 @@
         const r = run
         if (!r) return
         const p = ensurePeer(r, m.from)
-        p.cam = !!m.on
-        p.tile.classList.toggle('cam', p.cam)
-        layout(r)
+        setCam(r, p, !!m.on)
+        if (!m.on) p.lastV = 0
         return
       }
       case 'ring': return ring(m.kind)
@@ -387,14 +401,15 @@
     state: () => run && { id: run.id, camOn: run.camOn, muted: run.muted, peers: Array.from(run.peers.keys()) },
     // Pixels in a peer's tile, for tests: true if the picture is not flat.
     tileInfo: () => run && Array.from(run.peers.values()).map(p => ({
-      id: p.id, cam: p.cam, w: p.video.videoWidth, h: p.video.videoHeight, name: p.label.textContent
+      id: p.id, cam: p.cam, w: p.video.videoWidth, h: p.video.videoHeight, name: p.label.textContent, nA: p.nA, nV: p.nV
     })),
     attach: async d => {
       dx = d
       for (;;) {
         let m
         try { m = await dx.recv() } catch (_) { return }
-        try { await handle(m) } catch (e) { note('handle', e) }
+        // Not awaited: a hang-up must not wait behind a slow camera start.
+        handle(m).catch(e => note('handle', e))
       }
     }
   }

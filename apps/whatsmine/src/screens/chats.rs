@@ -62,20 +62,20 @@ pub fn Chats() -> Element {
                 }
             }
             button {
-                class: "fab secondary-fab",
-                title: "{t(&tr, \"group.new\")}",
-                onclick: move |_| {
-                    nav.push(Route::NewGroup {});
-                },
-                Icon { name: IconName::Users, size: 22 }
-            }
-            button {
                 class: "fab",
                 title: "{t(&tr, \"add.title\")}",
                 onclick: move |_| {
                     nav.push(Route::AddContact {});
                 },
                 Icon { name: IconName::UserPlus, size: 24 }
+            }
+            button {
+                class: "fab secondary-fab",
+                title: "{t(&tr, \"group.new\")}",
+                onclick: move |_| {
+                    nav.push(Route::NewGroup {});
+                },
+                Icon { name: IconName::Users, size: 22 }
             }
             BottomNav { active: Tab::Chats }
         }

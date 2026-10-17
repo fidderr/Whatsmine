@@ -6,6 +6,11 @@
 //! the current chat.
 
 use tokio::io::{AsyncBufReadExt, BufReader};
+
+/// Whose call media is echoed back: empty = everyone, "off" = nobody,
+/// otherwise a key prefix. (Two echoing peers in one group call would
+/// otherwise feed each other forever.)
+static ECHO: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 use whatsmine_core::{Core, CoreEvent, MessageStatus, NetMode, NetStatus, paths};
 
 fn arg(name: &str) -> Option<String> {
@@ -51,22 +56,35 @@ async fn main() -> anyhow::Result<()> {
         let echo = core.clone();
         tokio::spawn(async move {
             use whatsmine_core::calls::MediaKind;
-            let (mut audio, mut video, mut bytes) = (0u64, 0u64, 0u64);
+            let mut counts: std::collections::BTreeMap<String, (u64, u64)> =
+                std::collections::BTreeMap::new();
             let mut last = std::time::Instant::now();
             while let Some(m) = media.recv().await {
-                bytes += m.data.len() as u64;
+                let entry = counts.entry(m.from.chars().take(8).collect()).or_default();
+                let echoed = {
+                    let filter = ECHO.lock().unwrap_or_else(|p| p.into_inner());
+                    filter.is_empty() || (*filter != "off" && m.from.starts_with(filter.as_str()))
+                };
                 match m.kind {
                     MediaKind::Audio => {
-                        audio += 1;
-                        echo.call_audio(m.ts, m.data);
+                        entry.0 += 1;
+                        if echoed {
+                            echo.call_audio(m.ts, m.data);
+                        }
                     }
                     MediaKind::Video => {
-                        video += 1;
-                        echo.call_video(m.ts, m.key, m.data);
+                        entry.1 += 1;
+                        if echoed {
+                            echo.call_video(m.ts, m.key, m.data);
+                        }
                     }
                 }
                 if last.elapsed() >= std::time::Duration::from_secs(2) {
-                    println!("  · call media in: {audio} audio, {video} video, {bytes} bytes");
+                    let line: Vec<String> = counts
+                        .iter()
+                        .map(|(who, (a, v))| format!("{who}: {a} audio {v} video"))
+                        .collect();
+                    println!("  · call media in: {}", line.join(" | "));
                     last = std::time::Instant::now();
                 }
             }
@@ -249,6 +267,15 @@ fn run(
                 );
             }
         }
+        "echo" => {
+            let f = if a1 == "all" {
+                String::new()
+            } else {
+                a1.to_string()
+            };
+            *ECHO.lock().unwrap_or_else(|p| p.into_inner()) = f;
+            println!("· echo: {}", if a1.is_empty() { "all" } else { a1 });
+        }
         "answer" => core.call_answer(true),
         "refuse" => core.call_answer(false),
         "hangup" => core.call_end(),
@@ -278,7 +305,7 @@ fn run(
         "help" => println!(
             "/whoami  /name <name>  /add <key> [nick]  /accept <who> [nick]  /decline <who>\n\
              /block <who>  /rename <who> <nick>  /open <who>  /to <who> <text>  /read\n\
-             /chats  /quit  /call <who|group> [video]  /answer  /refuse  /hangup\n\
+             /chats  /quit  /call <who|group> [video]  /echo <key prefix|off|all>  /answer  /refuse  /hangup\n\
              /newgroup <name> <who>...  /gadd <group> <who>  /gremove <group> <who>  /grename <group> <name>\n\
              /gleave <group>  /gdelete <group>  /ginfo <group>  /gjoin <group>  (groups work with /to and /file too)       <who> = nickname, name or key prefix; plain text → current chat"
         ),

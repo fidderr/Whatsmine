@@ -664,6 +664,19 @@ impl Core {
         }
     }
 
+    /// The name a person chose for themselves: what we may tell others.
+    /// (Our private nicknames for people never leave this device.)
+    fn public_name(&self, id: &str) -> String {
+        if id == self.my_key() {
+            return self.settings().display_name;
+        }
+        self.inner
+            .db
+            .contact(id)
+            .map(|c| c.their_name)
+            .unwrap_or_default()
+    }
+
     fn name_of(&self, id: &str) -> String {
         if id == self.my_key() {
             return self.settings().display_name;
@@ -688,7 +701,7 @@ impl Core {
         let names = state
             .members
             .iter()
-            .map(|k| (k.clone(), self.name_of(k)))
+            .map(|k| (k.clone(), self.public_name(k)))
             .collect();
         self.cmd(Cmd::GroupPublish {
             state: state.clone(),

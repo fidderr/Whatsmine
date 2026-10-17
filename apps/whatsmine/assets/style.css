@@ -1826,3 +1826,15 @@ textarea {
   font-weight: 700;
   cursor: pointer;
 }
+
+@media (orientation: portrait) {
+  #wm-call-media[data-n="2"] .wm-tiles {
+    grid-template-columns: 1fr !important;
+  }
+}
+.call-overlay.video-live .call-top {
+  align-self: stretch;
+  margin: calc(-48px - var(--safe-top, 0px)) -24px 0;
+  padding: calc(48px + var(--safe-top, 0px)) 24px 28px;
+  background: linear-gradient(rgba(0, 0, 0, 0.55), transparent);
+}

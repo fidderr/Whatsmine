@@ -921,6 +921,67 @@ mod tests {
     }
 
     #[test]
+    fn a_v2_database_upgrades_to_groups_without_losing_anything() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v2.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA_V1).unwrap();
+            conn.execute_batch(MIGRATE_V2).unwrap();
+            conn.execute_batch("PRAGMA user_version = 2").unwrap();
+            conn.execute(
+                "INSERT INTO contacts (id, their_name, state, created_at, last_activity) VALUES ('c', 'Cleo', 'accepted', 1, 1)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO messages (id, contact_id, outgoing, body, sent_at, received_at) VALUES ('m', 'c', 0, 'hoi', 1, 1)",
+                [],
+            )
+            .unwrap();
+        }
+        let db = Database::open(&path).unwrap();
+        let c = db.contact("c").unwrap();
+        assert_eq!(
+            (c.kind, c.state),
+            (ContactKind::Person, ContactState::Accepted)
+        );
+        let m = db.message("m").unwrap();
+        assert_eq!((m.body.as_str(), m.sender), ("hoi", None));
+        // Groups work on the upgraded file.
+        let state = GroupState {
+            id: "g:1".into(),
+            name: "Team".into(),
+            admin: "me".into(),
+            version: 1,
+            members: vec!["c".into(), "me".into(), "x".into()],
+            closed: false,
+        };
+        db.save_group(
+            &state,
+            &[1, 2],
+            true,
+            &[("x".into(), "Xander".into())],
+            "me",
+        )
+        .unwrap();
+        assert_eq!(db.group("g:1").unwrap().0, state);
+        assert_eq!(db.contact("x").unwrap().state, ContactState::GroupPeer);
+        assert_eq!(db.contact("x").unwrap().their_name, "Xander");
+        assert_eq!(db.contact("g:1").unwrap().kind, ContactKind::Group);
+        assert!(db.is_group_member("g:1", "x"));
+        assert_eq!(db.groups_with_member("x"), vec!["g:1".to_string()]);
+        db.set_group_active("g:1", false);
+        assert!(
+            !db.is_group_member("g:1", "x"),
+            "inactive groups have no live members"
+        );
+        db.delete_group("g:1");
+        assert!(db.contact("x").is_none(), "group peers go with the group");
+        assert!(db.contact("c").is_some());
+    }
+
+    #[test]
     fn settings_round_trip_and_default() {
         let db = Database::open_in_memory().unwrap();
         assert_eq!(db.settings(), Settings::default());
