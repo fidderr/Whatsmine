@@ -52,7 +52,8 @@ async fn main() -> anyhow::Result<()> {
     // Calls: whatever media arrives is echoed back, and counted, so a phone
     // calling this peer hears and sees itself and the test can tell that
     // every stage of the pipeline worked.
-    if let Some(mut media) = core.take_call_media() {
+    {
+        let mut media = core.call_media();
         let echo = core.clone();
         tokio::spawn(async move {
             use whatsmine_core::calls::MediaKind;

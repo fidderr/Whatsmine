@@ -1,0 +1,135 @@
+//! Android: what the background service, notifications and the Back button
+//! need from the app. The service (see mobile-sentinel's `background_service`)
+//! keeps the process alive and calls [`Java_com_mobilesentinel_SentinelBackground_nativeStart`]
+//! to bring the core up even when no screen exists.
+
+use std::path::Path;
+use std::sync::{Mutex, Once, OnceLock};
+
+use jni::JNIEnv;
+use jni::objects::{JClass, JString};
+use mobile_sentinel::background_service as bg;
+use tokio::sync::mpsc;
+
+use crate::i18n;
+use crate::notify::{Kind, Notice};
+
+/// Logging and the sentinel's process hooks, once per process (the service
+/// and the UI both come through here).
+pub fn init_once() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        mobile_sentinel::init(mobile_sentinel::InitConfig {
+            log_tag: "WhatsMine".to_string(),
+            log_level: log::LevelFilter::Info,
+            ..Default::default()
+        });
+    });
+}
+
+/// What to open when a notification is tapped: `chat:<id>` or `requests`.
+fn open_string(n: &Notice) -> String {
+    match (&n.chat, n.kind) {
+        (Some(c), _) => format!("chat:{c}"),
+        (None, Kind::Request) => "requests".into(),
+        _ => String::new(),
+    }
+}
+
+pub fn post(n: &Notice) {
+    let kind = match n.kind {
+        Kind::Call => bg::Kind::Call,
+        Kind::Request => bg::Kind::Request,
+        Kind::Message | Kind::Missed => bg::Kind::Message,
+    };
+    bg::post(&n.tag, &n.title, &n.body, &open_string(n), kind);
+}
+
+pub fn cancel(tag: &str) {
+    bg::cancel(tag);
+}
+
+pub fn cancel_all() {
+    bg::cancel_all();
+}
+
+/// Tells the service notification and the channels what language to speak.
+pub fn apply_texts(locale: &str) {
+    let t = i18n::load_translations(locale);
+    let get = |k: &str, fallback: &str| t.get(k).cloned().unwrap_or_else(|| fallback.to_string());
+    bg::set_texts(
+        &get("notify.service_title", "WhatsMine is running"),
+        &get("notify.service_text", "Waiting for messages"),
+        &get("notify.channel_messages", "Messages"),
+        &get("notify.channel_calls", "Calls"),
+        &get("notify.channel_requests", "Requests"),
+    );
+}
+
+/// Turns the background service on or off to match the setting.
+pub fn apply_background(on: bool) {
+    if on {
+        bg::start();
+    } else {
+        bg::stop();
+    }
+}
+
+// ---- the Back button ----
+
+static BACK: OnceLock<(
+    mpsc::UnboundedSender<()>,
+    Mutex<Option<mpsc::UnboundedReceiver<()>>>,
+)> = OnceLock::new();
+
+fn back_channel() -> &'static (
+    mpsc::UnboundedSender<()>,
+    Mutex<Option<mpsc::UnboundedReceiver<()>>>,
+) {
+    BACK.get_or_init(|| {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (tx, Mutex::new(Some(rx)))
+    })
+}
+
+/// The Back presses, for the screen to act on. One listener: the screen.
+pub fn take_back_events() -> Option<mpsc::UnboundedReceiver<()>> {
+    back_channel()
+        .1
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .take()
+}
+
+// ---- JNI hooks the service and the activity call ----
+
+/// The service started the process (or the UI did): bring the core up.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_mobilesentinel_SentinelBackground_nativeStart(
+    mut env: JNIEnv,
+    _class: JClass,
+    data_dir: JString,
+) {
+    init_once();
+    bg::warm_up();
+    let Ok(dir) = env.get_string(&data_dir).map(String::from) else {
+        return;
+    };
+    match crate::boot::core_in(Path::new(&dir)) {
+        Ok(core) => {
+            let settings = core.settings();
+            apply_texts(&settings.locale);
+            log::info!("background service: core is up");
+        }
+        Err(e) => log::error!("background service: core did not start: {e}"),
+    }
+}
+
+/// Back was pressed; the screen decides what that means.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_mobilesentinel_SentinelBackground_nativeOnBack(
+    _env: JNIEnv,
+    _class: JClass,
+) {
+    let _ = back_channel().0.send(());
+}

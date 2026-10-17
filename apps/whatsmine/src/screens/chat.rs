@@ -92,6 +92,7 @@ fn ChatView(id: String) -> Element {
         use_effect(move || {
             let _ = msg_rev();
             core.mark_read(&id);
+            crate::notify::mark_read(&id);
         });
     }
     // Keep the newest message in view (not when paging back).

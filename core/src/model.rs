@@ -264,6 +264,15 @@ pub struct Settings {
     pub avatar: Option<String>,
     /// Largest incoming file we accept, in MB. 0 = no limit.
     pub max_file_mb: u64,
+    /// Show a notification for new messages, requests and calls.
+    pub notifications: bool,
+    /// Put the sender and the text in notifications (off: just "new message").
+    pub notification_previews: bool,
+    /// Keep running when the window or app is closed, so messages arrive at
+    /// once (Android: a quiet background service; Windows: the tray).
+    pub background: bool,
+    /// Windows: start with the PC (hidden, in the tray).
+    pub start_with_system: bool,
 }
 
 /// Default for [`Settings::max_file_mb`].
@@ -282,6 +291,10 @@ impl Default for Settings {
             extra_relays: Vec::new(),
             avatar: None,
             max_file_mb: DEFAULT_MAX_FILE_MB,
+            notifications: true,
+            notification_previews: true,
+            background: true,
+            start_with_system: false,
         }
     }
 }

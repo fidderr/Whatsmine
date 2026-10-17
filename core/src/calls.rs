@@ -96,11 +96,40 @@ pub enum CallEvent {
 /// The call, and who may send media for it, right now.
 pub(crate) type ActiveCall = Arc<Mutex<Option<([u8; 16], HashSet<PublicKey>)>>>;
 
-/// Where incoming media goes.
+/// Where incoming media goes. The receiving end can be replaced at any time
+/// (the screen that plays the media comes and goes; the call does not).
+pub(crate) type MediaSink = Arc<Mutex<Option<mpsc::Sender<CallMedia>>>>;
+
 #[derive(Clone)]
 pub(crate) struct MediaIn {
     pub active: ActiveCall,
-    pub tx: mpsc::Sender<CallMedia>,
+    pub sink: MediaSink,
+}
+
+/// Where a call stands, for a screen that was not there when it began.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallPhase {
+    /// We are calling and nobody has answered yet.
+    RingingOut,
+    /// Somebody is calling us.
+    RingingIn,
+    /// We are in the call.
+    Active,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallSnapshot {
+    pub call_id: String,
+    /// The conversation: a person's key, or a group id.
+    pub contact_id: String,
+    /// Who rang us (our own key if we are the caller).
+    pub from: String,
+    pub video: bool,
+    pub phase: CallPhase,
+    /// When we joined (milliseconds since the epoch), once active.
+    pub connected_since: Option<i64>,
+    /// Everyone else who is in the call.
+    pub peers: Vec<String>,
 }
 
 impl MediaIn {
@@ -114,7 +143,10 @@ impl MediaIn {
 
     fn deliver(&self, media: CallMedia) {
         // A full queue means the UI is behind: dropping is the right thing.
-        let _ = self.tx.try_send(media);
+        // No listener (the screen is closed) drops it too.
+        if let Some(tx) = self.sink.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
+            let _ = tx.try_send(media);
+        }
     }
 }
 

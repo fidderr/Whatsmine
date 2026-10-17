@@ -11,6 +11,49 @@ use crate::i18n;
 use crate::js;
 use crate::media::{self, Picked};
 
+/// Android's notification permission and battery exemption, as the app needs
+/// to ask for them. On other systems there is nothing to ask.
+mod permissions {
+    pub fn notifications_allowed() -> bool {
+        #[cfg(target_os = "android")]
+        {
+            use mobile_sentinel::permissions::{PermissionState, status};
+            status("android.permission.POST_NOTIFICATIONS") != PermissionState::Denied
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            true
+        }
+    }
+
+    pub fn request_notifications() {
+        #[cfg(target_os = "android")]
+        {
+            use mobile_sentinel::permissions::{PermissionState, open_app_settings, request};
+            if request("android.permission.POST_NOTIFICATIONS") != PermissionState::Granted {
+                // Denied for good: only the system settings page can change it.
+                open_app_settings();
+            }
+        }
+    }
+
+    pub fn battery_unrestricted() -> bool {
+        #[cfg(target_os = "android")]
+        {
+            mobile_sentinel::battery::is_exempt()
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            true
+        }
+    }
+
+    pub fn request_battery() {
+        #[cfg(target_os = "android")]
+        mobile_sentinel::battery::request_exemption();
+    }
+}
+
 #[component]
 pub fn SettingsScreen() -> Element {
     let mut tr = use_tr();
@@ -19,6 +62,7 @@ pub fn SettingsScreen() -> Element {
     let rev = use_context::<Rev>().0;
     let net = use_context::<Net>().0;
     let mut settings = use_context::<SettingsSig>().0;
+    let mut perm_rev = use_signal(|| 0u32);
     let mut toast_sig = use_context::<ToastSig>();
     let mut name = use_signal(|| settings.peek().display_name.clone());
     let mut confirm_wipe = use_signal(|| false);
@@ -215,6 +259,67 @@ pub fn SettingsScreen() -> Element {
                             tr.set(i18n::load_translations(&v));
                             update.call(Box::new(move |s: &mut Settings| s.locale = v.clone()));
                         },
+                    }
+                }
+            }
+
+            div { class: "settings-section",
+                label { class: "section-label", "{t(&tr, \"settings.notifications_title\")}" }
+                ToggleRow {
+                    label: t(&tr, "settings.notifications"),
+                    hint: t(&tr, "settings.notifications_hint"),
+                    checked: s.notifications,
+                    on_change: move |v| update.call(Box::new(move |s: &mut Settings| s.notifications = v)),
+                }
+                ToggleRow {
+                    label: t(&tr, "settings.previews"),
+                    hint: t(&tr, "settings.previews_hint"),
+                    checked: s.notification_previews,
+                    on_change: move |v| update.call(Box::new(move |s: &mut Settings| s.notification_previews = v)),
+                }
+                ToggleRow {
+                    label: t(&tr, "settings.background"),
+                    hint: t(&tr, if cfg!(target_os = "android") { "settings.background_hint_android" } else { "settings.background_hint_desktop" }),
+                    checked: s.background,
+                    on_change: move |v| update.call(Box::new(move |s: &mut Settings| s.background = v)),
+                }
+                if cfg!(not(target_os = "android")) {
+                    ToggleRow {
+                        label: t(&tr, "settings.autostart"),
+                        hint: t(&tr, "settings.autostart_hint"),
+                        checked: s.start_with_system,
+                        on_change: move |v| update.call(Box::new(move |s: &mut Settings| s.start_with_system = v)),
+                    }
+                }
+                if cfg!(target_os = "android") {
+                    {
+                        let _ = perm_rev();
+                        let (notif_ok, battery_ok) = (permissions::notifications_allowed(), permissions::battery_unrestricted());
+                        rsx! {
+                            if !notif_ok {
+                                button {
+                                    class: "secondary-btn allow-notifications",
+                                    onclick: move |_| {
+                                        permissions::request_notifications();
+                                        *perm_rev.write() += 1;
+                                    },
+                                    "{t(&tr, \"settings.allow_notifications\")}"
+                                }
+                            }
+                            if battery_ok {
+                                p { class: "setting-hint", "{t(&tr, \"settings.battery_ok\")}" }
+                            } else {
+                                p { class: "setting-hint", "{t(&tr, \"settings.battery_hint\")}" }
+                                button {
+                                    class: "secondary-btn allow-battery",
+                                    onclick: move |_| {
+                                        permissions::request_battery();
+                                        *perm_rev.write() += 1;
+                                    },
+                                    "{t(&tr, \"settings.allow_battery\")}"
+                                }
+                            }
+                        }
                     }
                 }
             }

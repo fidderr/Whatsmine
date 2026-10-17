@@ -320,9 +320,9 @@ async fn a_stranger_cannot_add_you_to_a_group() {
 async fn group_call_with_three_people_join_and_leave() {
     let t = trio().await;
     let (mut eb, mut ec) = (t.b.subscribe(), t.c.subscribe());
-    let mut ma = t.a.take_call_media().unwrap();
-    let mut mb = t.b.take_call_media().unwrap();
-    let mut mc = t.c.take_call_media().unwrap();
+    let mut ma = t.a.call_media();
+    let mut mb = t.b.call_media();
+    let mut mc = t.c.call_media();
 
     t.a.call_invite(&t.group, false).unwrap();
     for rx in [&mut eb, &mut ec] {

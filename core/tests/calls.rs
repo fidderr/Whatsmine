@@ -82,9 +82,8 @@ async fn call_lifecycle_with_media() {
     let lookup = MemoryLookup::new();
     let (a, b, ka, kb, _da, _db) = online_pair(&lookup).await;
     let (mut ra, mut rb) = (a.subscribe(), b.subscribe());
-    let mut media_a = a.take_call_media().expect("media receiver");
-    let mut media_b = b.take_call_media().expect("media receiver");
-    assert!(a.take_call_media().is_none(), "handed out once");
+    let mut media_a = a.call_media();
+    let mut media_b = b.call_media();
 
     // Ring -> answer.
     let call = a.call_invite(&kb, true).unwrap();
@@ -249,4 +248,70 @@ async fn decline_busy_cancel_and_lost() {
             ..
         }
     ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_call_state_can_be_read_by_a_screen_that_opens_late() {
+    use whatsmine_core::calls::CallPhase;
+    let lookup = MemoryLookup::new();
+    let (a, b, ka, kb, _da, _db) = online_pair(&lookup).await;
+    assert!(a.call_snapshot().is_none() && b.call_snapshot().is_none());
+
+    a.call_invite(&kb, true).unwrap();
+    until("ringing both sides", || {
+        a.call_snapshot()
+            .is_some_and(|s| s.phase == CallPhase::RingingOut)
+            && b.call_snapshot()
+                .is_some_and(|s| s.phase == CallPhase::RingingIn)
+    })
+    .await;
+    let incoming = b.call_snapshot().unwrap();
+    assert_eq!(
+        (incoming.contact_id.as_str(), incoming.from.as_str()),
+        (ka.as_str(), ka.as_str())
+    );
+    assert!(incoming.video && incoming.connected_since.is_none());
+
+    b.call_answer(true);
+    until("both active", || {
+        a.call_snapshot()
+            .is_some_and(|s| s.phase == CallPhase::Active)
+            && b.call_snapshot()
+                .is_some_and(|s| s.phase == CallPhase::Active)
+    })
+    .await;
+    let active = a.call_snapshot().unwrap();
+    assert!(active.connected_since.is_some());
+    assert_eq!(active.peers, vec![kb.clone()]);
+
+    // A new media listener takes over; the old one is cut off.
+    let mut old = a.call_media();
+    let mut new = a.call_media();
+    b.call_audio(1, vec![5; 30]);
+    let got = tokio::time::timeout(WAIT, new.recv())
+        .await
+        .expect("audio")
+        .unwrap();
+    assert_eq!(got.data, vec![5; 30]);
+    assert!(
+        old.recv().await.is_none(),
+        "the earlier listener was replaced"
+    );
+
+    a.call_end();
+    until("both idle", || {
+        a.call_snapshot().is_none() && b.call_snapshot().is_none()
+    })
+    .await;
+}
+
+async fn until(what: &str, mut cond: impl FnMut() -> bool) {
+    let fut = async {
+        while !cond() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    tokio::time::timeout(WAIT, fut)
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
 }

@@ -65,8 +65,8 @@ struct Inner {
     events: broadcast::Sender<CoreEvent>,
     shared: Shared,
     runtime: Mutex<Option<tokio::runtime::Runtime>>,
-    /// Incoming call media, handed out once to whoever plays it.
-    call_media: Mutex<Option<mpsc::Receiver<calls::CallMedia>>>,
+    /// Where incoming call media goes (whoever called `call_media` last).
+    media_sink: calls::MediaSink,
 }
 
 impl Drop for Inner {
@@ -100,11 +100,12 @@ impl Core {
 
         let (cmds, cmd_rx) = mpsc::unbounded_channel();
         let (events, _) = broadcast::channel(1024);
-        let (call_media_tx, call_media_rx) = mpsc::channel(256);
+        let media_sink: calls::MediaSink = Arc::new(Mutex::new(None));
         let shared = Shared {
             online: Arc::new(Mutex::new(HashSet::new())),
             net: Arc::new(Mutex::new(NetStatus::Connecting)),
             group_calls: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            call: Arc::new(Mutex::new(None)),
         };
         runtime.spawn(Engine::run(
             db.clone(),
@@ -113,7 +114,7 @@ impl Core {
             events.clone(),
             shared.clone(),
             files::media_dir(dir),
-            call_media_tx,
+            media_sink.clone(),
             cmd_rx,
         ));
 
@@ -128,7 +129,7 @@ impl Core {
                 events,
                 shared,
                 runtime: Mutex::new(Some(runtime)),
-                call_media: Mutex::new(Some(call_media_rx)),
+                media_sink,
             }),
         })
     }
@@ -214,13 +215,26 @@ impl Core {
         self.cmd(Cmd::CallVideoOn(on));
     }
 
-    /// The stream of incoming call media. There is one: the first caller gets it.
-    pub fn take_call_media(&self) -> Option<mpsc::Receiver<calls::CallMedia>> {
+    /// The stream of incoming call media. Only the latest caller of this
+    /// receives it, so a new screen can take over from one that went away.
+    pub fn call_media(&self) -> mpsc::Receiver<calls::CallMedia> {
+        let (tx, rx) = mpsc::channel(256);
+        *self
+            .inner
+            .media_sink
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = Some(tx);
+        rx
+    }
+
+    /// The call in progress (or ringing), for a screen that opens in the middle of it.
+    pub fn call_snapshot(&self) -> Option<calls::CallSnapshot> {
         self.inner
-            .call_media
+            .shared
+            .call
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .take()
+            .clone()
     }
 
     /// Stops networking, telling connected peers we left. Blocks up to ~2s.

@@ -18,7 +18,7 @@ use tokio::sync::{broadcast, mpsc};
 use tokio::time::Instant;
 
 use crate::NetMode;
-use crate::calls::{self, ActiveCall, CallMedia, MediaIn};
+use crate::calls::{self, ActiveCall, CallSnapshot, MediaIn, MediaSink};
 use crate::db::Database;
 use crate::files::{self, ReceiveCtx, Received};
 use crate::groups;
@@ -162,6 +162,8 @@ pub(crate) struct Shared {
     pub net: Arc<Mutex<NetStatus>>,
     /// Group calls that can be joined: group id -> video.
     pub group_calls: Arc<Mutex<HashMap<String, bool>>>,
+    /// The call we are in or being rung for, if any.
+    pub call: Arc<Mutex<Option<CallSnapshot>>>,
 }
 
 pub(crate) struct Engine {
@@ -206,7 +208,7 @@ impl Engine {
         events: broadcast::Sender<CoreEvent>,
         shared: Shared,
         media: PathBuf,
-        call_media: mpsc::Sender<CallMedia>,
+        media_sink: MediaSink,
         mut cmds: mpsc::UnboundedReceiver<Cmd>,
     ) {
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -220,7 +222,7 @@ impl Engine {
             group_calls: HashMap::new(),
             media_in: MediaIn {
                 active: ActiveCall::default(),
-                tx: call_media,
+                sink: media_sink,
             },
             video_inflight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             db,

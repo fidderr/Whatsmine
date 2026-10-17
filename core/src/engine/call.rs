@@ -15,7 +15,7 @@ use iroh::endpoint::Connection;
 use tokio::time::Instant;
 
 use super::{Engine, emit};
-use crate::calls::{CallEndReason, CallEvent};
+use crate::calls::{CallEndReason, CallEvent, CallPhase, CallSnapshot};
 use crate::identity::{key_to_string, parse_key};
 use crate::model::{ContactState, CoreEvent, GROUP_ID_PREFIX};
 use crate::protocol::{CallResult, Frame, RING_TIMEOUT, id_from_bytes};
@@ -24,7 +24,6 @@ pub(super) struct CallState {
     pub id: [u8; 16],
     /// The group this call belongs to, for a group call.
     pub group: Option<String>,
-    #[allow(dead_code)]
     pub video: bool,
     /// We started it.
     pub outgoing: bool,
@@ -84,7 +83,36 @@ impl Engine {
         })
     }
 
+    /// Keeps the shared description of the current call up to date.
+    pub(super) fn publish_call_state(&self) {
+        let snapshot = self.call.as_ref().map(|c| {
+            let mut peers: Vec<String> = c.peers.iter().map(key_to_string).collect();
+            peers.sort();
+            let phase = match (c.connected, c.outgoing) {
+                (Some(_), _) => CallPhase::Active,
+                (None, true) => CallPhase::RingingOut,
+                (None, false) => CallPhase::RingingIn,
+            };
+            CallSnapshot {
+                call_id: id_from_bytes(&c.id),
+                contact_id: self.conversation_of(c),
+                from: c
+                    .caller
+                    .map(|p| key_to_string(&p))
+                    .unwrap_or_else(|| key_to_string(&self.me)),
+                video: c.video,
+                phase,
+                connected_since: c
+                    .connected
+                    .map(|t| crate::model::now_ms() - t.elapsed().as_millis() as i64),
+                peers,
+            }
+        });
+        *self.shared.call.lock().unwrap_or_else(|p| p.into_inner()) = snapshot;
+    }
+
     fn announce_peers(&self) {
+        self.publish_call_state();
         if let Some(c) = &self.call {
             let mut peers: Vec<String> = c.peers.iter().map(key_to_string).collect();
             peers.sort();
@@ -99,6 +127,7 @@ impl Engine {
     pub(super) fn end_call(&mut self, reason: CallEndReason) {
         let Some(c) = self.call.take() else { return };
         self.set_active_call(None);
+        self.publish_call_state();
         let duration_ms = c
             .connected
             .map(|t| t.elapsed().as_millis() as u64)
@@ -222,6 +251,7 @@ impl Engine {
             members,
             caller: None,
         });
+        self.publish_call_state();
     }
 
     /// Becomes part of the call: tells everyone who can be told.
@@ -325,6 +355,7 @@ impl Engine {
             members,
             caller: None,
         });
+        self.publish_call_state();
         self.enter_call();
     }
 
@@ -487,6 +518,7 @@ impl Engine {
                     members,
                     caller: Some(peer),
                 });
+                self.publish_call_state();
                 self.emit_call(CallEvent::Incoming {
                     call_id: id_from_bytes(&call),
                     contact_id: conversation,

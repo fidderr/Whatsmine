@@ -5,9 +5,7 @@
 use std::collections::HashMap;
 
 use dioxus::prelude::*;
-use whatsmine_core::{
-    Core, CoreEvent, DbRecovery, NetMode, NetStatus, Settings, TransferState, paths,
-};
+use whatsmine_core::{Core, CoreEvent, DbRecovery, NetStatus, Settings, TransferState};
 
 use crate::call::{self, CallOverlay, CallUi, Phase};
 use crate::components::{Toast, ToastLevel, ToastMessage};
@@ -16,6 +14,7 @@ use crate::screens::{
     AddContact, Chat, Chats, ContactInfo, GroupInfoScreen, NewGroup, Onboarding, Requests,
     SettingsScreen,
 };
+use crate::shell::Shell;
 
 pub type Translations = Signal<HashMap<String, String>>;
 
@@ -30,6 +29,7 @@ pub fn t(translations: &Translations, key: &str) -> String {
 
 #[derive(Clone, Routable, Debug, PartialEq)]
 pub enum Route {
+    #[layout(Shell)]
     #[route("/")]
     Chats {},
     #[route("/chat/:id")]
@@ -95,15 +95,9 @@ const TYPING_SHOWN_MS: u64 = 5000;
 pub fn App() -> Element {
     let started = use_hook(|| {
         #[cfg(target_os = "android")]
-        mobile_sentinel::init(mobile_sentinel::InitConfig {
-            log_tag: "WhatsMine".to_string(),
-            log_level: log::LevelFilter::Info,
-            ..Default::default()
-        });
-        let profile = std::env::var("WHATSMINE_PROFILE").ok();
-        paths::data_dir(profile.as_deref())
-            .and_then(|dir| Core::start(&dir, NetMode::Internet))
-            .map_err(|e| format!("{e:#}"))
+        crate::android::init_once();
+        // One core for the whole process: it outlives this window.
+        crate::boot::core()
     });
 
     match started {
@@ -154,6 +148,7 @@ fn Main(core: AppCore) -> Element {
     use_context_provider(|| CallUi(call_phase));
     let bridge = call::use_call_bridge(&core.0, call_phase, toast_sig, translations);
     use_context_provider(|| bridge.clone());
+    use_hook(|| call::restore(&core.0, call_phase, &bridge));
 
     crate::media_server::use_media_server(core.0.clone());
     use_hook(|| {
@@ -277,23 +272,6 @@ fn Main(core: AppCore) -> Element {
     let onboarded = s.onboarded;
     drop(s);
     let safe_area = use_hook(crate::platform::safe_area_style);
-
-    // Closing the window: hang up properly so contacts see us go offline
-    // right away instead of after the heartbeat timeout.
-    #[cfg(feature = "desktop")]
-    {
-        let core = core.0.clone();
-        dioxus::desktop::use_wry_event_handler(move |event, _| {
-            use dioxus::desktop::tao::event::{Event, WindowEvent};
-            if let Event::WindowEvent {
-                event: WindowEvent::CloseRequested | WindowEvent::Destroyed,
-                ..
-            } = event
-            {
-                core.shutdown();
-            }
-        });
-    }
 
     rsx! {
         document::Link { rel: "stylesheet", href: asset!("/assets/style.css") }

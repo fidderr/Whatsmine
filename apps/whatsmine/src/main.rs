@@ -11,13 +11,37 @@ const WEBVIEW2_ARGS: &str = "--unsafely-treat-insecure-origin-as-secure=http://d
 fn main() {
     #[cfg(feature = "desktop")]
     {
-        use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
-        let config = Config::new().with_menu(None).with_window(
-            WindowBuilder::new()
-                .with_title("WhatsMine")
-                .with_inner_size(LogicalSize::new(440.0, 780.0))
-                .with_min_inner_size(LogicalSize::new(340.0, 480.0)),
-        );
+        use dioxus::desktop::{Config, LogicalSize, WindowBuilder, WindowCloseBehaviour};
+        use whatsmine::desktop::{Command, claim_instance};
+
+        // --background: start hidden in the tray (used by "start with the PC").
+        // --quit: ask the running copy to quit.
+        let args: Vec<String> = std::env::args().collect();
+        let background = args.iter().any(|a| a == "--background");
+        let quit = args.iter().any(|a| a == "--quit");
+        let profile = std::env::var("WHATSMINE_PROFILE").ok();
+        let forward = if quit {
+            Some(Command::Quit)
+        } else if background {
+            None
+        } else {
+            Some(Command::Show)
+        };
+        // Only one copy per profile: a second launch just shows the first.
+        if !claim_instance(profile.as_deref(), forward) || quit {
+            return;
+        }
+
+        let config = Config::new()
+            .with_menu(None)
+            .with_close_behaviour(WindowCloseBehaviour::WindowHides)
+            .with_window(
+                WindowBuilder::new()
+                    .with_title("WhatsMine")
+                    .with_visible(!background)
+                    .with_inner_size(LogicalSize::new(440.0, 780.0))
+                    .with_min_inner_size(LogicalSize::new(340.0, 480.0)),
+            );
         let config = match dioxus::desktop::icon_from_memory(include_bytes!("../assets/icon.png")) {
             Ok(icon) => config.with_icon(icon),
             Err(_) => config,

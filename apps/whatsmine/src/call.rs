@@ -124,9 +124,7 @@ pub fn use_call_bridge(
     use_future(move || {
         let (core, bridge) = (down_core.clone(), down_bridge.clone());
         async move {
-            let Some(mut media) = core.take_call_media() else {
-                return;
-            };
+            let mut media = core.call_media();
             while let Some(m) = media.recv().await {
                 let t = match m.kind {
                     MediaKind::Audio => "a",
@@ -140,6 +138,52 @@ pub fn use_call_bridge(
     });
 
     bridge
+}
+
+/// A screen that opens in the middle of a call (the app was in the
+/// background, or a notification brought it up) picks the call up where it is.
+pub fn restore(core: &Core, mut phase: Signal<Phase>, bridge: &CallBridge) {
+    use whatsmine_core::calls::CallPhase;
+    let Some(c) = core.call_snapshot() else {
+        return;
+    };
+    match c.phase {
+        CallPhase::RingingIn => {
+            bridge.send(json!({ "t": "ring", "kind": "in" }));
+            phase.set(Phase::Incoming {
+                contact_id: c.contact_id,
+                from: c.from,
+                video: c.video,
+            });
+        }
+        CallPhase::RingingOut => {
+            bridge.send(json!({ "t": "ring", "kind": "out" }));
+            phase.set(Phase::Outgoing {
+                contact_id: c.contact_id,
+                video: c.video,
+            });
+        }
+        CallPhase::Active => {
+            let group = c.contact_id.starts_with("g:");
+            let named: Vec<Value> = c
+                .peers
+                .iter()
+                .map(|p| json!({ "id": p, "name": name_of(core, p) }))
+                .collect();
+            bridge
+                .send(json!({ "t": "start", "call": c.call_id, "video": c.video, "group": group }));
+            bridge.send(json!({ "t": "peers", "peers": named }));
+            phase.set(Phase::Active {
+                contact_id: c.contact_id,
+                since: c.connected_since.unwrap_or_else(now_ms),
+                my_cam: false,
+                peers: c.peers,
+                cams: Vec::new(),
+                muted: false,
+                group,
+            });
+        }
+    }
 }
 
 fn name_of(core: &Core, contact_id: &str) -> String {
