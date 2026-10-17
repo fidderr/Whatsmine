@@ -16,6 +16,7 @@ pub mod calls;
 pub mod db;
 mod engine;
 pub mod files;
+pub mod groups;
 pub mod identity;
 pub mod model;
 pub mod paths;
@@ -27,7 +28,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, bail, ensure};
-use iroh::PublicKey;
+use iroh::{PublicKey, SecretKey};
 use tokio::sync::{broadcast, mpsc};
 
 pub use db::DbRecovery;
@@ -58,6 +59,7 @@ struct Inner {
     dir: PathBuf,
     db: Arc<Database>,
     me: PublicKey,
+    key: SecretKey,
     recovery: DbRecovery,
     cmds: mpsc::UnboundedSender<Cmd>,
     events: broadcast::Sender<CoreEvent>,
@@ -102,6 +104,7 @@ impl Core {
         let shared = Shared {
             online: Arc::new(Mutex::new(HashSet::new())),
             net: Arc::new(Mutex::new(NetStatus::Connecting)),
+            group_calls: Arc::new(Mutex::new(std::collections::HashMap::new())),
         };
         runtime.spawn(Engine::run(
             db.clone(),
@@ -119,6 +122,7 @@ impl Core {
                 dir: dir.to_path_buf(),
                 db,
                 me: key.public(),
+                key: key.clone(),
                 recovery,
                 cmds,
                 events,
@@ -142,16 +146,47 @@ impl Core {
     /// Starts a call. The result is the call id; what happens next arrives as
     /// [`CoreEvent::Call`] (`Connected` or `Ended`).
     pub fn call_invite(&self, contact_id: &str, video: bool) -> anyhow::Result<String> {
-        let peer = identity::parse_key(contact_id).context("not a valid contact")?;
-        ensure!(
-            self.contact(contact_id)
-                .is_some_and(|c| c.state == ContactState::Accepted),
-            "not a contact"
-        );
-        ensure!(self.is_online(contact_id), "contact is offline");
+        if groups::is_group_id(contact_id) {
+            let info = self.group_info(contact_id).context("not a group")?;
+            ensure!(info.active, "group is closed");
+            ensure!(
+                info.members.iter().any(|m| !m.is_me && m.online),
+                "nobody is online"
+            );
+        } else {
+            ensure!(
+                self.contact(contact_id)
+                    .is_some_and(|c| c.state == ContactState::Accepted),
+                "not a contact"
+            );
+            ensure!(self.is_online(contact_id), "contact is offline");
+        }
         let call = *uuid::Uuid::now_v7().as_bytes();
-        self.cmd(Cmd::CallInvite { peer, call, video });
+        self.cmd(Cmd::CallInvite {
+            target: contact_id.to_string(),
+            call,
+            video,
+        });
         Ok(protocol::id_from_bytes(&call))
+    }
+
+    /// Joins the group call going on in this group.
+    pub fn call_join(&self, group_id: &str) {
+        self.cmd(Cmd::CallJoin {
+            group: group_id.to_string(),
+        });
+    }
+
+    /// If a call is going on in this group that we could join: whether it
+    /// is a video call.
+    pub fn group_call(&self, group_id: &str) -> Option<bool> {
+        self.inner
+            .shared
+            .group_calls
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(group_id)
+            .copied()
     }
 
     /// Accepts or declines the call that is ringing.
@@ -360,6 +395,9 @@ impl Core {
 
     /// Deletes the contact and the whole chat from this device.
     pub fn delete_contact(&self, id: &str) -> anyhow::Result<()> {
+        if groups::is_group_id(id) {
+            return self.delete_group(id);
+        }
         let peer = self.peer(id)?;
         self.delete_chat_files(id);
         if let Some(avatar) = self.inner.db.contact(id).and_then(|c| c.avatar) {
@@ -401,11 +439,7 @@ impl Core {
         let text = text.trim();
         ensure!(!text.is_empty(), "empty");
         ensure!(text.len() <= protocol::MAX_TEXT, "too_long");
-        let peer = self.peer(contact_id)?;
-        match self.inner.db.contact(contact_id).map(|c| c.state) {
-            Some(ContactState::Accepted | ContactState::PendingOut) => {}
-            _ => bail!("not_a_contact"),
-        }
+        let peer = self.recipient(contact_id)?;
         let now = now_ms();
         let message = Message {
             id: uuid::Uuid::now_v7().to_string(),
@@ -417,20 +451,25 @@ impl Core {
             status: MessageStatus::Queued,
             read: true,
             attachment: None,
+            sender: None,
         };
         self.inner.db.insert_message(&message)?;
         self.inner.db.set_draft(contact_id, "");
         self.emit(CoreEvent::MessageAdded(message.clone()));
         self.emit(CoreEvent::ContactsChanged);
-        self.cmd(Cmd::SendOne {
-            contact: peer,
-            message_id: message.id.clone(),
-        });
+        self.dispatch(contact_id, peer, &message);
         Ok(message)
     }
 
     /// Marks the chat as read (sends read receipts if enabled).
     pub fn mark_read(&self, contact_id: &str) {
+        if groups::is_group_id(contact_id) {
+            // Nobody is told when we read a group message.
+            if !self.inner.db.mark_read(contact_id).is_empty() {
+                self.emit(CoreEvent::ContactsChanged);
+            }
+            return;
+        }
         let Ok(peer) = self.peer(contact_id) else {
             return;
         };
@@ -499,11 +538,7 @@ impl Core {
     ) -> anyhow::Result<Message> {
         let caption = caption.trim();
         ensure!(caption.len() <= protocol::MAX_TEXT, "too_long");
-        let peer = self.peer(contact_id)?;
-        match self.inner.db.contact(contact_id).map(|c| c.state) {
-            Some(ContactState::Accepted | ContactState::PendingOut) => {}
-            _ => bail!("not_a_contact"),
-        }
+        let peer = self.recipient(contact_id)?;
         let id = uuid::Uuid::now_v7().to_string();
         let name = files::clean_file_name(name);
         let dest = files::final_path(&self.media_dir(), &id, &name);
@@ -531,14 +566,12 @@ impl Core {
                 state: TransferState::Transferring,
                 duration_ms,
             }),
+            sender: None,
         };
         self.inner.db.insert_message(&message)?;
         self.emit(CoreEvent::MessageAdded(message.clone()));
         self.emit(CoreEvent::ContactsChanged);
-        self.cmd(Cmd::SendOne {
-            contact: peer,
-            message_id: message.id.clone(),
-        });
+        self.dispatch(contact_id, peer, &message);
         Ok(message)
     }
 
@@ -550,7 +583,7 @@ impl Core {
         if m.outgoing || m.attachment.is_none() {
             return;
         }
-        if let Ok(peer) = self.peer(&m.contact_id) {
+        if let Ok(peer) = self.peer(m.sender.as_deref().unwrap_or(&m.contact_id)) {
             self.cmd(Cmd::RetryFile {
                 contact: peer,
                 message_id: message_id.to_string(),
@@ -585,6 +618,252 @@ impl Core {
             let _ = std::fs::remove_file(path);
         }
         let _ = std::fs::remove_file(files::partial_path(&self.media_dir(), &m.id));
+    }
+
+    // ---- groups ----
+
+    /// Who a message to `contact_id` goes to: `Some(key)` for a person,
+    /// `None` for a group we are still in.
+    fn recipient(&self, contact_id: &str) -> anyhow::Result<Option<PublicKey>> {
+        if groups::is_group_id(contact_id) {
+            ensure!(
+                self.inner
+                    .db
+                    .group(contact_id)
+                    .is_some_and(|(_, _, active)| active),
+                "not_a_contact"
+            );
+            return Ok(None);
+        }
+        let peer = self.peer(contact_id)?;
+        match self.inner.db.contact(contact_id).map(|c| c.state) {
+            Some(ContactState::Accepted | ContactState::PendingOut) => Ok(Some(peer)),
+            _ => bail!("not_a_contact"),
+        }
+    }
+
+    /// Hands a stored outgoing message to the network.
+    fn dispatch(&self, contact_id: &str, peer: Option<PublicKey>, m: &Message) {
+        match peer {
+            Some(contact) => self.cmd(Cmd::SendOne {
+                contact,
+                message_id: m.id.clone(),
+            }),
+            None => {
+                let me = self.my_key();
+                if let Some((state, _, _)) = self.inner.db.group(contact_id) {
+                    let others: Vec<String> =
+                        state.members.into_iter().filter(|k| *k != me).collect();
+                    self.inner.db.add_group_acks(&m.id, &others);
+                }
+                self.cmd(Cmd::SendGroup {
+                    group: contact_id.to_string(),
+                    message_id: m.id.clone(),
+                });
+            }
+        }
+    }
+
+    fn name_of(&self, id: &str) -> String {
+        if id == self.my_key() {
+            return self.settings().display_name;
+        }
+        self.inner
+            .db
+            .contact(id)
+            .map(|c| c.display_name())
+            .unwrap_or_else(|| model::short_id(id))
+    }
+
+    /// Sends a group's signed state to its members (and to also_to).
+    fn broadcast_group(&self, state: &protocol::GroupState, sig: Vec<u8>, also_to: Vec<PublicKey>) {
+        let me = self.my_key();
+        let mut to: Vec<PublicKey> = state
+            .members
+            .iter()
+            .filter(|m| **m != me)
+            .filter_map(|m| identity::parse_key(m))
+            .collect();
+        to.extend(also_to);
+        let names = state
+            .members
+            .iter()
+            .map(|k| (k.clone(), self.name_of(k)))
+            .collect();
+        self.cmd(Cmd::GroupPublish {
+            state: state.clone(),
+            sig,
+            names,
+            to,
+        });
+    }
+
+    /// Creates a group of our contacts. We become its admin.
+    pub fn create_group(&self, name: &str, members: &[String]) -> anyhow::Result<Contact> {
+        let name = engine::clean_name(name);
+        ensure!(!name.is_empty(), "empty");
+        let me = self.my_key();
+        let mut keys: Vec<String> = Vec::new();
+        for m in members {
+            ensure!(
+                self.inner.db.contact(m).is_some_and(|c| {
+                    c.kind == model::ContactKind::Person && c.state == ContactState::Accepted
+                }),
+                "not_a_contact"
+            );
+            if !keys.contains(m) {
+                keys.push(m.clone());
+            }
+        }
+        ensure!(!keys.is_empty(), "no_members");
+        ensure!(keys.len() < protocol::MAX_GROUP_MEMBERS, "too_many");
+        keys.push(me.clone());
+        keys.sort();
+        let state = protocol::GroupState {
+            id: groups::new_group_id(),
+            name,
+            admin: me.clone(),
+            version: 1,
+            members: keys,
+            closed: false,
+        };
+        let sig = groups::sign(&self.inner.key, &state);
+        self.inner.db.save_group(&state, &sig, true, &[], &me)?;
+        self.emit(CoreEvent::ContactsChanged);
+        self.broadcast_group(&state, sig, Vec::new());
+        self.inner
+            .db
+            .contact(&state.id)
+            .context("group was not stored")
+    }
+
+    pub fn group_info(&self, id: &str) -> Option<GroupInfo> {
+        let (state, _, active) = self.inner.db.group(id)?;
+        let me = self.my_key();
+        let members = state
+            .members
+            .iter()
+            .map(|k| GroupMember {
+                id: k.clone(),
+                name: self.name_of(k),
+                is_me: *k == me,
+                is_admin: *k == state.admin,
+                online: self.is_online(k),
+                is_contact: self
+                    .inner
+                    .db
+                    .contact(k)
+                    .is_some_and(|c| c.state == ContactState::Accepted),
+            })
+            .collect();
+        Some(GroupInfo {
+            id: state.id.clone(),
+            name: self
+                .inner
+                .db
+                .contact(id)
+                .map(|c| c.display_name())
+                .unwrap_or(state.name),
+            admin: state.admin.clone(),
+            i_am_admin: state.admin == me,
+            active,
+            members,
+        })
+    }
+
+    /// The group's state, if we administer it and are still in it.
+    fn admin_state(&self, id: &str) -> anyhow::Result<protocol::GroupState> {
+        let (state, _, active) = self.inner.db.group(id).context("not a group")?;
+        ensure!(active && state.admin == self.my_key(), "not_admin");
+        Ok(state)
+    }
+
+    fn publish_new_state(
+        &self,
+        mut state: protocol::GroupState,
+        also_to: Vec<PublicKey>,
+    ) -> anyhow::Result<()> {
+        state.version += 1;
+        let sig = groups::sign(&self.inner.key, &state);
+        let me = self.my_key();
+        let active = state.members.contains(&me) && !state.closed;
+        self.inner.db.save_group(&state, &sig, active, &[], &me)?;
+        self.emit(CoreEvent::ContactsChanged);
+        self.broadcast_group(&state, sig, also_to);
+        Ok(())
+    }
+
+    /// Admin only: adds one of our contacts to the group.
+    pub fn group_add(&self, id: &str, member: &str) -> anyhow::Result<()> {
+        let mut state = self.admin_state(id)?;
+        ensure!(!state.members.iter().any(|m| m == member), "already_member");
+        ensure!(
+            state.members.len() < protocol::MAX_GROUP_MEMBERS,
+            "too_many"
+        );
+        ensure!(
+            self.inner.db.contact(member).is_some_and(|c| {
+                c.kind == model::ContactKind::Person && c.state == ContactState::Accepted
+            }),
+            "not_a_contact"
+        );
+        state.members.push(member.to_string());
+        state.members.sort();
+        self.publish_new_state(state, Vec::new())
+    }
+
+    /// Admin only: removes a member. They are told if they are online.
+    pub fn group_remove(&self, id: &str, member: &str) -> anyhow::Result<()> {
+        let mut state = self.admin_state(id)?;
+        ensure!(member != self.my_key(), "cannot_remove_self");
+        ensure!(state.members.iter().any(|m| m == member), "not_a_member");
+        state.members.retain(|m| m != member);
+        self.inner.db.remove_member_acks(id, member);
+        let removed = identity::parse_key(member).into_iter().collect();
+        self.publish_new_state(state, removed)?;
+        self.inner.db.prune_group_peers();
+        Ok(())
+    }
+
+    /// Admin only.
+    pub fn group_rename(&self, id: &str, name: &str) -> anyhow::Result<()> {
+        let mut state = self.admin_state(id)?;
+        let name = engine::clean_name(name);
+        ensure!(!name.is_empty(), "empty");
+        state.name = name;
+        self.publish_new_state(state, Vec::new())
+    }
+
+    /// Leaves the group (history stays). If we are its admin, the group ends
+    /// for everyone.
+    pub fn leave_group(&self, id: &str) -> anyhow::Result<()> {
+        let (mut state, _, active) = self.inner.db.group(id).context("not a group")?;
+        if !active {
+            return Ok(());
+        }
+        if state.admin == self.my_key() {
+            state.closed = true;
+            return self.publish_new_state(state, Vec::new());
+        }
+        self.inner.db.set_group_active(id, false);
+        self.inner.db.set_group_left(id, true);
+        if let Some(admin) = identity::parse_key(&state.admin) {
+            self.cmd(Cmd::GroupLeave {
+                group: id.to_string(),
+                admin,
+            });
+        }
+        self.emit(CoreEvent::ContactsChanged);
+        Ok(())
+    }
+
+    /// Leaves (if still in) and removes the group and its history from this device.
+    pub fn delete_group(&self, id: &str) -> anyhow::Result<()> {
+        self.leave_group(id)?;
+        self.delete_chat_files(id);
+        self.inner.db.delete_group(id);
+        self.emit(CoreEvent::ContactsChanged);
+        Ok(())
     }
 
     pub fn draft(&self, contact_id: &str) -> String {

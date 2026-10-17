@@ -23,6 +23,9 @@ pub enum ContactState {
     Accepted,
     /// We blocked them. Their connections are refused.
     Blocked,
+    /// Not a contact: someone we share a group with. We connect to them
+    /// for group messages and calls, and for nothing else.
+    GroupPeer,
 }
 
 impl ContactState {
@@ -32,6 +35,7 @@ impl ContactState {
             Self::PendingOut => "pending_out",
             Self::Accepted => "accepted",
             Self::Blocked => "blocked",
+            Self::GroupPeer => "group_peer",
         }
     }
 
@@ -40,10 +44,38 @@ impl ContactState {
             "pending_in" => Self::PendingIn,
             "pending_out" => Self::PendingOut,
             "accepted" => Self::Accepted,
+            "group_peer" => Self::GroupPeer,
             _ => Self::Blocked,
         }
     }
 }
+
+/// A conversation is with one person or with a group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ContactKind {
+    Person,
+    Group,
+}
+
+impl ContactKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Person => "person",
+            Self::Group => "group",
+        }
+    }
+
+    pub fn parse(s: &str) -> Self {
+        if s == "group" {
+            Self::Group
+        } else {
+            Self::Person
+        }
+    }
+}
+
+/// Group ids start with this, so they can never be mistaken for a key.
+pub const GROUP_ID_PREFIX: &str = "g:";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Contact {
@@ -59,6 +91,9 @@ pub struct Contact {
     pub created_at: Millis,
     /// Local path of their profile picture, if they shared one.
     pub avatar: Option<String>,
+    /// A person, or a group (then `id` is the group id and `their_name`
+    /// the group's name).
+    pub kind: ContactKind,
 }
 
 impl Contact {
@@ -120,6 +155,8 @@ pub struct Message {
     /// A file (photo, video, voice note, document). `body` is then its
     /// caption, possibly empty.
     pub attachment: Option<Attachment>,
+    /// In a group: who wrote an incoming message (their key).
+    pub sender: Option<String>,
 }
 
 /// Where a file transfer stands, on either side.
@@ -170,6 +207,32 @@ impl Attachment {
             _ => MediaKind::File,
         }
     }
+}
+
+/// One member of a group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupMember {
+    pub id: String,
+    /// The name to show: our nickname for them, their own name, or the name
+    /// the group's admin gave.
+    pub name: String,
+    pub is_me: bool,
+    pub is_admin: bool,
+    pub online: bool,
+    /// One of our contacts (so a 1:1 chat with them exists).
+    pub is_contact: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupInfo {
+    pub id: String,
+    pub name: String,
+    pub admin: String,
+    pub i_am_admin: bool,
+    /// False once we left, were removed, or the admin closed the group:
+    /// the history stays but nothing more is sent or received.
+    pub active: bool,
+    pub members: Vec<GroupMember>,
 }
 
 /// A chat-list row: contact plus last message and unread count.

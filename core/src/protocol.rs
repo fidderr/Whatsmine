@@ -41,6 +41,8 @@ pub enum Frame {
         id: [u8; 16],
         text: String,
         sent_at: i64,
+        /// Set for a group message: the group's id.
+        group: Option<String>,
     },
     Receipt {
         kind: ReceiptKind,
@@ -67,6 +69,7 @@ pub enum Frame {
         sha256: [u8; 32],
         caption: String,
         duration_ms: Option<u64>,
+        group: Option<String>,
     },
     /// "Send me this file, starting at byte `offset`" (resume support).
     FileWant {
@@ -81,6 +84,8 @@ pub enum Frame {
     CallInvite {
         call: [u8; 16],
         video: bool,
+        /// Set for a group call: the group's id.
+        group: Option<String>,
     },
     /// The callee's answer to a [`Frame::CallInvite`].
     CallAnswer {
@@ -96,7 +101,45 @@ pub enum Frame {
         call: [u8; 16],
         on: bool,
     },
+    /// The state of a group, signed by its admin so anyone can pass it on.
+    GroupUpdate {
+        state: GroupState,
+        /// Ed25519 signature by `state.admin` over `state.signing_bytes()`.
+        sig: Vec<u8>,
+        /// Display names (key, name) for members the receiver may not know.
+        names: Vec<(String, String)>,
+    },
+    /// "I am leaving this group."
+    GroupLeave {
+        group: String,
+    },
 }
+
+/// What the admin signs. A higher `version` replaces a lower one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupState {
+    pub id: String,
+    pub name: String,
+    pub admin: String,
+    pub version: u64,
+    /// Keys of every member, the admin included, sorted.
+    pub members: Vec<String>,
+    /// The admin ended the group.
+    pub closed: bool,
+}
+
+impl GroupState {
+    pub fn signing_bytes(&self) -> Vec<u8> {
+        let mut canon = self.clone();
+        canon.members.sort();
+        let mut out = b"whatsmine-group-v1".to_vec();
+        out.extend(postcard::to_stdvec(&canon).unwrap_or_default());
+        out
+    }
+}
+
+/// Most members one group may have (everyone connects to everyone).
+pub const MAX_GROUP_MEMBERS: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CallResult {
@@ -198,6 +241,7 @@ mod tests {
                 id: [7; 16],
                 text: "hallo\nwereld".into(),
                 sent_at: 1_792_000_000_000,
+                group: Some("g:x".into()),
             },
             Frame::Receipt {
                 kind: ReceiptKind::Read,
@@ -217,6 +261,7 @@ mod tests {
                 sha256: [9; 32],
                 caption: "kijk".into(),
                 duration_ms: Some(4200),
+                group: None,
             },
             Frame::FileWant {
                 id: [3; 16],
@@ -226,6 +271,22 @@ mod tests {
             Frame::CallInvite {
                 call: [4; 16],
                 video: true,
+                group: None,
+            },
+            Frame::GroupUpdate {
+                state: GroupState {
+                    id: "g:1".into(),
+                    name: "Team".into(),
+                    admin: "a".into(),
+                    version: 3,
+                    members: vec!["a".into(), "b".into()],
+                    closed: false,
+                },
+                sig: vec![1; 64],
+                names: vec![("b".into(), "Bob".into())],
+            },
+            Frame::GroupLeave {
+                group: "g:1".into(),
             },
             Frame::CallAnswer {
                 call: [4; 16],

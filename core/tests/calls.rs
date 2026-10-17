@@ -97,6 +97,7 @@ async fn call_lifecycle_with_media() {
         CallEvent::Incoming {
             call_id: call.clone(),
             contact_id: ka.clone(),
+            from: ka.clone(),
             video: true
         }
     );

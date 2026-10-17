@@ -9,11 +9,39 @@ use std::sync::Mutex;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::model::{
-    Attachment, ChatSummary, Contact, ContactState, Message, MessageStatus, Millis, Settings,
-    TransferState, now_ms,
+    Attachment, ChatSummary, Contact, ContactKind, ContactState, Message, MessageStatus, Millis,
+    Settings, TransferState, now_ms,
 };
+use crate::protocol::GroupState;
 
-const CURRENT_VERSION: u32 = 2;
+const CURRENT_VERSION: u32 = 3;
+
+/// v2 → v3: groups. A group is a row in `contacts` (kind 'group') so chats,
+/// messages, drafts and unread counts work unchanged; the rest lives here.
+const MIGRATE_V3: &str = "
+ALTER TABLE contacts ADD COLUMN kind TEXT NOT NULL DEFAULT 'person';
+ALTER TABLE messages ADD COLUMN sender TEXT;
+CREATE TABLE IF NOT EXISTS groups (
+    id       TEXT PRIMARY KEY REFERENCES contacts(id) ON DELETE CASCADE,
+    admin    TEXT NOT NULL,
+    version  INTEGER NOT NULL,
+    closed   INTEGER NOT NULL DEFAULT 0,
+    active   INTEGER NOT NULL DEFAULT 1,
+    left     INTEGER NOT NULL DEFAULT 0,
+    sig      BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS group_members (
+    group_id  TEXT NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+    member_id TEXT NOT NULL,
+    PRIMARY KEY (group_id, member_id)
+);
+CREATE TABLE IF NOT EXISTS group_acks (
+    message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    member_id  TEXT NOT NULL,
+    status     INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (message_id, member_id)
+);
+";
 
 /// v1 → v2: attachments (JSON) on messages, profile pictures on contacts.
 const MIGRATE_V2: &str = "
@@ -88,6 +116,9 @@ impl Database {
         if version < 2 {
             conn.execute_batch(MIGRATE_V2)?;
         }
+        if version < 3 {
+            conn.execute_batch(MIGRATE_V3)?;
+        }
         conn.execute_batch(&format!("PRAGMA user_version = {CURRENT_VERSION}"))?;
         Ok(Self {
             conn: Mutex::new(conn),
@@ -127,7 +158,7 @@ impl Database {
     /// Deletes every row and compacts the file so nothing lingers on disk.
     pub fn wipe(&self) -> rusqlite::Result<()> {
         self.lock().execute_batch(
-            "DELETE FROM drafts; DELETE FROM messages; DELETE FROM contacts;
+            "DELETE FROM drafts; DELETE FROM group_acks; DELETE FROM messages; DELETE FROM group_members; DELETE FROM groups; DELETE FROM contacts;
              DELETE FROM settings; PRAGMA wal_checkpoint(TRUNCATE); VACUUM;",
         )
     }
@@ -161,7 +192,7 @@ impl Database {
     pub fn contact(&self, id: &str) -> Option<Contact> {
         self.lock()
             .query_row(
-                "SELECT id, their_name, nickname, state, last_seen, created_at, avatar
+                "SELECT id, their_name, nickname, state, last_seen, created_at, avatar, kind
                  FROM contacts WHERE id = ?1",
                 params![id],
                 contact_from_row,
@@ -175,7 +206,7 @@ impl Database {
         let conn = self.lock();
         let mut stmt = conn
             .prepare(
-                "SELECT id, their_name, nickname, state, last_seen, created_at, avatar
+                "SELECT id, their_name, nickname, state, last_seen, created_at, avatar, kind
                  FROM contacts ORDER BY last_activity DESC",
             )
             .expect("valid SQL");
@@ -292,8 +323,8 @@ impl Database {
         let conn = self.lock();
         let n = conn.execute(
             "INSERT OR IGNORE INTO messages
-             (id, contact_id, outgoing, body, sent_at, received_at, status, read, attachment)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             (id, contact_id, outgoing, body, sent_at, received_at, status, read, attachment, sender)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 m.id,
                 m.contact_id,
@@ -305,7 +336,8 @@ impl Database {
                 m.read,
                 m.attachment
                     .as_ref()
-                    .map(|a| serde_json::to_string(a).expect("attachment serializes"))
+                    .map(|a| serde_json::to_string(a).expect("attachment serializes")),
+                m.sender
             ],
         )?;
         if n > 0 {
@@ -467,6 +499,280 @@ impl Database {
         );
     }
 
+    // ---- groups ----
+
+    /// The stored state of a group, its signature, and whether we are still in it.
+    pub fn group(&self, id: &str) -> Option<(GroupState, Vec<u8>, bool)> {
+        let conn = self.lock();
+        let (admin, version, closed, active, sig): (String, i64, bool, bool, Vec<u8>) = conn
+            .query_row(
+                "SELECT admin, version, closed, active, sig FROM groups WHERE id = ?1",
+                params![id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .optional()
+            .ok()
+            .flatten()?;
+        let name: String = conn
+            .query_row(
+                "SELECT their_name FROM contacts WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .ok()?;
+        let mut members: Vec<String> = conn
+            .prepare("SELECT member_id FROM group_members WHERE group_id = ?1")
+            .and_then(|mut s| {
+                s.query_map(params![id], |r| r.get(0))
+                    .map(|rows| rows.filter_map(Result::ok).collect())
+            })
+            .unwrap_or_default();
+        members.sort();
+        Some((
+            GroupState {
+                id: id.to_string(),
+                name,
+                admin,
+                version: version as u64,
+                members,
+                closed,
+            },
+            sig,
+            active,
+        ))
+    }
+
+    /// Creates or replaces a group from `state`. Members we do not know yet
+    /// become group peers (named from `names`); `me` is never added as one.
+    pub fn save_group(
+        &self,
+        state: &GroupState,
+        sig: &[u8],
+        active: bool,
+        names: &[(String, String)],
+        me: &str,
+    ) -> rusqlite::Result<()> {
+        let now = now_ms();
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO contacts (id, their_name, state, created_at, last_activity, kind)
+             VALUES (?1, ?2, 'accepted', ?3, ?3, 'group')
+             ON CONFLICT(id) DO UPDATE SET their_name = excluded.their_name",
+            params![state.id, state.name, now],
+        )?;
+        conn.execute(
+            "INSERT INTO groups (id, admin, version, closed, active, sig)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(id) DO UPDATE SET admin = excluded.admin, version = excluded.version,
+                closed = excluded.closed, active = excluded.active, sig = excluded.sig",
+            params![
+                state.id,
+                state.admin,
+                state.version as i64,
+                state.closed,
+                active,
+                sig
+            ],
+        )?;
+        conn.execute(
+            "DELETE FROM group_members WHERE group_id = ?1",
+            params![state.id],
+        )?;
+        for m in &state.members {
+            conn.execute(
+                "INSERT OR IGNORE INTO group_members (group_id, member_id) VALUES (?1, ?2)",
+                params![state.id, m],
+            )?;
+            if m != me {
+                let name = names
+                    .iter()
+                    .find(|(k, _)| k == m)
+                    .map(|(_, n)| n.as_str())
+                    .unwrap_or("");
+                conn.execute(
+                    "INSERT OR IGNORE INTO contacts
+                        (id, their_name, state, created_at, last_activity, kind)
+                     VALUES (?1, ?2, 'group_peer', ?3, ?3, 'person')",
+                    params![m, name, now],
+                )?;
+                if !name.is_empty() {
+                    conn.execute(
+                        "UPDATE contacts SET their_name = ?2 WHERE id = ?1 AND their_name = ''",
+                        params![m, name],
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// We left; the admin has not necessarily heard yet.
+    pub fn set_group_left(&self, id: &str, left: bool) {
+        let _ = self.lock().execute(
+            "UPDATE groups SET left = ?2 WHERE id = ?1",
+            params![id, left],
+        );
+    }
+
+    /// Groups we left whose admin is `admin` and may not know it yet.
+    pub fn pending_leaves_to(&self, admin: &str) -> Vec<String> {
+        self.lock()
+            .prepare("SELECT id FROM groups WHERE left = 1 AND admin = ?1")
+            .and_then(|mut s| {
+                s.query_map(params![admin], |r| r.get(0))
+                    .map(|rows| rows.filter_map(Result::ok).collect())
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn set_group_active(&self, id: &str, active: bool) {
+        let _ = self.lock().execute(
+            "UPDATE groups SET active = ?2 WHERE id = ?1",
+            params![id, active],
+        );
+    }
+
+    /// Ids of the groups we are still in.
+    pub fn active_groups(&self) -> Vec<String> {
+        self.lock()
+            .prepare("SELECT id FROM groups WHERE active = 1")
+            .and_then(|mut s| {
+                s.query_map([], |r| r.get(0))
+                    .map(|rows| rows.filter_map(Result::ok).collect())
+            })
+            .unwrap_or_default()
+    }
+
+    /// Groups we are in that this person is a member of.
+    pub fn groups_with_member(&self, member: &str) -> Vec<String> {
+        self.lock()
+            .prepare(
+                "SELECT g.id FROM groups g JOIN group_members m ON m.group_id = g.id
+                 WHERE g.active = 1 AND m.member_id = ?1",
+            )
+            .and_then(|mut s| {
+                s.query_map(params![member], |r| r.get(0))
+                    .map(|rows| rows.filter_map(Result::ok).collect())
+            })
+            .unwrap_or_default()
+    }
+
+    /// Keys of everyone we share an active group with.
+    pub fn group_peer_ids(&self) -> Vec<String> {
+        self.lock()
+            .prepare(
+                "SELECT DISTINCT m.member_id FROM group_members m JOIN groups g ON g.id = m.group_id
+                 WHERE g.active = 1",
+            )
+            .and_then(|mut s| {
+                s.query_map([], |r| r.get(0))
+                    .map(|rows| rows.filter_map(Result::ok).collect())
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn is_group_member(&self, group_id: &str, member: &str) -> bool {
+        self.lock()
+            .query_row(
+                "SELECT 1 FROM group_members m JOIN groups g ON g.id = m.group_id
+                 WHERE m.group_id = ?1 AND m.member_id = ?2 AND g.active = 1",
+                params![group_id, member],
+                |_| Ok(()),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .is_some()
+    }
+
+    /// Deletes group peers nobody shares a group with any more.
+    pub fn prune_group_peers(&self) {
+        let _ = self.lock().execute(
+            "DELETE FROM contacts WHERE state = 'group_peer'
+             AND id NOT IN (SELECT member_id FROM group_members)",
+            [],
+        );
+    }
+
+    pub fn delete_group(&self, id: &str) {
+        self.delete_contact(id);
+        self.prune_group_peers();
+    }
+
+    /// Starts tracking delivery of a group message to each member.
+    pub fn add_group_acks(&self, message_id: &str, members: &[String]) {
+        let conn = self.lock();
+        for m in members {
+            let _ = conn.execute(
+                "INSERT OR IGNORE INTO group_acks (message_id, member_id) VALUES (?1, ?2)",
+                params![message_id, m],
+            );
+        }
+    }
+
+    /// Records that a member stored a group message. True if it changed.
+    pub fn set_group_ack(&self, message_id: &str, member: &str, status: i64) -> bool {
+        self.lock()
+            .execute(
+                "UPDATE group_acks SET status = ?3
+                 WHERE message_id = ?1 AND member_id = ?2 AND status < ?3",
+                params![message_id, member, status],
+            )
+            .map(|n| n > 0)
+            .unwrap_or(false)
+    }
+
+    /// (members that have it, members tracked) for a group message.
+    pub fn group_ack_counts(&self, message_id: &str) -> (u32, u32) {
+        self.lock()
+            .query_row(
+                "SELECT COALESCE(SUM(status >= 2), 0), COUNT(*) FROM group_acks WHERE message_id = ?1",
+                params![message_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap_or((0, 0))
+    }
+
+    /// Our group messages this member has not confirmed yet, oldest first.
+    pub fn group_unacked_for(&self, member: &str) -> Vec<Message> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT {MSG_COLS} FROM messages
+                 WHERE outgoing = 1 AND id IN
+                    (SELECT message_id FROM group_acks WHERE member_id = ?1 AND status < 2)
+                 ORDER BY sent_at ASC, id ASC"
+            ))
+            .expect("valid SQL");
+        stmt.query_map(params![member], message_from_row)
+            .map(|rows| rows.filter_map(Result::ok).collect())
+            .unwrap_or_default()
+    }
+
+    /// Stops tracking a member's acks (they left or were removed).
+    pub fn remove_member_acks(&self, group_id: &str, member: &str) {
+        let _ = self.lock().execute(
+            "DELETE FROM group_acks WHERE member_id = ?2 AND message_id IN
+                (SELECT id FROM messages WHERE contact_id = ?1)",
+            params![group_id, member],
+        );
+    }
+
+    /// Outgoing group messages not yet confirmed by everyone, oldest first.
+    pub fn group_pending_messages(&self, group_id: &str) -> Vec<Message> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT {MSG_COLS} FROM messages
+                 WHERE contact_id = ?1 AND outgoing = 1 AND status < 2
+                 ORDER BY sent_at ASC, id ASC"
+            ))
+            .expect("valid SQL");
+        stmt.query_map(params![group_id], message_from_row)
+            .map(|rows| rows.filter_map(Result::ok).collect())
+            .unwrap_or_default()
+    }
+
     // ---- drafts ----
 
     pub fn draft(&self, contact_id: &str) -> String {
@@ -497,7 +803,7 @@ impl Database {
 }
 
 const MSG_COLS: &str =
-    "id, contact_id, outgoing, body, sent_at, received_at, status, read, attachment";
+    "id, contact_id, outgoing, body, sent_at, received_at, status, read, attachment, sender";
 
 fn contact_from_row(r: &Row<'_>) -> rusqlite::Result<Contact> {
     Ok(Contact {
@@ -508,6 +814,7 @@ fn contact_from_row(r: &Row<'_>) -> rusqlite::Result<Contact> {
         last_seen: r.get(4)?,
         created_at: r.get(5)?,
         avatar: r.get(6)?,
+        kind: ContactKind::parse(&r.get::<_, String>(7)?),
     })
 }
 
@@ -523,6 +830,7 @@ fn message_from_row(r: &Row<'_>) -> rusqlite::Result<Message> {
         status: MessageStatus::from_i64(r.get(6)?),
         read: r.get(7)?,
         attachment: attachment.and_then(|s| serde_json::from_str(&s).ok()),
+        sender: r.get(9)?,
     })
 }
 
@@ -556,6 +864,7 @@ mod tests {
             status: MessageStatus::Queued,
             read: false,
             attachment: None,
+            sender: None,
         }
     }
 

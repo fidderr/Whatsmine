@@ -18,18 +18,24 @@ use tokio::sync::{broadcast, mpsc};
 use tokio::time::Instant;
 
 use crate::NetMode;
-use crate::calls::{self, ActiveCall, CallEndReason, CallEvent, CallMedia, MediaIn};
+use crate::calls::{self, ActiveCall, CallMedia, MediaIn};
 use crate::db::Database;
 use crate::files::{self, ReceiveCtx, Received};
+use crate::groups;
 use crate::identity::key_to_string;
 use crate::model::{
     Attachment, ContactState, CoreEvent, Message, MessageStatus, NetStatus, Settings,
     TransferState, now_ms,
 };
 use crate::protocol::{
-    self, ALPN, CallResult, Frame, MAX_TEXT, PROTO_VERSION, RING_TIMEOUT, ReceiptKind,
-    VIDEO_STREAM_MAGIC, id_from_bytes, id_to_bytes,
+    self, ALPN, Frame, GroupState, MAX_TEXT, PROTO_VERSION, ReceiptKind, VIDEO_STREAM_MAGIC,
+    id_from_bytes, id_to_bytes,
 };
+
+mod call;
+mod group;
+
+use call::{CallState, GroupCalls};
 
 const DIAL_TIMEOUT: Duration = Duration::from_secs(30);
 const BACKOFF_MIN: Duration = Duration::from_secs(3);
@@ -60,11 +66,32 @@ pub(crate) enum Cmd {
         contact: PublicKey,
         message_id: String,
     },
-    /// Start a call to this contact (id chosen by the caller).
+    /// Start a call to this contact or group (id chosen by the caller).
     CallInvite {
-        peer: PublicKey,
+        target: String,
         call: [u8; 16],
         video: bool,
+    },
+    /// Join the group call that is going on.
+    CallJoin {
+        group: String,
+    },
+    /// Send this stored group message to the members that are connected.
+    SendGroup {
+        group: String,
+        message_id: String,
+    },
+    /// The group changed (we are its admin): send its new state around.
+    GroupPublish {
+        state: GroupState,
+        sig: Vec<u8>,
+        names: Vec<(String, String)>,
+        to: Vec<PublicKey>,
+    },
+    /// We left a group: tell its admin.
+    GroupLeave {
+        group: String,
+        admin: PublicKey,
     },
     /// Answer the call that is ringing.
     CallAnswer {
@@ -84,15 +111,6 @@ pub(crate) enum Cmd {
     /// Our camera went on or off.
     CallVideoOn(bool),
     Shutdown(std::sync::mpsc::Sender<()>),
-}
-
-/// The one call this device is in (ringing or connected).
-struct CallState {
-    id: [u8; 16],
-    peer: PublicKey,
-    outgoing: bool,
-    started: Instant,
-    connected: Option<Instant>,
 }
 
 /// Events from the connection tasks back into the engine.
@@ -120,7 +138,7 @@ enum Internal {
         total: u64,
     },
     UploadEnded {
-        message_id: String,
+        key: String,
     },
     Download {
         peer: PublicKey,
@@ -142,6 +160,8 @@ struct Session {
 pub(crate) struct Shared {
     pub online: Arc<Mutex<HashSet<String>>>,
     pub net: Arc<Mutex<NetStatus>>,
+    /// Group calls that can be joined: group id -> video.
+    pub group_calls: Arc<Mutex<HashMap<String, bool>>>,
 }
 
 pub(crate) struct Engine {
@@ -167,6 +187,7 @@ pub(crate) struct Engine {
     /// How often a download failed its hash check (retried once).
     corrupt_retries: HashMap<String, u8>,
     call: Option<CallState>,
+    group_calls: GroupCalls,
     media_in: MediaIn,
     video_inflight: Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -196,6 +217,7 @@ impl Engine {
             downloads: Arc::new(Mutex::new(HashSet::new())),
             corrupt_retries: HashMap::new(),
             call: None,
+            group_calls: HashMap::new(),
             media_in: MediaIn {
                 active: ActiveCall::default(),
                 tx: call_media,
@@ -391,235 +413,59 @@ impl Engine {
                 }
                 self.want_file(contact, &message_id);
             }
-            Cmd::CallInvite { peer, call, video } => self.call_invite(peer, call, video),
+            Cmd::CallInvite {
+                target,
+                call,
+                video,
+            } => self.call_invite(target, call, video),
+            Cmd::CallJoin { group } => self.call_join(group),
             Cmd::CallAnswer { accept } => self.call_answer(accept),
             Cmd::CallEnd => self.call_hangup(),
             Cmd::CallAudio { ts, data } => {
-                if let Some((call, conn)) = self.live_call_conn() {
-                    calls::send_audio(&conn, call, ts, &data);
+                if let Some((call, conns)) = self.call_conns() {
+                    for conn in conns {
+                        calls::send_audio(&conn, call, ts, &data);
+                    }
                 }
             }
             Cmd::CallVideo { ts, key, data } => {
-                if let Some((call, conn)) = self.live_call_conn() {
-                    calls::send_video(conn, call, ts, key, data, self.video_inflight.clone());
-                }
-            }
-            Cmd::CallVideoOn(on) => {
-                if let Some(c) = self.call.as_ref().filter(|c| c.connected.is_some()) {
-                    let (peer, call) = (c.peer, c.id);
-                    self.send(peer, Frame::CallVideo { call, on });
-                }
-            }
-            Cmd::Shutdown(_) => unreachable!("handled in run loop"),
-        }
-    }
-
-    // ---- calls ----
-
-    fn emit_call(&self, ev: CallEvent) {
-        emit(&self.events, CoreEvent::Call(ev));
-    }
-
-    /// The connected call and the connection its media should use.
-    fn live_call_conn(&self) -> Option<([u8; 16], Connection)> {
-        let c = self.call.as_ref().filter(|c| c.connected.is_some())?;
-        let conn = self.sessions.get(&c.peer)?.conn.clone();
-        Some((c.id, conn))
-    }
-
-    fn set_active_call(&self, value: Option<([u8; 16], PublicKey)>) {
-        *self
-            .media_in
-            .active
-            .lock()
-            .unwrap_or_else(|p| p.into_inner()) = value;
-    }
-
-    /// Ends whatever call there is and tells the UI why.
-    fn end_call(&mut self, reason: CallEndReason) {
-        let Some(c) = self.call.take() else { return };
-        self.set_active_call(None);
-        let duration_ms = c
-            .connected
-            .map(|t| t.elapsed().as_millis() as u64)
-            .unwrap_or(0);
-        self.emit_call(CallEvent::Ended {
-            call_id: id_from_bytes(&c.id),
-            contact_id: key_to_string(&c.peer),
-            reason,
-            duration_ms,
-        });
-    }
-
-    fn call_invite(&mut self, peer: PublicKey, call: [u8; 16], video: bool) {
-        let ended = |e: &Engine, reason| {
-            e.emit_call(CallEvent::Ended {
-                call_id: id_from_bytes(&call),
-                contact_id: key_to_string(&peer),
-                reason,
-                duration_ms: 0,
-            });
-        };
-        if self.call.is_some() {
-            return ended(self, CallEndReason::Busy);
-        }
-        if !self.sessions.contains_key(&peer) {
-            return ended(self, CallEndReason::Lost);
-        }
-        self.call = Some(CallState {
-            id: call,
-            peer,
-            outgoing: true,
-            started: Instant::now(),
-            connected: None,
-        });
-        self.set_active_call(Some((call, peer)));
-        self.send(peer, Frame::CallInvite { call, video });
-    }
-
-    fn call_answer(&mut self, accept: bool) {
-        let Some(c) = self
-            .call
-            .as_mut()
-            .filter(|c| !c.outgoing && c.connected.is_none())
-        else {
-            return;
-        };
-        let (peer, call) = (c.peer, c.id);
-        if accept {
-            c.connected = Some(Instant::now());
-            self.send(
-                peer,
-                Frame::CallAnswer {
-                    call,
-                    result: CallResult::Accepted,
-                },
-            );
-            self.emit_call(CallEvent::Connected {
-                call_id: id_from_bytes(&call),
-                contact_id: key_to_string(&peer),
-            });
-        } else {
-            self.send(
-                peer,
-                Frame::CallAnswer {
-                    call,
-                    result: CallResult::Declined,
-                },
-            );
-            self.end_call(CallEndReason::Declined);
-        }
-    }
-
-    fn call_hangup(&mut self) {
-        let Some(c) = self.call.as_ref() else { return };
-        let (peer, call) = (c.peer, c.id);
-        let ringing_out = c.outgoing && c.connected.is_none();
-        self.send(peer, Frame::CallEnd { call });
-        self.end_call(if ringing_out {
-            CallEndReason::Cancelled
-        } else {
-            CallEndReason::Hangup
-        });
-    }
-
-    /// Gives up on a call nobody answered.
-    fn call_tick(&mut self) {
-        let Some(c) = self.call.as_ref() else { return };
-        if c.connected.is_some() || c.started.elapsed() < RING_TIMEOUT {
-            return;
-        }
-        let (peer, call, outgoing) = (c.peer, c.id, c.outgoing);
-        if outgoing {
-            self.send(peer, Frame::CallEnd { call });
-        }
-        self.end_call(CallEndReason::Missed);
-    }
-
-    fn on_call_frame(&mut self, peer: PublicKey, frame: Frame) {
-        let id = key_to_string(&peer);
-        match frame {
-            Frame::CallInvite { call, video } => {
-                let accepted = self
-                    .db
-                    .contact(&id)
-                    .is_some_and(|c| c.state == ContactState::Accepted);
-                if !accepted {
-                    return;
-                }
-                if self.call.is_some() {
-                    // A repeated invite for the call we already show is fine.
-                    if self.call.as_ref().is_some_and(|c| c.id == call) {
-                        return;
-                    }
-                    self.send(
-                        peer,
-                        Frame::CallAnswer {
+                if let Some((call, conns)) = self.call_conns() {
+                    for conn in conns {
+                        calls::send_video(
+                            conn,
                             call,
-                            result: CallResult::Busy,
+                            ts,
+                            key,
+                            data.clone(),
+                            self.video_inflight.clone(),
+                        );
+                    }
+                }
+            }
+            Cmd::CallVideoOn(on) => self.call_video_on(on),
+            Cmd::SendGroup { group, message_id } => self.send_group_message(&group, &message_id),
+            Cmd::GroupPublish {
+                state,
+                sig,
+                names,
+                to,
+            } => {
+                self.refresh_group_messages(&state.id);
+                for p in to {
+                    self.send(
+                        p,
+                        Frame::GroupUpdate {
+                            state: state.clone(),
+                            sig: sig.clone(),
+                            names: names.clone(),
                         },
                     );
-                    return;
-                }
-                self.call = Some(CallState {
-                    id: call,
-                    peer,
-                    outgoing: false,
-                    started: Instant::now(),
-                    connected: None,
-                });
-                self.set_active_call(Some((call, peer)));
-                self.emit_call(CallEvent::Incoming {
-                    call_id: id_from_bytes(&call),
-                    contact_id: id,
-                    video,
-                });
-            }
-            Frame::CallAnswer { call, result } => {
-                let Some(c) = self.call.as_mut().filter(|c| {
-                    c.id == call && c.peer == peer && c.outgoing && c.connected.is_none()
-                }) else {
-                    return;
-                };
-                match result {
-                    CallResult::Accepted => {
-                        c.connected = Some(Instant::now());
-                        self.emit_call(CallEvent::Connected {
-                            call_id: id_from_bytes(&call),
-                            contact_id: id,
-                        });
-                    }
-                    CallResult::Declined => self.end_call(CallEndReason::Declined),
-                    CallResult::Busy => self.end_call(CallEndReason::Busy),
                 }
             }
-            Frame::CallEnd { call } => {
-                let Some(c) = self
-                    .call
-                    .as_ref()
-                    .filter(|c| c.id == call && c.peer == peer)
-                else {
-                    return;
-                };
-                let reason = if !c.outgoing && c.connected.is_none() {
-                    CallEndReason::Missed
-                } else {
-                    CallEndReason::Hangup
-                };
-                self.end_call(reason);
+            Cmd::GroupLeave { group, admin } => {
+                self.send(admin, Frame::GroupLeave { group });
             }
-            Frame::CallVideo { call, on }
-                if self
-                    .call
-                    .as_ref()
-                    .is_some_and(|c| c.id == call && c.peer == peer) =>
-            {
-                self.emit_call(CallEvent::PeerVideo {
-                    call_id: id_from_bytes(&call),
-                    on,
-                });
-            }
-            _ => {}
+            Cmd::Shutdown(_) => unreachable!("handled in run loop"),
         }
     }
 
@@ -629,13 +475,19 @@ impl Engine {
     /// whose backoff has expired.
     fn dial_due(&mut self, ep: &Endpoint) {
         let now = Instant::now();
-        let wanted = self
-            .db
-            .contacts_in(&[ContactState::Accepted, ContactState::PendingOut]);
+        let wanted = self.db.contacts_in(&[
+            ContactState::Accepted,
+            ContactState::PendingOut,
+            ContactState::GroupPeer,
+        ]);
+        let in_groups: HashSet<String> = self.db.group_peer_ids().into_iter().collect();
         for c in wanted {
             let Some(peer) = crate::identity::parse_key(&c.id) else {
                 continue;
             };
+            if c.state == ContactState::GroupPeer && !in_groups.contains(&c.id) {
+                continue;
+            }
             if self.sessions.contains_key(&peer) || self.dialing.contains(&peer) {
                 continue;
             }
@@ -715,8 +567,8 @@ impl Engine {
                     total,
                 },
             ),
-            Internal::UploadEnded { message_id } => {
-                self.uploads.remove(&message_id);
+            Internal::UploadEnded { key } => {
+                self.uploads.remove(&key);
             }
             Internal::Download {
                 peer,
@@ -791,7 +643,8 @@ impl Engine {
         let Some(conn) = self.sessions.get(&peer).map(|s| s.conn.clone()) else {
             return;
         };
-        if offset > att.size || !self.uploads.insert(m.id.clone()) {
+        let upload_key = format!("{}:{}", m.id, key_to_string(&peer));
+        if offset > att.size || !self.uploads.insert(upload_key.clone()) {
             return;
         }
         let tx = self.tx.clone();
@@ -811,7 +664,7 @@ impl Engine {
             if let Err(e) = result {
                 tracing::debug!("upload {message_id} stopped: {e:#}");
             }
-            let _ = tx.send(Internal::UploadEnded { message_id });
+            let _ = tx.send(Internal::UploadEnded { key: upload_key });
         });
     }
 
@@ -905,6 +758,7 @@ impl Engine {
             }
             _ => {}
         }
+        self.on_group_session(peer);
     }
 
     /// The peer is connected and both sides have accepted: show them online
@@ -931,18 +785,16 @@ impl Engine {
         }
         self.sessions.remove(&peer);
         self.typing_sent.remove(&peer);
-        if self.call.as_ref().is_some_and(|c| c.peer == peer) {
-            self.end_call(CallEndReason::Lost);
-        }
+        self.call_session_closed(peer);
         let id = key_to_string(&peer);
-        let accepted = self
-            .db
-            .contact(&id)
-            .is_some_and(|c| c.state == ContactState::Accepted);
-        if accepted {
-            let last_seen = (!self.hides_last_seen.contains(&peer)).then(now_ms);
-            self.db.set_last_seen(&id, last_seen);
-            self.set_online(peer, false, last_seen);
+        match self.db.contact(&id).map(|c| c.state) {
+            Some(ContactState::Accepted) => {
+                let last_seen = (!self.hides_last_seen.contains(&peer)).then(now_ms);
+                self.db.set_last_seen(&id, last_seen);
+                self.set_online(peer, false, last_seen);
+            }
+            Some(ContactState::GroupPeer) => self.set_online(peer, false, None),
+            _ => {}
         }
         // Try again soon: most disconnects are network blips.
         self.backoff
@@ -970,7 +822,7 @@ impl Engine {
                 }
             }
             Frame::Request { name } => match state {
-                None => {
+                None | Some(ContactState::GroupPeer) => {
                     let name = clean_name(&name);
                     if self
                         .db
@@ -1016,6 +868,13 @@ impl Engine {
                 id: mid,
                 text,
                 sent_at,
+                group: Some(group),
+            } => self.on_group_msg(peer, mid, text, sent_at, group),
+            Frame::Msg {
+                id: mid,
+                text,
+                sent_at,
+                group: None,
             } => {
                 if state != Some(ContactState::Accepted) || text.len() > MAX_TEXT {
                     return;
@@ -1030,6 +889,7 @@ impl Engine {
                     status: MessageStatus::Delivered,
                     read: false,
                     attachment: None,
+                    sender: None,
                 };
                 if self.db.insert_message(&message).unwrap_or(false) {
                     emit(&self.events, CoreEvent::MessageAdded(message));
@@ -1045,7 +905,12 @@ impl Engine {
                 );
             }
             Frame::Receipt { kind, ids } => {
-                if state != Some(ContactState::Accepted) {
+                // Group messages are confirmed member by member.
+                let ids: Vec<[u8; 16]> = ids
+                    .into_iter()
+                    .filter(|mid| !self.group_receipt(peer, mid))
+                    .collect();
+                if ids.is_empty() || state != Some(ContactState::Accepted) {
                     return;
                 }
                 // With read receipts off we neither send nor show them.
@@ -1100,7 +965,26 @@ impl Engine {
                 sha256,
                 caption,
                 duration_ms,
+                group,
             } => {
+                if let Some(group) = group {
+                    return self.on_group_file_offer(
+                        peer,
+                        mid,
+                        sent_at,
+                        Attachment {
+                            name: files::clean_file_name(&name),
+                            mime: files::clean_mime(&mime),
+                            size,
+                            sha256: files::to_hex(&sha256),
+                            path: None,
+                            state: TransferState::Transferring,
+                            duration_ms,
+                        },
+                        caption,
+                        group,
+                    );
+                }
                 if state != Some(ContactState::Accepted) || caption.len() > MAX_TEXT {
                     return;
                 }
@@ -1124,17 +1008,15 @@ impl Engine {
                             state: TransferState::Transferring,
                             duration_ms,
                         }),
+                        sender: None,
                     },
                 );
             }
             Frame::FileWant { id: mid, offset } => {
-                if state != Some(ContactState::Accepted) {
-                    return;
-                }
                 let message_id = id_from_bytes(&mid);
                 if let Some(m) = self.db.message(&message_id)
                     && m.outgoing
-                    && m.contact_id == id
+                    && self.may_fetch(&m, &id, state)
                     && m.attachment
                         .as_ref()
                         .is_some_and(|a| a.state != TransferState::Declined)
@@ -1142,11 +1024,18 @@ impl Engine {
                     self.start_upload(peer, &m, offset);
                 }
             }
+            Frame::GroupUpdate { state, sig, names } => {
+                self.on_group_update(peer, state, sig, names)
+            }
+            Frame::GroupLeave { group } => self.on_group_leave(peer, group),
             f @ (Frame::CallInvite { .. }
             | Frame::CallAnswer { .. }
             | Frame::CallEnd { .. }
             | Frame::CallVideo { .. }) => self.on_call_frame(peer, f),
             Frame::FileDecline { id: mid } => {
+                if self.group_declined(peer, &mid) {
+                    return;
+                }
                 let message_id = id_from_bytes(&mid);
                 if let Some(m) = self.db.message(&message_id)
                     && m.outgoing
@@ -1289,6 +1178,7 @@ impl Engine {
 
     fn send_message(&self, peer: PublicKey, m: &Message) {
         let Some(id) = id_to_bytes(&m.id) else { return };
+        let group = groups::is_group_id(&m.contact_id).then(|| m.contact_id.clone());
         let frame = match &m.attachment {
             Some(a) => {
                 let Some(sha256) = files::from_hex32(&a.sha256) else {
@@ -1303,12 +1193,14 @@ impl Engine {
                     sha256,
                     caption: m.body.clone(),
                     duration_ms: a.duration_ms,
+                    group,
                 }
             }
             None => Frame::Msg {
                 id,
                 text: m.body.clone(),
                 sent_at: m.sent_at,
+                group,
             },
         };
         let sent = self.send(peer, frame);
@@ -1381,7 +1273,7 @@ impl Engine {
 }
 
 /// Names are display-only; keep them short and single-line.
-fn clean_name(name: &str) -> String {
+pub(crate) fn clean_name(name: &str) -> String {
     name.chars()
         .filter(|c| !c.is_control())
         .take(64)

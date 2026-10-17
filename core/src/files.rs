@@ -231,8 +231,9 @@ pub(crate) async fn receive(
     // Must be an incoming file from this peer that we are still waiting for.
     let expected = ctx.db.message(&id).and_then(|m| {
         let a = m.attachment?;
-        (!m.outgoing && m.contact_id == ctx.peer_id && a.state == TransferState::Transferring)
-            .then_some(a)
+        let from_peer =
+            m.contact_id == ctx.peer_id || m.sender.as_deref() == Some(ctx.peer_id.as_str());
+        (!m.outgoing && from_peer && a.state == TransferState::Transferring).then_some(a)
     });
     let Some(att) = expected else {
         let _ = recv.stop(1u32.into());

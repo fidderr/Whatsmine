@@ -13,6 +13,7 @@
 //! The encoding itself (WebCodecs: Opus + VP8) happens in the UI layer; the
 //! core only moves opaque packets between the UI and the peer.
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -22,6 +23,7 @@ use iroh::PublicKey;
 use iroh::endpoint::{Connection, RecvStream};
 use tokio::sync::mpsc;
 
+use crate::identity::key_to_string;
 use crate::protocol::{AUDIO_DATAGRAM_MAGIC, MAX_VIDEO_FRAME, VIDEO_STREAM_MAGIC, id_from_bytes};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +36,8 @@ pub enum MediaKind {
 #[derive(Debug, Clone)]
 pub struct CallMedia {
     pub call_id: String,
+    /// Who sent it (their key). Several people can send in a group call.
+    pub from: String,
     pub kind: MediaKind,
     /// Capture time in microseconds, wrapping (u32 is plenty for jitter
     /// and ordering inside one call).
@@ -58,18 +62,28 @@ pub enum CallEndReason {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CallEvent {
+    /// `contact_id` is the conversation (a person, or a group); `from` is
+    /// who is calling.
     Incoming {
         call_id: String,
         contact_id: String,
+        from: String,
         video: bool,
     },
-    Connected {
-        call_id: String,
-        contact_id: String,
-    },
+    /// We are in the call.
+    Connected { call_id: String, contact_id: String },
+    /// Who else is in the call right now (everyone but us).
+    Participants { call_id: String, peers: Vec<String> },
     PeerVideo {
         call_id: String,
+        from: String,
         on: bool,
+    },
+    /// A group call is going on that we could join (or it has ended).
+    GroupCall {
+        group_id: String,
+        active: bool,
+        video: bool,
     },
     Ended {
         call_id: String,
@@ -79,8 +93,8 @@ pub enum CallEvent {
     },
 }
 
-/// The call (and peer) media may flow for right now.
-pub(crate) type ActiveCall = Arc<Mutex<Option<([u8; 16], PublicKey)>>>;
+/// The call, and who may send media for it, right now.
+pub(crate) type ActiveCall = Arc<Mutex<Option<([u8; 16], HashSet<PublicKey>)>>>;
 
 /// Where incoming media goes.
 #[derive(Clone)]
@@ -94,7 +108,8 @@ impl MediaIn {
         self.active
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .is_some_and(|(id, p)| id == *call && p == peer)
+            .as_ref()
+            .is_some_and(|(id, members)| id == call && members.contains(&peer))
     }
 
     fn deliver(&self, media: CallMedia) {
@@ -117,6 +132,7 @@ pub(crate) fn spawn_datagram_reader(conn: Connection, peer: PublicKey, media: Me
             let ts = u32::from_be_bytes(d[17..21].try_into().expect("4 bytes"));
             media.deliver(CallMedia {
                 call_id: id_from_bytes(&call),
+                from: key_to_string(&peer),
                 kind: MediaKind::Audio,
                 ts,
                 key: false,
@@ -149,6 +165,7 @@ pub(crate) async fn receive_video(
     };
     media.deliver(CallMedia {
         call_id: id_from_bytes(&call),
+        from: key_to_string(&peer),
         kind: MediaKind::Video,
         ts,
         key: flags & 1 != 0,
