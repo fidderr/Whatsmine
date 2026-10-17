@@ -321,7 +321,7 @@ mod platform {
 
     pub fn post(n: &Notice) {
         log_line("post", &n.tag, Some(n));
-        #[cfg(windows)]
+        #[cfg(all(windows, feature = "desktop"))]
         {
             let ok = crate::desktop::toast(n);
             log_line(
@@ -364,6 +364,7 @@ mod tests {
         }
         fn text(&self, key: &str) -> String {
             match key {
+                "app.name" => "WhatsMine".into(),
                 "call.missed" => "Missed call from {name}".into(),
                 "notify.request" => "{name} wants to connect".into(),
                 other => other.into(),
