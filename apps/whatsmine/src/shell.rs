@@ -83,7 +83,11 @@ pub fn Shell() -> Element {
         use_hook(|| {
             spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-                open_requested(nav, invite);
+                // Also while the app is already in front (no visibility change then).
+                loop {
+                    open_requested(nav, invite);
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
             });
         });
         // Back closes a picture or menu, else goes up a screen, and from the
