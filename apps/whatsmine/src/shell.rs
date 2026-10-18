@@ -17,7 +17,8 @@ pub fn Shell() -> Element {
     // Is the app in front of the user? Then the system stays quiet.
     use_future(move || async move {
         let mut eval = document::eval(
-            "const report = () => dioxus.send(document.visibilityState === 'visible' && document.hasFocus());\n\
+            "const android = /Android/.test(navigator.userAgent);\n\
+             const report = () => dioxus.send(document.visibilityState === 'visible' && (android || document.hasFocus()));\n\
              document.addEventListener('visibilitychange', report);\n\
              window.addEventListener('focus', report);\n\
              window.addEventListener('blur', report);\n\
