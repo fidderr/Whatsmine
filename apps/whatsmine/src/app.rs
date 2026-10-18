@@ -273,8 +273,7 @@ fn Main(core: AppCore) -> Element {
     };
     let onboarded = s.onboarded;
     drop(s);
-    // System bars: how far they overlap us (rotation and window changes alter it),
-    // and icon colours that contrast with our background.
+    // System bars: how far they overlap us (rotation and window changes alter it).
     let mut safe_area = use_signal(crate::platform::safe_area_style);
     #[cfg(target_os = "android")]
     {
@@ -287,22 +286,10 @@ fn Main(core: AppCore) -> Element {
                 }
             }
         });
+        // The status bar is blue (light theme) or dark (dark theme): light icons on both.
         use_effect(move || {
-            let theme = settings.read().theme.clone();
             let _ = safe_area.read();
-            spawn(async move {
-                let light = match theme.as_str() {
-                    "light" => true,
-                    "dark" => false,
-                    _ => !document::eval(
-                        "return window.matchMedia('(prefers-color-scheme: dark)').matches",
-                    )
-                    .join::<bool>()
-                    .await
-                    .unwrap_or(false),
-                };
-                crate::platform::set_light_system_bars(light);
-            });
+            crate::platform::set_light_system_bars(false);
         });
     }
     #[cfg(not(target_os = "android"))]
