@@ -273,7 +273,40 @@ fn Main(core: AppCore) -> Element {
     };
     let onboarded = s.onboarded;
     drop(s);
-    let safe_area = use_hook(crate::platform::safe_area_style);
+    // System bars: how far they overlap us (rotation and window changes alter it),
+    // and icon colours that contrast with our background.
+    let mut safe_area = use_signal(crate::platform::safe_area_style);
+    #[cfg(target_os = "android")]
+    {
+        use_future(move || async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                let now = crate::platform::safe_area_style();
+                if now != *safe_area.peek() {
+                    safe_area.set(now);
+                }
+            }
+        });
+        use_effect(move || {
+            let theme = settings.read().theme.clone();
+            let _ = safe_area.read();
+            spawn(async move {
+                let light = match theme.as_str() {
+                    "light" => true,
+                    "dark" => false,
+                    _ => !document::eval(
+                        "return window.matchMedia('(prefers-color-scheme: dark)').matches",
+                    )
+                    .join::<bool>()
+                    .await
+                    .unwrap_or(false),
+                };
+                crate::platform::set_light_system_bars(light);
+            });
+        });
+    }
+    #[cfg(not(target_os = "android"))]
+    let _ = &mut safe_area;
 
     rsx! {
         document::Link { rel: "stylesheet", href: asset!("/assets/style.css") }
@@ -281,7 +314,7 @@ fn Main(core: AppCore) -> Element {
             name: "viewport",
             content: "width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content",
         }
-        div { class: "app-root {theme_class}", style: "{safe_area}",
+        div { class: "app-root {theme_class}", style: "{safe_area.read()}",
             div { class: "status-bar-bg" }
             if onboarded {
                 Router::<Route> {}
