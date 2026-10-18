@@ -63,6 +63,14 @@ pub fn SettingsScreen() -> Element {
     let net = use_context::<Net>().0;
     let mut settings = use_context::<SettingsSig>().0;
     let mut perm_rev = use_signal(|| 0u32);
+    // The permission and battery dialogs answer later: look again while this screen is open.
+    #[cfg(target_os = "android")]
+    use_future(move || async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            *perm_rev.write() += 1;
+        }
+    });
     let mut toast_sig = use_context::<ToastSig>();
     let mut name = use_signal(|| settings.peek().display_name.clone());
     let mut confirm_wipe = use_signal(|| false);
