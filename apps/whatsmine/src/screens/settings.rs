@@ -28,13 +28,12 @@ mod permissions {
 
     pub fn request_notifications() {
         #[cfg(target_os = "android")]
-        {
-            use mobile_sentinel::permissions::{PermissionState, open_app_settings, request};
-            if request("android.permission.POST_NOTIFICATIONS") != PermissionState::Granted {
+        std::thread::spawn(|| {
+            if !crate::android::request_blocking("android.permission.POST_NOTIFICATIONS") {
                 // Denied for good: only the system settings page can change it.
-                open_app_settings();
+                mobile_sentinel::permissions::open_app_settings();
             }
-        }
+        });
     }
 
     pub fn battery_unrestricted() -> bool {

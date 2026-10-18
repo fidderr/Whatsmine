@@ -99,17 +99,45 @@ pub fn ask_for_notifications_once(core: &whatsmine_core::Core) {
 /// has video) before a call starts, so its first seconds are not silent.
 /// Blocks while the system dialogs are up: call it off the UI thread.
 pub fn ensure_call_permissions(video: bool) -> bool {
-    use mobile_sentinel::permissions::{PermissionState, request, status};
-    let mut ask = |permission: &str| {
-        status(permission) == PermissionState::Granted
-            || request(permission) == PermissionState::Granted
-    };
-    let mic = ask("android.permission.RECORD_AUDIO");
+    let mic = request_blocking("android.permission.RECORD_AUDIO");
     if video {
         // Without the camera the call simply goes on without video.
-        let _ = ask("android.permission.CAMERA");
+        let _ = request_blocking("android.permission.CAMERA");
     }
     mic
+}
+
+/// Asks for a permission and waits for the user's answer. (The system call
+/// only shows the dialog and returns at once, so this watches the activity:
+/// it goes away while the dialog is up and comes back when it is answered.)
+/// Never call this on the UI thread.
+pub fn request_blocking(permission: &str) -> bool {
+    use mobile_sentinel::permissions::{PermissionState, request, status};
+    use std::time::{Duration, Instant};
+    if status(permission) == PermissionState::Granted {
+        return true;
+    }
+    request(permission);
+    let started = Instant::now();
+    let mut dialog_seen = false;
+    loop {
+        std::thread::sleep(Duration::from_millis(200));
+        if status(permission) == PermissionState::Granted {
+            return true;
+        }
+        if !bg::is_foreground() {
+            dialog_seen = true;
+        } else if dialog_seen {
+            // Back from the dialog and still not granted: the answer was no.
+            return false;
+        } else if started.elapsed() > Duration::from_secs(3) {
+            // No dialog came up (denied for good earlier).
+            return false;
+        }
+        if started.elapsed() > Duration::from_secs(120) {
+            return false;
+        }
+    }
 }
 
 // ---- the Back button ----
