@@ -166,9 +166,16 @@ pub fn hash_file(path: &Path) -> std::io::Result<[u8; 32]> {
 
 /// Turns any picture into a square 256 px JPEG for a profile picture.
 pub fn make_avatar(src: &Path) -> anyhow::Result<Vec<u8>> {
-    let img = image::ImageReader::open(src)?
+    use image::ImageDecoder;
+    let mut decoder = image::ImageReader::open(src)?
         .with_guessed_format()?
-        .decode()?;
+        .into_decoder()?;
+    // Phone cameras store the picture sideways plus a "rotate me" note.
+    let orientation = decoder
+        .orientation()
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
+    let mut img = image::DynamicImage::from_decoder(decoder)?;
+    img.apply_orientation(orientation);
     let square = img.resize_to_fill(256, 256, image::imageops::FilterType::Lanczos3);
     let mut out = Vec::new();
     let mut quality = 85;
@@ -183,6 +190,137 @@ pub fn make_avatar(src: &Path) -> anyhow::Result<Vec<u8>> {
     }
     anyhow::ensure!(out.len() <= MAX_AVATAR, "avatar too large");
     Ok(out)
+}
+
+/// Pictures larger than this are sent as they are.
+const MAX_CLEAN: u64 = 64 * 1024 * 1024;
+
+/// Prepares a JPEG photo for sending: turns it upright if the camera stored
+/// it sideways (the viewer on the other side then needs no EXIF handling) and
+/// removes the metadata (location, camera, time) without touching the
+/// pixels. Writes the result to `tmp` and returns true, or returns false when
+/// the file is not a JPEG or there is nothing to change.
+pub fn clean_photo(src: &Path, tmp: &Path) -> anyhow::Result<bool> {
+    if std::fs::metadata(src)?.len() > MAX_CLEAN {
+        return Ok(false);
+    }
+    let bytes = std::fs::read(src)?;
+    let Some(scan) = scan_jpeg(&bytes) else {
+        return Ok(false);
+    };
+    let turn = scan
+        .orientation
+        .and_then(image::metadata::Orientation::from_exif)
+        .filter(|o| *o != image::metadata::Orientation::NoTransforms);
+    let out = if let Some(o) = turn {
+        let mut img = image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg)?;
+        img.apply_orientation(o);
+        let mut out = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 92)
+            .encode_image(&img.to_rgb8())?;
+        out
+    } else if scan.stripped.len() != bytes.len() {
+        scan.stripped
+    } else {
+        return Ok(false);
+    };
+    if let Some(parent) = tmp.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(tmp, out)?;
+    Ok(true)
+}
+
+struct JpegScan {
+    /// The EXIF orientation (1-8), if the photo says one.
+    orientation: Option<u8>,
+    /// The file without its metadata segments.
+    stripped: Vec<u8>,
+}
+
+/// Walks the JPEG segments up to the image data: reads the EXIF orientation
+/// and copies everything except the metadata (EXIF/XMP and Photoshop blocks).
+fn scan_jpeg(b: &[u8]) -> Option<JpegScan> {
+    if !b.starts_with(&[0xff, 0xd8]) {
+        return None;
+    }
+    let mut out = vec![0xff, 0xd8];
+    let mut orientation = None;
+    let mut i = 2;
+    while i + 4 <= b.len() && b[i] == 0xff {
+        let marker = b[i + 1];
+        // Image data (or the end) starts here: the rest is copied as it is.
+        if marker == 0xda || marker == 0xd9 {
+            break;
+        }
+        // Padding and standalone markers have no length.
+        if marker == 0xff {
+            out.push(0xff);
+            i += 1;
+            continue;
+        }
+        if marker == 0x01 || (0xd0..=0xd7).contains(&marker) {
+            out.extend_from_slice(&b[i..i + 2]);
+            i += 2;
+            continue;
+        }
+        let len = u16::from_be_bytes([b[i + 2], b[i + 3]]) as usize;
+        let end = i + 2 + len;
+        if len < 2 || end > b.len() {
+            return None;
+        }
+        let seg = &b[i..end];
+        match marker {
+            0xe1 => {
+                if seg.get(4..10) == Some(b"Exif\0\0".as_slice()) {
+                    orientation = orientation.or(exif_orientation(&seg[10..]));
+                }
+            }
+            0xed => {}
+            _ => out.extend_from_slice(seg),
+        }
+        i = end;
+    }
+    out.extend_from_slice(&b[i.min(b.len())..]);
+    Some(JpegScan {
+        orientation,
+        stripped: out,
+    })
+}
+
+/// The orientation tag (0x0112) from an EXIF block's TIFF header.
+fn exif_orientation(t: &[u8]) -> Option<u8> {
+    let big = match t.get(..2)? {
+        b"MM" => true,
+        b"II" => false,
+        _ => return None,
+    };
+    let u16_at = |o: usize| -> Option<u16> {
+        let v: [u8; 2] = t.get(o..o + 2)?.try_into().ok()?;
+        Some(if big {
+            u16::from_be_bytes(v)
+        } else {
+            u16::from_le_bytes(v)
+        })
+    };
+    let u32_at = |o: usize| -> Option<u32> {
+        let v: [u8; 4] = t.get(o..o + 4)?.try_into().ok()?;
+        Some(if big {
+            u32::from_be_bytes(v)
+        } else {
+            u32::from_le_bytes(v)
+        })
+    };
+    let ifd = u32_at(4)? as usize;
+    let count = u16_at(ifd)? as usize;
+    (0..count).find_map(|n| {
+        let entry = ifd + 2 + n * 12;
+        if u16_at(entry)? == 0x0112 {
+            u16_at(entry + 8).map(|v| v as u8)
+        } else {
+            None
+        }
+    })
 }
 
 /// Quick check that received avatar bytes are a JPEG or PNG we can show.
@@ -442,6 +580,63 @@ mod tests {
         assert_eq!(hash_file(&moved).unwrap(), want);
 
         assert!(import(&dir.path().join("missing"), &dir.path().join("x"), true).is_err());
+    }
+
+    /// A JPEG of `w`x`h` (red left half, dark right half) carrying an EXIF
+    /// block with this orientation.
+    fn jpeg_with_orientation(w: u32, h: u32, orientation: u8) -> Vec<u8> {
+        let mut plain = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut plain, 90)
+            .encode_image(&image::RgbImage::from_fn(w, h, |x, _| {
+                image::Rgb([if x < w / 2 { 250 } else { 10 }, 40, 40])
+            }))
+            .unwrap();
+        // EXIF: "Exif\0\0", a little-endian TIFF header, one IFD entry.
+        let mut tiff = vec![b'I', b'I', 42, 0, 8, 0, 0, 0, 1, 0];
+        tiff.extend_from_slice(&[0x12, 0x01, 3, 0, 1, 0, 0, 0, orientation, 0, 0, 0, 0, 0, 0, 0]);
+        let mut seg = b"Exif\0\0".to_vec();
+        seg.extend_from_slice(&tiff);
+        let len = (seg.len() + 2) as u16;
+        let mut out = vec![0xff, 0xd8, 0xff, 0xe1];
+        out.extend_from_slice(&len.to_be_bytes());
+        out.extend_from_slice(&seg);
+        out.extend_from_slice(&plain[2..]);
+        out
+    }
+
+    #[test]
+    fn sideways_photos_are_turned_upright_and_lose_their_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("p.jpg");
+        let tmp = dir.path().join("p.clean");
+        // Landscape pixels that say "rotate 90 degrees clockwise to view".
+        std::fs::write(&src, jpeg_with_orientation(64, 32, 6)).unwrap();
+        assert!(clean_photo(&src, &tmp).unwrap());
+        let out = std::fs::read(&tmp).unwrap();
+        let img = image::load_from_memory(&out).unwrap();
+        assert_eq!((img.width(), img.height()), (32, 64), "now portrait");
+        assert!(scan_jpeg(&out).unwrap().orientation.is_none());
+        // The red left half ended up at the top.
+        let px = img.to_rgb8();
+        assert!(px.get_pixel(16, 4)[0] > 200 && px.get_pixel(16, 60)[0] < 60);
+    }
+
+    #[test]
+    fn upright_photos_only_lose_their_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("p.jpg");
+        let tmp = dir.path().join("p.clean");
+        let original = jpeg_with_orientation(64, 32, 1);
+        std::fs::write(&src, &original).unwrap();
+        assert!(clean_photo(&src, &tmp).unwrap());
+        let out = std::fs::read(&tmp).unwrap();
+        assert!(out.len() < original.len());
+        assert_eq!(image::load_from_memory(&out).unwrap().width(), 64);
+        // Nothing left to remove: the file is used as it is.
+        assert!(!clean_photo(&tmp, &dir.path().join("again")).unwrap());
+        // Not a JPEG at all.
+        std::fs::write(&src, b"hello").unwrap();
+        assert!(!clean_photo(&src, &tmp).unwrap());
     }
 
     #[test]

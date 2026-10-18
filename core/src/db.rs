@@ -14,7 +14,15 @@ use crate::model::{
 };
 use crate::protocol::GroupState;
 
-const CURRENT_VERSION: u32 = 3;
+const CURRENT_VERSION: u32 = 4;
+
+/// v3 → v4: a chat can be hidden (deleted from the chat list while the
+/// contact stays; a new message brings it back), pinned, or muted.
+const MIGRATE_V4: &str = "
+ALTER TABLE contacts ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE contacts ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE contacts ADD COLUMN muted  INTEGER NOT NULL DEFAULT 0;
+";
 
 /// v2 → v3: groups. A group is a row in `contacts` (kind 'group') so chats,
 /// messages, drafts and unread counts work unchanged; the rest lives here.
@@ -119,6 +127,9 @@ impl Database {
         if version < 3 {
             conn.execute_batch(MIGRATE_V3)?;
         }
+        if version < 4 {
+            conn.execute_batch(MIGRATE_V4)?;
+        }
         conn.execute_batch(&format!("PRAGMA user_version = {CURRENT_VERSION}"))?;
         Ok(Self {
             conn: Mutex::new(conn),
@@ -192,7 +203,7 @@ impl Database {
     pub fn contact(&self, id: &str) -> Option<Contact> {
         self.lock()
             .query_row(
-                "SELECT id, their_name, nickname, state, last_seen, created_at, avatar, kind
+                "SELECT id, their_name, nickname, state, last_seen, created_at, avatar, kind, pinned, muted
                  FROM contacts WHERE id = ?1",
                 params![id],
                 contact_from_row,
@@ -203,12 +214,18 @@ impl Database {
     }
 
     pub fn contacts_in(&self, states: &[ContactState]) -> Vec<Contact> {
+        self.contacts_where(states, "1")
+    }
+
+    /// Contacts in `states` that also match `condition` (a trusted SQL
+    /// snippet), pinned first, then the most recent.
+    fn contacts_where(&self, states: &[ContactState], condition: &str) -> Vec<Contact> {
         let conn = self.lock();
         let mut stmt = conn
-            .prepare(
-                "SELECT id, their_name, nickname, state, last_seen, created_at, avatar, kind
-                 FROM contacts ORDER BY last_activity DESC",
-            )
+            .prepare(&format!(
+                "SELECT id, their_name, nickname, state, last_seen, created_at, avatar, kind, pinned, muted
+                 FROM contacts WHERE {condition} ORDER BY pinned DESC, last_activity DESC"
+            ))
             .expect("valid SQL");
         stmt.query_map([], contact_from_row)
             .map(|rows| {
@@ -237,7 +254,8 @@ impl Database {
                     state = excluded.state,
                     their_name = COALESCE(?2, contacts.their_name),
                     nickname = COALESCE(?3, contacts.nickname),
-                    last_activity = excluded.last_activity",
+                    last_activity = excluded.last_activity,
+                    hidden = 0",
                 params![id, their_name, nickname, state.as_str(), now],
             )?;
         }
@@ -275,6 +293,28 @@ impl Database {
             .execute("DELETE FROM contacts WHERE id = ?1", params![id]);
     }
 
+    /// Hides the chat from the chat list (the contact stays).
+    pub fn set_hidden(&self, id: &str, hidden: bool) {
+        let _ = self.lock().execute(
+            "UPDATE contacts SET hidden = ?2 WHERE id = ?1",
+            params![id, hidden],
+        );
+    }
+
+    pub fn set_pinned(&self, id: &str, pinned: bool) {
+        let _ = self.lock().execute(
+            "UPDATE contacts SET pinned = ?2 WHERE id = ?1",
+            params![id, pinned],
+        );
+    }
+
+    pub fn set_muted(&self, id: &str, muted: bool) {
+        let _ = self.lock().execute(
+            "UPDATE contacts SET muted = ?2 WHERE id = ?1",
+            params![id, muted],
+        );
+    }
+
     pub fn clear_chat(&self, id: &str) {
         let _ = self
             .lock()
@@ -282,7 +322,10 @@ impl Database {
     }
 
     pub fn chat_summaries(&self) -> Vec<ChatSummary> {
-        let contacts = self.contacts_in(&[ContactState::Accepted, ContactState::PendingOut]);
+        let contacts = self.contacts_where(
+            &[ContactState::Accepted, ContactState::PendingOut],
+            "hidden = 0",
+        );
         let conn = self.lock();
         contacts
             .into_iter()
@@ -342,7 +385,7 @@ impl Database {
         )?;
         if n > 0 {
             conn.execute(
-                "UPDATE contacts SET last_activity = ?2 WHERE id = ?1",
+                "UPDATE contacts SET last_activity = ?2, hidden = 0 WHERE id = ?1",
                 params![m.contact_id, now_ms()],
             )?;
         }
@@ -815,6 +858,8 @@ fn contact_from_row(r: &Row<'_>) -> rusqlite::Result<Contact> {
         created_at: r.get(5)?,
         avatar: r.get(6)?,
         kind: ContactKind::parse(&r.get::<_, String>(7)?),
+        pinned: r.get(8)?,
+        muted: r.get(9)?,
     })
 }
 

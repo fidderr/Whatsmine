@@ -320,6 +320,20 @@ impl Core {
         self.inner.db.contacts_in(&[ContactState::PendingIn])
     }
 
+    /// Everyone we have added (and everyone we asked), by name. Chats that
+    /// were deleted from the chat list are still here.
+    pub fn address_book(&self) -> Vec<Contact> {
+        let mut people: Vec<Contact> = self
+            .inner
+            .db
+            .contacts_in(&[ContactState::Accepted, ContactState::PendingOut])
+            .into_iter()
+            .filter(|c| c.kind == ContactKind::Person)
+            .collect();
+        people.sort_by_cached_key(|c| c.display_name().to_lowercase());
+        people
+    }
+
     pub fn blocked(&self) -> Vec<Contact> {
         self.inner.db.contacts_in(&[ContactState::Blocked])
     }
@@ -421,6 +435,26 @@ impl Core {
         self.cmd(Cmd::Disconnect(peer));
         self.emit(CoreEvent::ContactsChanged);
         Ok(())
+    }
+
+    /// Removes the chat from the chat list and deletes its messages, but keeps
+    /// the contact (or group). A new message from them brings the chat back.
+    pub fn hide_chat(&self, id: &str) {
+        self.delete_chat_files(id);
+        self.inner.db.clear_chat(id);
+        self.inner.db.set_draft(id, "");
+        self.inner.db.set_hidden(id, true);
+        self.emit(CoreEvent::ContactsChanged);
+    }
+
+    pub fn set_pinned(&self, id: &str, pinned: bool) {
+        self.inner.db.set_pinned(id, pinned);
+        self.emit(CoreEvent::ContactsChanged);
+    }
+
+    pub fn set_muted(&self, id: &str, muted: bool) {
+        self.inner.db.set_muted(id, muted);
+        self.emit(CoreEvent::ContactsChanged);
     }
 
     /// Clears the messages but keeps the contact.
@@ -556,6 +590,21 @@ impl Core {
         let id = uuid::Uuid::now_v7().to_string();
         let name = files::clean_file_name(name);
         let dest = files::final_path(&self.media_dir(), &id, &name);
+        // Photos go out upright and without location data.
+        let lower = name.to_ascii_lowercase();
+        let is_jpeg = mime.eq_ignore_ascii_case("image/jpeg")
+            || lower.ends_with(".jpg")
+            || lower.ends_with(".jpeg");
+        let cleaned = dest.with_extension("clean.tmp");
+        let (src, take_ownership) =
+            if is_jpeg && matches!(files::clean_photo(src, &cleaned), Ok(true)) {
+                if take_ownership {
+                    let _ = std::fs::remove_file(src);
+                }
+                (cleaned.as_path(), true)
+            } else {
+                (src, take_ownership)
+            };
         let (size, sha) = files::import(src, &dest, take_ownership).context("file_unreadable")?;
         if size == 0 {
             let _ = std::fs::remove_file(&dest);

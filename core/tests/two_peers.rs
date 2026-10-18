@@ -227,3 +227,59 @@ async fn mutual_add_is_consent_and_strangers_cannot_message() {
         c.shutdown();
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_a_chat_keeps_the_contact_and_a_new_message_brings_it_back() {
+    let lookup = MemoryLookup::new();
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let a = start(dir_a.path(), &lookup, "Alice");
+    let b = start(dir_b.path(), &lookup, "Bob");
+    let (ka, kb) = (a.my_key(), b.my_key());
+    let (mut ra, mut rb) = (a.subscribe(), b.subscribe());
+    a.add_contact(&kb, None).unwrap();
+    b.add_contact(&ka, None).unwrap();
+    wait_for(
+        &mut ra,
+        "bob online",
+        |e| matches!(e, CoreEvent::Presence { contact_id, online: true, .. } if *contact_id == kb),
+    )
+    .await;
+
+    a.send(&kb, "one").unwrap();
+    wait_for(&mut rb, "first message", |e| matches!(e, CoreEvent::MessageAdded(_))).await;
+    assert_eq!(b.chats().len(), 1);
+
+    // Deleting the chat empties it and takes it off the list, but Alice stays
+    // in the address book.
+    b.set_pinned(&ka, true);
+    b.hide_chat(&ka);
+    assert!(b.chats().is_empty());
+    assert!(b.messages(&ka, None, 10).is_empty());
+    let book = b.address_book();
+    assert_eq!(book.len(), 1);
+    assert_eq!(book[0].id, ka);
+    assert!(book[0].pinned, "hiding does not undo the pin");
+
+    // Her next message opens the chat again, with only that message in it.
+    a.send(&kb, "two").unwrap();
+    wait_for(&mut rb, "second message", |e| matches!(e, CoreEvent::MessageAdded(_))).await;
+    let chats = b.chats();
+    assert_eq!(chats.len(), 1);
+    assert_eq!(chats[0].last_message.as_ref().unwrap().body, "two");
+    assert_eq!(b.messages(&ka, None, 10).len(), 1);
+
+    // Writing to a deleted chat also brings it back.
+    b.hide_chat(&ka);
+    assert!(b.chats().is_empty());
+    b.send(&ka, "three").unwrap();
+    assert_eq!(b.chats().len(), 1);
+
+    // Mute and block round trip.
+    b.set_muted(&ka, true);
+    assert!(b.contact(&ka).unwrap().muted);
+    b.block(&ka).unwrap();
+    assert_eq!(b.blocked().len(), 1);
+    assert!(b.chats().is_empty() && b.address_book().is_empty());
+    b.unblock(&ka).unwrap();
+    assert!(b.blocked().is_empty());
+}

@@ -44,6 +44,87 @@ pub fn parse_key(input: &str) -> Option<PublicKey> {
     PublicKey::from_z32(&s).ok()
 }
 
+/// Someone's invitation: their key and, if the link carried it, their name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Invite {
+    pub key: PublicKey,
+    pub name: Option<String>,
+}
+
+/// The link that adds you: `whatsmine://add/<key>?n=<name>`. Opening it
+/// (or scanning it as a QR code) offers to add you.
+pub fn invite_link(key: &str, name: &str) -> String {
+    let name = name.trim();
+    if name.is_empty() {
+        format!("whatsmine://add/{key}")
+    } else {
+        format!("whatsmine://add/{key}?n={}", percent_encode(name))
+    }
+}
+
+/// Finds an invitation in whatever was pasted, scanned or clicked: a link,
+/// `whatsmine:<key>`, a bare key, or a message that contains one of those.
+pub fn parse_invite(text: &str) -> Option<Invite> {
+    let from_token = |token: &str| -> Option<Invite> {
+        let token = token.trim_matches(|c: char| !c.is_alphanumeric());
+        if let Some(rest) = token
+            .strip_prefix("whatsmine://add/")
+            .or_else(|| token.strip_prefix("whatsmine:///add/"))
+        {
+            let (key, query) = rest.split_once('?').unwrap_or((rest, ""));
+            let name = query
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("n="))
+                .map(percent_decode)
+                .map(|n| n.trim().chars().take(64).collect::<String>())
+                .filter(|n| !n.is_empty());
+            return Some(Invite {
+                key: parse_key(key)?,
+                name,
+            });
+        }
+        parse_key(token).map(|key| Invite { key, name: None })
+    };
+    // A link in a message ends at the first space; a key with spaces in it
+    // (as shown on screen) is the whole text.
+    text.split_whitespace()
+        .find_map(|t| t.starts_with("whatsmine:").then(|| from_token(t)).flatten())
+        .or_else(|| from_token(text))
+        .or_else(|| text.split_whitespace().find_map(from_token))
+}
+
+fn percent_encode(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%'
+            && let Some(v) = s
+                .get(i + 1..i + 3)
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
+        {
+            out.push(v);
+            i += 3;
+            continue;
+        }
+        out.push(if b[i] == b'+' { b' ' } else { b[i] });
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -54,6 +135,27 @@ mod tests {
         let a = load_or_create(dir.path()).unwrap();
         let b = load_or_create(dir.path()).unwrap();
         assert_eq!(a.public(), b.public());
+    }
+
+    #[test]
+    fn invites_round_trip_and_are_found_in_text() {
+        let key = SecretKey::generate().public();
+        let z = key_to_string(&key);
+        let link = invite_link(&z, "Zoë & co");
+        assert!(link.starts_with("whatsmine://add/"));
+        let got = parse_invite(&link).unwrap();
+        assert_eq!(got.key, key);
+        assert_eq!(got.name.as_deref(), Some("Zoë & co"));
+        // Inside a message, with punctuation around it.
+        let msg = format!("hey, add me: {link}.\nthanks!");
+        let found = parse_invite(&msg).unwrap();
+        assert_eq!((found.key, found.name.as_deref()), (key, Some("Zoë & co")));
+        // Older forms still work.
+        assert_eq!(parse_invite(&format!("whatsmine:{z}")).unwrap().name, None);
+        assert_eq!(parse_invite(&z).unwrap().key, key);
+        assert_eq!(parse_invite(&invite_link(&z, "")).unwrap().name, None);
+        assert!(parse_invite("whatsmine://add/nonsense").is_none());
+        assert!(parse_invite("just words").is_none());
     }
 
     #[test]

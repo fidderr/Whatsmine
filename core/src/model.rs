@@ -94,6 +94,10 @@ pub struct Contact {
     /// A person, or a group (then `id` is the group id and `their_name`
     /// the group's name).
     pub kind: ContactKind,
+    /// Kept at the top of the chat list.
+    pub pinned: bool,
+    /// No notifications for this chat.
+    pub muted: bool,
 }
 
 impl Contact {
