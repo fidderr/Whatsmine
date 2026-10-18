@@ -158,6 +158,48 @@ fn register_app_id(icon_png: &std::path::Path) {
     }
 }
 
+/// Windows 11 tucks new tray icons into the overflow menu. Ask for ours to be
+/// shown next to the clock (the user can still hide it in Windows settings).
+pub fn promote_tray_icon() {
+    #[cfg(windows)]
+    std::thread::spawn(|| {
+        use windows_registry::CURRENT_USER;
+        let Ok(exe) = std::env::current_exe() else {
+            return;
+        };
+        let exe = exe.display().to_string().to_lowercase();
+        // Windows records the icon a moment after it is created.
+        for _ in 0..20 {
+            std::thread::sleep(Duration::from_millis(500));
+            let Ok(root) = CURRENT_USER.open(r"Control Panel\NotifyIconSettings") else {
+                continue;
+            };
+            let Ok(names) = root.keys() else { continue };
+            let mut done = false;
+            for name in names {
+                let Ok(key) =
+                    CURRENT_USER.create(format!(r"Control Panel\NotifyIconSettings\{name}"))
+                else {
+                    continue;
+                };
+                let path = key
+                    .get_string("ExecutablePath")
+                    .unwrap_or_default()
+                    .to_lowercase();
+                if path == exe {
+                    if key.get_u32("IsPromoted").unwrap_or(0) != 1 {
+                        let _ = key.set_u32("IsPromoted", 1);
+                    }
+                    done = true;
+                }
+            }
+            if done {
+                return;
+            }
+        }
+    });
+}
+
 /// Shows a Windows toast. False if the system refused it.
 pub fn toast(n: &Notice) -> bool {
     #[cfg(windows)]

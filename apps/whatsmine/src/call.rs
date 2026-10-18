@@ -284,6 +284,36 @@ pub fn on_event(
     }
 }
 
+/// On Android the microphone must be allowed before a call begins (the
+/// system asks once); elsewhere there is nothing to ask.
+pub async fn ensure_permissions(video: bool) -> bool {
+    #[cfg(target_os = "android")]
+    {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::android::ensure_call_permissions(video));
+        });
+        rx.await.unwrap_or(false)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = video;
+        true
+    }
+}
+
+/// Joins the call going on in a group.
+pub fn join_group_call(core: &Core, group_id: &str, toast_sig: &ToastSig, tr: &Translations) {
+    let (core, id, mut toast_sig, tr) = (core.clone(), group_id.to_string(), *toast_sig, *tr);
+    spawn(async move {
+        if ensure_permissions(false).await {
+            core.call_join(&id);
+        } else {
+            toast(&mut toast_sig, t(&tr, "call.err.mic"), ToastLevel::Error);
+        }
+    });
+}
+
 /// Rings a contact, or everyone online in a group.
 pub fn start_call(
     core: &Core,
@@ -297,19 +327,32 @@ pub fn start_call(
     if *phase.read() != Phase::Idle {
         return;
     }
-    match core.call_invite(contact_id, video) {
-        Ok(_) => {
-            bridge.send(json!({ "t": "ring", "kind": "out" }));
-            phase.set(Phase::Outgoing {
-                contact_id: contact_id.to_string(),
-                video,
-            });
+    let (core, id, bridge, mut toast_sig, tr) = (
+        core.clone(),
+        contact_id.to_string(),
+        bridge.clone(),
+        *toast_sig,
+        *tr,
+    );
+    spawn(async move {
+        if !ensure_permissions(video).await {
+            toast(&mut toast_sig, t(&tr, "call.err.mic"), ToastLevel::Error);
+            return;
         }
-        Err(e) => {
-            log::info!("call not started: {e:#}");
-            toast(toast_sig, t(tr, "call.unavailable"), ToastLevel::Info);
+        match core.call_invite(&id, video) {
+            Ok(_) => {
+                bridge.send(json!({ "t": "ring", "kind": "out" }));
+                phase.set(Phase::Outgoing {
+                    contact_id: id,
+                    video,
+                });
+            }
+            Err(e) => {
+                log::info!("call not started: {e:#}");
+                toast(&mut toast_sig, t(&tr, "call.unavailable"), ToastLevel::Info);
+            }
         }
-    }
+    });
 }
 
 fn clock(ms: i64) -> String {
@@ -328,6 +371,7 @@ pub fn CallOverlay() -> Element {
     let tr = use_tr();
     let CallUi(mut phase) = use_context::<CallUi>();
     let bridge = use_context::<CallBridge>();
+    let toast_sig = use_context::<ToastSig>();
     let mut now = use_signal(now_ms);
 
     // Tick the call timer while connected.
@@ -425,10 +469,19 @@ pub fn CallOverlay() -> Element {
                             class: "call-btn accept",
                             aria_label: "{t(&tr, \"call.accept\")}",
                             onclick: {
-                                let (core, bridge) = (core.clone(), bridge.clone());
+                                let (core, bridge, video) = (core.clone(), bridge.clone(), matches!(current, Phase::Incoming { video: true, .. }));
+                                let mut toast_sig = toast_sig;
                                 move |_| {
                                     bridge.send(json!({ "t": "ring", "kind": Value::Null }));
-                                    core.call_answer(true);
+                                    let core = core.clone();
+                                    spawn(async move {
+                                        if ensure_permissions(video).await {
+                                            core.call_answer(true);
+                                        } else {
+                                            core.call_answer(false);
+                                            toast(&mut toast_sig, t(&tr, "call.err.mic"), ToastLevel::Error);
+                                        }
+                                    });
                                 }
                             },
                             Icon { name: IconName::Phone, size: 28 }

@@ -95,6 +95,23 @@ pub fn ask_for_notifications_once(core: &whatsmine_core::Core) {
     });
 }
 
+/// Makes sure the microphone is allowed (and asks for the camera if the call
+/// has video) before a call starts, so its first seconds are not silent.
+/// Blocks while the system dialogs are up: call it off the UI thread.
+pub fn ensure_call_permissions(video: bool) -> bool {
+    use mobile_sentinel::permissions::{PermissionState, request, status};
+    let mut ask = |permission: &str| {
+        status(permission) == PermissionState::Granted
+            || request(permission) == PermissionState::Granted
+    };
+    let mic = ask("android.permission.RECORD_AUDIO");
+    if video {
+        // Without the camera the call simply goes on without video.
+        let _ = ask("android.permission.CAMERA");
+    }
+    mic
+}
+
 // ---- the Back button ----
 
 static BACK: OnceLock<(

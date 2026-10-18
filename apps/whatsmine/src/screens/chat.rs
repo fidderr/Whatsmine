@@ -344,7 +344,7 @@ fn ChatView(id: String) -> Element {
                         class: "call-join",
                         onclick: {
                             let (core, id) = (core.clone(), id.clone());
-                            move |_| core.call_join(&id)
+                            move |_| call::join_group_call(&core, &id, &toast_sig, &tr)
                         },
                         Icon { name: IconName::Phone, size: 16 }
                         "{t(&tr, \"group.join_call\")}"

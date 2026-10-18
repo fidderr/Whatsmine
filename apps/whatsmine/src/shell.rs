@@ -70,10 +70,7 @@ pub fn Shell() -> Element {
         });
     }
 
-    #[cfg(feature = "desktop")]
-    desktop_shell(core.clone(), settings);
-
-    #[cfg(not(any(target_os = "android", feature = "desktop")))]
+    #[cfg(not(target_os = "android"))]
     let _ = (&core, &settings);
 
     rsx! {
@@ -94,8 +91,10 @@ fn open_requested(nav: dioxus::router::Navigator) {
     }
 }
 
+/// The desktop side: tray, window, single instance. Mounted above everything,
+/// onboarding included, so a hidden window can always be brought back.
 #[cfg(feature = "desktop")]
-fn desktop_shell(core: whatsmine_core::Core, settings: Signal<whatsmine_core::Settings>) {
+pub fn desktop_shell(core: whatsmine_core::Core, settings: Signal<whatsmine_core::Settings>) {
     use dioxus::desktop::tao::event::{Event, WindowEvent};
     use dioxus::desktop::trayicon::menu::{Menu, MenuItem, PredefinedMenuItem};
     use dioxus::desktop::{WindowCloseBehaviour, use_window, use_wry_event_handler};
@@ -115,7 +114,9 @@ fn desktop_shell(core: whatsmine_core::Core, settings: Signal<whatsmine_core::Se
         let open = MenuItem::with_id("open", label("tray.open", "Open WhatsMine"), true, None);
         let quit = MenuItem::with_id("quit", label("tray.quit", "Quit"), true, None);
         let _ = menu.append_items(&[&open, &PredefinedMenuItem::separator(), &quit]);
-        dioxus::desktop::trayicon::init_tray_icon(menu, tray_icon_image());
+        let tray = dioxus::desktop::trayicon::init_tray_icon(menu, tray_icon_image());
+        let _ = tray.set_tooltip(Some("WhatsMine"));
+        crate::desktop::promote_tray_icon();
     });
     {
         let (window, core) = (window.clone(), core.clone());
