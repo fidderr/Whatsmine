@@ -293,7 +293,18 @@ pub async fn ensure_permissions(video: bool) -> bool {
         std::thread::spawn(move || {
             let _ = tx.send(crate::android::ensure_call_permissions(video));
         });
-        rx.await.unwrap_or(false)
+        let granted = rx.await.unwrap_or(false);
+        // The system dialog is still closing: the answer comes back before the
+        // app is in front again, and screen updates sent to a WebView that is
+        // not back yet can be lost. Let it come back first.
+        for _ in 0..30 {
+            if crate::notify::ui_active() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        granted
     }
     #[cfg(not(target_os = "android"))]
     {
