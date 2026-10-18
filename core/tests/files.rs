@@ -375,3 +375,61 @@ async fn a_stranger_cannot_push_a_picture_before_being_accepted() {
     a.shutdown();
     stranger.shutdown();
 }
+
+/// A landscape JPEG whose EXIF says "turn it 90 degrees to view it".
+fn sideways_jpeg(w: u32, h: u32) -> Vec<u8> {
+    let mut plain = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut plain, 90)
+        .encode_image(&image::RgbImage::from_fn(w, h, |x, _| {
+            image::Rgb([if x < w / 2 { 250 } else { 10 }, 40, 40])
+        }))
+        .unwrap();
+    let mut seg = b"Exif\0\0".to_vec();
+    seg.extend_from_slice(&[b'I', b'I', 42, 0, 8, 0, 0, 0, 1, 0]);
+    seg.extend_from_slice(&[0x12, 0x01, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0]);
+    let mut out = vec![0xff, 0xd8, 0xff, 0xe1];
+    out.extend_from_slice(&((seg.len() + 2) as u16).to_be_bytes());
+    out.extend_from_slice(&seg);
+    out.extend_from_slice(&plain[2..]);
+    out
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn camera_photos_arrive_upright_and_without_metadata() {
+    let lookup = MemoryLookup::new();
+    let (da, db_, src) = (
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+    );
+    let (a, b, _ra, mut rb) = pair(&lookup, [da.path(), db_.path()], |_| {}).await;
+    let file = src.path().join("IMG_0001.jpg");
+    std::fs::write(&file, sideways_jpeg(96, 48)).unwrap();
+    let sent = a
+        .send_file(&b.my_key(), &file, "IMG_0001.jpg", "image/jpeg", "", None)
+        .unwrap();
+    wait_for(&mut rb, "photo complete", |e| {
+        matches!(e, CoreEvent::MessageUpdated(m)
+            if m.id == sent.id && m.attachment.as_ref().is_some_and(|a| a.state == TransferState::Done))
+    })
+    .await;
+
+    for core in [&a, &b] {
+        let att = core.message(&sent.id).unwrap().attachment.unwrap();
+        let bytes = std::fs::read(att.path.unwrap()).unwrap();
+        let img = image::load_from_memory(&bytes).unwrap();
+        assert_eq!(
+            (img.width(), img.height()),
+            (48, 96),
+            "upright, on both sides"
+        );
+        assert!(
+            !bytes.windows(4).any(|w| w == b"Exif"),
+            "location and camera data are gone"
+        );
+    }
+    // The original on disk is untouched.
+    assert_eq!(std::fs::read(&file).unwrap(), sideways_jpeg(96, 48));
+    a.shutdown();
+    b.shutdown();
+}

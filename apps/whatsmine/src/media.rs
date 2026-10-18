@@ -220,6 +220,11 @@ pub async fn cancel_voice() {
 
 // ---- files out ----
 
+/// Opens a web address in the browser.
+pub fn open_url(url: &str) -> bool {
+    mobile_sentinel::share::open_url(url).is_ok()
+}
+
 pub fn open(path: &str, mime: &str) -> bool {
     mobile_sentinel::share::open(path, mime).is_ok()
 }

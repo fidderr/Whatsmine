@@ -20,8 +20,12 @@ fn main() {
         let background = args.iter().any(|a| a == "--background");
         let quit = args.iter().any(|a| a == "--quit");
         let profile = std::env::var("WHATSMINE_PROFILE").ok();
+        // A clicked whatsmine:// link arrives as an argument.
+        let link = args.iter().find(|a| a.starts_with("whatsmine:")).cloned();
         let forward = if quit {
             Some(Command::Quit)
+        } else if let Some(link) = link.clone() {
+            Some(Command::Open(link))
         } else if background {
             None
         } else {
@@ -30,6 +34,9 @@ fn main() {
         // Only one copy per profile: a second launch just shows the first.
         if !claim_instance(profile.as_deref(), forward) || quit {
             return;
+        }
+        if let Some(link) = link {
+            whatsmine::desktop::set_startup_link(link);
         }
 
         let config = Config::new()

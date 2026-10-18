@@ -14,10 +14,26 @@ use crate::notify::Notice;
 const APP_ID: &str = "com.fidderr.whatsmine";
 
 /// What another launch of the app can ask the running one to do.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Show,
     Quit,
+    /// A `whatsmine://` link was clicked.
+    Open(String),
+}
+
+static STARTUP_LINK: Mutex<Option<String>> = Mutex::new(None);
+
+/// A link this copy was started with (it was not running when the link was clicked).
+pub fn set_startup_link(link: String) {
+    *STARTUP_LINK.lock().unwrap_or_else(|p| p.into_inner()) = Some(link);
+}
+
+pub fn take_startup_link() -> Option<String> {
+    STARTUP_LINK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .take()
 }
 
 static COMMANDS: OnceLock<mpsc::UnboundedSender<Command>> = OnceLock::new();
@@ -58,14 +74,19 @@ pub fn claim_instance(profile: Option<&str>, forward: Option<Command>) -> bool {
                             continue;
                         }
                         let _ = (&stream).write_all(b"whatsmine\n");
-                        match line.trim() {
+                        let line = line.trim();
+                        match line {
                             "show" => {
                                 let _ = tx.send(Command::Show);
                             }
                             "quit" => {
                                 let _ = tx.send(Command::Quit);
                             }
-                            _ => {}
+                            _ => {
+                                if let Some(link) = line.strip_prefix("open ") {
+                                    let _ = tx.send(Command::Open(link.to_string()));
+                                }
+                            }
                         }
                     }
                 })
@@ -74,9 +95,11 @@ pub fn claim_instance(profile: Option<&str>, forward: Option<Command>) -> bool {
         }
         Err(_) => {
             let say = match forward {
-                Some(Command::Quit) => "quit",
-                Some(Command::Show) => "show",
-                None => "ping",
+                Some(Command::Quit) => "quit".to_string(),
+                Some(Command::Show) => "show".to_string(),
+                // One line only: nothing in a link may smuggle in a second command.
+                Some(Command::Open(link)) => format!("open {}", link.replace(['\r', '\n'], "")),
+                None => "ping".to_string(),
             };
             match TcpStream::connect(("127.0.0.1", port)) {
                 Ok(mut s) => {
@@ -145,6 +168,25 @@ pub fn autostart_enabled(profile: Option<&str>) -> bool {
         let _ = profile;
         false
     }
+}
+
+/// Makes `whatsmine://` links open this app (current user only).
+pub fn register_link_handler() {
+    #[cfg(windows)]
+    std::thread::spawn(|| {
+        use windows_registry::CURRENT_USER;
+        let Ok(exe) = std::env::current_exe() else {
+            return;
+        };
+        let Ok(root) = CURRENT_USER.create(r"Software\Classes\whatsmine") else {
+            return;
+        };
+        let _ = root.set_string("", "URL:WhatsMine");
+        let _ = root.set_string("URL Protocol", "");
+        if let Ok(cmd) = CURRENT_USER.create(r"Software\Classes\whatsmine\shell\open\command") {
+            let _ = cmd.set_string("", format!("\"{}\" \"%1\"", exe.display()));
+        }
+    });
 }
 
 /// Gives toasts a name and icon of our own instead of "Windows PowerShell".

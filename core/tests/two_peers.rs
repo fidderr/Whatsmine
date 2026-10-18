@@ -246,7 +246,10 @@ async fn deleting_a_chat_keeps_the_contact_and_a_new_message_brings_it_back() {
     .await;
 
     a.send(&kb, "one").unwrap();
-    wait_for(&mut rb, "first message", |e| matches!(e, CoreEvent::MessageAdded(_))).await;
+    wait_for(&mut rb, "first message", |e| {
+        matches!(e, CoreEvent::MessageAdded(_))
+    })
+    .await;
     assert_eq!(b.chats().len(), 1);
 
     // Deleting the chat empties it and takes it off the list, but Alice stays
@@ -262,7 +265,10 @@ async fn deleting_a_chat_keeps_the_contact_and_a_new_message_brings_it_back() {
 
     // Her next message opens the chat again, with only that message in it.
     a.send(&kb, "two").unwrap();
-    wait_for(&mut rb, "second message", |e| matches!(e, CoreEvent::MessageAdded(_))).await;
+    wait_for(&mut rb, "second message", |e| {
+        matches!(e, CoreEvent::MessageAdded(_))
+    })
+    .await;
     let chats = b.chats();
     assert_eq!(chats.len(), 1);
     assert_eq!(chats[0].last_message.as_ref().unwrap().body, "two");

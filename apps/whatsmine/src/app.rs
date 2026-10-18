@@ -11,8 +11,8 @@ use crate::call::{self, CallOverlay, CallUi, Phase};
 use crate::components::{Toast, ToastLevel, ToastMessage};
 use crate::i18n;
 use crate::screens::{
-    AddContact, Chat, Chats, ContactInfo, GroupInfoScreen, NewGroup, Onboarding, Requests,
-    SettingsScreen,
+    AddContact, Chat, Chats, ContactInfo, ContactsScreen, GroupInfoScreen, NewGroup, Onboarding,
+    Requests, SettingsScreen,
 };
 use crate::shell::Shell;
 
@@ -36,6 +36,8 @@ pub enum Route {
     Chat { id: String },
     #[route("/add")]
     AddContact {},
+    #[route("/contacts")]
+    ContactsScreen {},
     #[route("/requests")]
     Requests {},
     #[route("/contact/:id")]
@@ -143,6 +145,9 @@ fn Main(core: AppCore) -> Element {
     use_context_provider(|| Net(net));
     use_context_provider(|| Transfers(transfers));
     use_context_provider(|| toast_sig);
+    use_context_provider(crate::back::BackStack::default);
+    let invite = use_signal(|| None);
+    use_context_provider(|| crate::links::InviteSig(invite));
 
     let call_phase = use_signal(|| Phase::Idle);
     use_context_provider(|| CallUi(call_phase));
@@ -150,7 +155,7 @@ fn Main(core: AppCore) -> Element {
     use_context_provider(|| bridge.clone());
     use_hook(|| call::restore(&core.0, call_phase, &bridge));
     #[cfg(feature = "desktop")]
-    crate::shell::desktop_shell(core.0.clone(), settings);
+    crate::shell::desktop_shell(core.0.clone(), settings, crate::links::InviteSig(invite));
 
     crate::media_server::use_media_server(core.0.clone());
     use_hook(|| {

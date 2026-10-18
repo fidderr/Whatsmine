@@ -6,6 +6,7 @@ use crate::components::{Icon, IconName};
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Tab {
     Chats,
+    Contacts,
     Requests,
     Settings,
 }
@@ -37,8 +38,12 @@ pub fn BottomNav(active: Tab) -> Element {
                     span { class: "nav-badge", "{unread}" }
                 }
             }
+            Link { to: Route::ContactsScreen {}, class: class(Tab::Contacts),
+                Icon { name: IconName::Book, size: 22 }
+                "{t(&tr, \"nav.contacts\")}"
+            }
             Link { to: Route::Requests {}, class: class(Tab::Requests),
-                Icon { name: IconName::Users, size: 22 }
+                Icon { name: IconName::UserPlus, size: 22 }
                 "{t(&tr, \"nav.requests\")}"
                 if requests > 0 {
                     span { class: "nav-badge", "{requests}" }

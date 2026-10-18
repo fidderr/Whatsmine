@@ -1,5 +1,6 @@
 use dioxus::prelude::*;
 
+use crate::back::BackLayer;
 use crate::components::{Icon, IconName};
 
 /// AlarmFree-style dropdown: a trigger button and a menu of options.
@@ -25,6 +26,7 @@ pub fn Dropdown(
                 Icon { name: IconName::ChevronDown, size: 16 }
             }
             if open() {
+                BackLayer { on_back: move |_| open.set(false) }
                 div { class: "dropdown-menu",
                     for (v, label) in options.iter().cloned() {
                         button {

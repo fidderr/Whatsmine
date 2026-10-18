@@ -1838,3 +1838,262 @@ textarea {
   padding: calc(48px + var(--safe-top, 0px)) 24px 28px;
   background: linear-gradient(rgba(0, 0, 0, 0.55), transparent);
 }
+
+/* ===== Contacts, chat menu, invitations, viewer, scanner ===== */
+.list-label {
+  display: block;
+  margin: 18px 4px 8px;
+}
+
+.list-hint {
+  margin: 0 4px 8px;
+}
+
+.action-card {
+  font-weight: 600;
+}
+
+.action-icon {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: var(--surface-hover);
+  color: var(--primary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.card.pinned {
+  box-shadow: inset 3px 0 0 var(--primary);
+}
+
+.card-flag {
+  display: inline-flex;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.unread-badge.muted {
+  background: var(--disabled);
+}
+
+.draft-label {
+  color: var(--error);
+  font-weight: 600;
+}
+
+.avatar.zoomable {
+  cursor: zoom-in;
+}
+
+.avatar-big {
+  width: min(86vw, 70vh, 520px);
+  height: min(86vw, 70vh, 520px);
+  border-radius: 50%;
+  object-fit: cover;
+  max-width: none;
+  max-height: none;
+}
+
+.avatar-big.placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  font-size: min(36vw, 28vh, 220px);
+  font-weight: 700;
+  user-select: none;
+}
+
+.sheet-title {
+  padding: 8px 16px 12px;
+  font-weight: 700;
+  font-size: 16px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.forward-sheet {
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.forward-sheet .search {
+  margin: 0 8px 8px;
+}
+
+.forward-list {
+  overflow-y: auto;
+  min-height: 120px;
+  flex: 1;
+}
+
+.msg-link {
+  color: var(--primary);
+  text-decoration: underline;
+  word-break: break-all;
+  cursor: pointer;
+}
+
+.bubble.out .msg-link {
+  color: inherit;
+}
+
+.invite-dialog {
+  text-align: center;
+}
+
+.invite-avatar {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 8px;
+}
+
+.key-box.small {
+  font-size: 12px;
+  margin: 10px 0 4px;
+}
+
+.profile-actions {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  margin: 4px 16px 12px;
+}
+
+.profile-action {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  min-width: 96px;
+  padding: 12px 16px;
+  border: none;
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--primary);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.profile-action:hover {
+  background: var(--surface-hover);
+}
+
+.button-row {
+  display: flex;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 16px 12px;
+  padding: 10px 12px;
+  background: var(--surface);
+  border-left: 4px solid var(--primary);
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+}
+
+.scan-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.viewer-body {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.viewer-body .viewer-img {
+  cursor: zoom-in;
+  touch-action: pan-x pan-y;
+}
+
+.viewer-body.zoomed {
+  overflow: auto;
+  display: block;
+}
+
+.viewer-body.zoomed .viewer-img {
+  max-width: none;
+  max-height: none;
+  width: 220%;
+  height: auto;
+  cursor: zoom-out;
+}
+
+.viewer-count {
+  font-size: 13px;
+  opacity: 0.8;
+}
+
+.viewer-nav {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 44px;
+  height: 64px;
+  border: none;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.45);
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  z-index: 2;
+}
+
+.viewer-nav.prev {
+  left: calc(8px + var(--safe-left));
+}
+
+.viewer-nav.next {
+  right: calc(8px + var(--safe-right));
+}
+
+.viewer:focus {
+  outline: none;
+}
+
+.camera.scanner .scan-frame {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: min(70vw, 60vh, 320px);
+  height: min(70vw, 60vh, 320px);
+  transform: translate(-50%, -50%);
+  border: 3px solid rgba(255, 255, 255, 0.85);
+  border-radius: 20px;
+  box-shadow: 0 0 0 100vmax rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+}
+
+.scan-hint {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(48px + var(--safe-bottom));
+  text-align: center;
+  color: white;
+  font-size: 15px;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.7);
+}

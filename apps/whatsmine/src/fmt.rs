@@ -105,9 +105,90 @@ pub fn percent(done: u64, total: u64) -> u64 {
     (done.min(total) * 100).checked_div(total).unwrap_or(0)
 }
 
+/// A piece of a message: plain text, or an address that can be clicked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Piece {
+    Text(String),
+    Link(String),
+}
+
+/// Splits a message into text and links (http(s):// addresses, www. ones, and
+/// whatsmine:// invitations). Punctuation that ends a sentence is not part of
+/// the link.
+pub fn pieces(body: &str) -> Vec<Piece> {
+    let mut out: Vec<Piece> = Vec::new();
+    let mut text = String::new();
+    let mut rest = body;
+    while !rest.is_empty() {
+        // Each word is a candidate; whitespace stays where it was.
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        if end == 0 {
+            let ch = rest.chars().next().unwrap_or(' ');
+            text.push(ch);
+            rest = &rest[ch.len_utf8()..];
+            continue;
+        }
+        let (word, tail) = rest.split_at(end);
+        // Brackets and quotes around a link are not part of it.
+        let core = word.trim_start_matches(['(', '[', '<', '"', '\'']);
+        let lead = word.len() - core.len();
+        let trimmed =
+            core.trim_end_matches(['.', ',', ';', ':', '!', '?', ')', ']', '}', '>', '"', '\'']);
+        let is_link = (trimmed.len() > 8
+            && (trimmed.starts_with("https://") || trimmed.starts_with("http://")))
+            || (trimmed.len() > 4 && trimmed.starts_with("www."))
+            || trimmed.starts_with("whatsmine://add/");
+        if is_link {
+            text.push_str(&word[..lead]);
+            if !text.is_empty() {
+                out.push(Piece::Text(std::mem::take(&mut text)));
+            }
+            out.push(Piece::Link(trimmed.to_string()));
+            text.push_str(&core[trimmed.len()..]);
+        } else {
+            text.push_str(word);
+        }
+        rest = tail;
+    }
+    if !text.is_empty() {
+        out.push(Piece::Text(text));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{bytes, duration, grouped_key, percent};
+    use super::{Piece, bytes, duration, grouped_key, percent, pieces};
+
+    #[test]
+    fn links_are_found_without_their_punctuation() {
+        assert_eq!(pieces("hello"), vec![Piece::Text("hello".into())]);
+        assert_eq!(
+            pieces("see https://example.com/a?b=1, ok (www.example.org)."),
+            vec![
+                Piece::Text("see ".into()),
+                Piece::Link("https://example.com/a?b=1".into()),
+                Piece::Text(", ok (".into()),
+                Piece::Link("www.example.org".into()),
+                Piece::Text(").".into()),
+            ]
+        );
+        assert_eq!(
+            pieces("whatsmine://add/abc?n=Zo"),
+            vec![Piece::Link("whatsmine://add/abc?n=Zo".into())]
+        );
+        // Not links.
+        assert_eq!(pieces("https://").len(), 1);
+        assert!(matches!(&pieces("ftp://x.y")[0], Piece::Text(_)));
+        // Line breaks survive.
+        let all: String = pieces("a https://x.yz\nb")
+            .iter()
+            .map(|p| match p {
+                Piece::Text(t) | Piece::Link(t) => t.clone(),
+            })
+            .collect();
+        assert_eq!(all, "a https://x.yz\nb");
+    }
 
     #[test]
     fn sizes_durations_and_percentages() {

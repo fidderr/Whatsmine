@@ -4,13 +4,15 @@ use whatsmine_core::{ContactKind, ContactState, Core, Message};
 use crate::app::{
     MsgRev, Rev, Route, SettingsSig, ToastSig, Translations, Typing, t, toast, use_core, use_tr,
 };
+use crate::back::BackLayer;
 use crate::call::{self, CallBridge, CallUi, Phase};
 use crate::components::{
-    AttachmentView, Avatar, CameraMode, CameraOverlay, Icon, IconName, ImageViewer, ToastLevel,
-    VoiceBar, open_file, save_file,
+    AttachmentView, Avatar, CameraMode, CameraOverlay, ForwardSheet, Icon, IconName, ImageViewer,
+    ToastLevel, VoiceBar, open_file, save_file,
 };
 use crate::fmt;
 use crate::js;
+use crate::links::{self, InviteSig};
 use crate::media::{self, Picked, VoiceStart};
 use crate::screens::chats::StatusTicks;
 
@@ -81,7 +83,8 @@ fn ChatView(id: String) -> Element {
         use_signal(move || core.draft(&id))
     };
     let mut menu: Signal<Option<Message>> = use_signal(|| None);
-    let mut viewer: Signal<Option<Message>> = use_signal(|| None);
+    let mut viewer: Signal<Option<String>> = use_signal(|| None);
+    let mut forward: Signal<Option<Message>> = use_signal(|| None);
     let mut sheet = use_signal(|| false);
     let mut recording = use_signal(|| false);
     let mut camera: Signal<Option<CameraMode>> = use_signal(|| None);
@@ -275,12 +278,23 @@ fn ChatView(id: String) -> Element {
         }
     };
 
+    // The photos of this chat, in order, for the viewer to page through.
+    let image_ids: Vec<String> = messages
+        .iter()
+        .filter(|m| {
+            m.attachment.as_ref().is_some_and(|a| {
+                a.path.is_some()
+                    && a.state != whatsmine_core::TransferState::Declined
+                    && a.kind() == whatsmine_core::MediaKind::Image
+            })
+        })
+        .map(|m| m.id.clone())
+        .collect();
     let pending_note = t(&tr, "chat.pending_note").replace("{name}", &name);
     let rows = draft().lines().count().clamp(1, 5);
     let contact_id = id.clone();
     let (voice_core, voice_id) = (core.clone(), id.clone());
     let (camera_core, camera_id) = (core.clone(), id.clone());
-    let view_core = core.clone();
 
     rsx! {
         div { class: "chat",
@@ -304,6 +318,7 @@ fn ChatView(id: String) -> Element {
                         online,
                         image: contact.avatar.clone(),
                         group: is_group,
+                        zoom: true,
                     }
                     div { class: "chat-peer-text",
                         span { class: "chat-peer-name", "{name}" }
@@ -382,10 +397,7 @@ fn ChatView(id: String) -> Element {
                                 (s.clone(), name)
                             }),
                             on_menu: move |m| menu.set(Some(m)),
-                            on_view: {
-                                let core = view_core.clone();
-                                move |id: String| viewer.set(core.message(&id))
-                            },
+                            on_view: move |id: String| viewer.set(Some(id)),
                         }
                     }
                 }
@@ -460,6 +472,7 @@ fn ChatView(id: String) -> Element {
             }
             if sheet() {
                 div { class: "bottom-sheet-overlay", onclick: move |_| sheet.set(false),
+                    BackLayer { on_back: move |_| sheet.set(false) }
                     div { class: "bottom-sheet", onclick: move |e| e.stop_propagation(),
                         button {
                             class: "sheet-option",
@@ -518,14 +531,22 @@ fn ChatView(id: String) -> Element {
                     },
                 }
             }
-            if let Some(m) = viewer() {
-                ImageViewer { message: m, on_close: move |_| viewer.set(None) }
+            if let Some(start) = viewer() {
+                ImageViewer {
+                    ids: image_ids.clone(),
+                    start,
+                    on_close: move |_| viewer.set(None),
+                }
             }
             if let Some(m) = menu() {
                 MessageMenu {
                     message: m,
                     on_close: move |_| menu.set(None),
+                    on_forward: move |m| forward.set(Some(m)),
                 }
+            }
+            if let Some(m) = forward() {
+                ForwardSheet { message: m, on_close: move |_| forward.set(None) }
             }
         }
     }
@@ -567,7 +588,7 @@ fn Bubble(
                     div { class: "caption", "{message.body}" }
                 }
             } else {
-                "{message.body}"
+                MessageText { body: message.body.clone() }
             }
             span { class: "bubble-meta",
                 "{fmt::clock(message.sent_at)}"
@@ -587,6 +608,54 @@ fn Bubble(
     }
 }
 
+/// A message's text, with web addresses and invitations clickable.
+#[component]
+fn MessageText(body: String) -> Element {
+    let tr = use_tr();
+    let invite = use_context::<InviteSig>();
+    let mut toast_sig = use_context::<ToastSig>();
+    let pieces = fmt::pieces(&body);
+    if pieces.len() == 1 && matches!(pieces[0], fmt::Piece::Text(_)) {
+        return rsx! { "{body}" };
+    }
+    rsx! {
+        for (i, piece) in pieces.into_iter().enumerate() {
+            match piece {
+                fmt::Piece::Text(text) => rsx! {
+                    span { key: "{i}", "{text}" }
+                },
+                fmt::Piece::Link(url) => rsx! {
+                    a {
+                        key: "{i}",
+                        class: "msg-link",
+                        href: "{url}",
+                        onclick: {
+                            let url = url.clone();
+                            move |e| {
+                                e.prevent_default();
+                                e.stop_propagation();
+                                if url.starts_with("whatsmine://") {
+                                    links::offer(invite, &url);
+                                } else {
+                                    let web = if url.starts_with("www.") {
+                                        format!("https://{url}")
+                                    } else {
+                                        url.clone()
+                                    };
+                                    if !media::open_url(&web) {
+                                        toast(&mut toast_sig, t(&tr, "file.open_failed"), ToastLevel::Warning);
+                                    }
+                                }
+                            }
+                        },
+                        "{url}"
+                    }
+                },
+            }
+        }
+    }
+}
+
 /// A stable colour for each person in a group chat.
 fn sender_hue(id: &str) -> u32 {
     id.bytes()
@@ -595,7 +664,11 @@ fn sender_hue(id: &str) -> u32 {
 }
 
 #[component]
-fn MessageMenu(message: Message, on_close: EventHandler<()>) -> Element {
+fn MessageMenu(
+    message: Message,
+    on_close: EventHandler<()>,
+    on_forward: EventHandler<Message>,
+) -> Element {
     let tr = use_tr();
     let core = use_core();
     let mut toast_sig = use_context::<ToastSig>();
@@ -605,10 +678,23 @@ fn MessageMenu(message: Message, on_close: EventHandler<()>) -> Element {
         .attachment
         .as_ref()
         .is_some_and(|a| a.path.is_some());
-    let (for_open, for_save) = (message.clone(), message.clone());
+    let (for_open, for_save, for_forward) = (message.clone(), message.clone(), message.clone());
+    let can_forward = !body.is_empty() || has_file;
     rsx! {
         div { class: "bottom-sheet-overlay", onclick: move |_| on_close.call(()),
+            BackLayer { on_back: move |_| on_close.call(()) }
             div { class: "bottom-sheet", onclick: move |e| e.stop_propagation(),
+                if can_forward {
+                    button {
+                        class: "sheet-option",
+                        onclick: move |_| {
+                            on_forward.call(for_forward.clone());
+                            on_close.call(());
+                        },
+                        Icon { name: IconName::Forward }
+                        "{t(&tr, \"forward.action\")}"
+                    }
+                }
                 if has_file {
                     button {
                         class: "sheet-option",

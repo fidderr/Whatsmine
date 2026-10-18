@@ -206,6 +206,7 @@ pub fn SettingsScreen() -> Element {
                         name: s.display_name.clone(),
                         size: "large",
                         image: s.avatar.clone(),
+                        zoom: true,
                     }
                     div { class: "photo-actions",
                         button { class: "secondary-btn", onclick: choose_photo,

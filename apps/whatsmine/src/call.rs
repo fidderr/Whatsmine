@@ -13,6 +13,7 @@ use whatsmine_core::calls::{CallEndReason, CallEvent, MediaKind};
 use whatsmine_core::{Core, now_ms};
 
 use crate::app::{ToastSig, Translations, t, toast, use_core, use_tr};
+use crate::back::BackLayer;
 use crate::components::{Avatar, Icon, IconName, ToastLevel};
 
 const JS: &str = include_str!("call.js");
@@ -446,6 +447,8 @@ pub fn CallOverlay() -> Element {
 
     rsx! {
         div { class: "{class}",
+            // Back does not leave the call screen; hanging up does.
+            BackLayer { on_back: move |_| {} }
             div { class: "call-top",
                 if !hide_avatar {
                     div { class: "call-avatar",

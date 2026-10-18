@@ -60,6 +60,10 @@ pub enum Action {
 pub trait Lookup {
     fn name(&self, id: &str) -> String;
     fn text(&self, key: &str) -> String;
+    /// A muted chat does not notify about its messages (calls still ring).
+    fn muted(&self, _id: &str) -> bool {
+        false
+    }
 }
 
 #[derive(Default)]
@@ -86,7 +90,7 @@ impl Hub {
         let generic = |look: &dyn Lookup, key: &str| (look.text("app.name"), look.text(key));
         match ev {
             CoreEvent::MessageAdded(m) if !m.outgoing => {
-                if ui_active {
+                if ui_active || look.muted(&m.contact_id) {
                     return Vec::new();
                 }
                 let tag = format!("chat:{}", m.contact_id);
@@ -245,6 +249,9 @@ impl Lookup for CoreLookup<'_> {
             .cloned()
             .unwrap_or_else(|| key.to_string())
     }
+    fn muted(&self, id: &str) -> bool {
+        self.core.contact(id).is_some_and(|c| c.muted)
+    }
 }
 
 static HUB: LazyLock<Mutex<Hub>> = LazyLock::new(|| Mutex::new(Hub::default()));
@@ -370,6 +377,39 @@ mod tests {
                 other => other.into(),
             }
         }
+    }
+
+    struct MutedBob;
+    impl Lookup for MutedBob {
+        fn name(&self, id: &str) -> String {
+            id.into()
+        }
+        fn text(&self, key: &str) -> String {
+            key.into()
+        }
+        fn muted(&self, id: &str) -> bool {
+            id == "bob"
+        }
+    }
+
+    #[test]
+    fn a_muted_chat_stays_quiet_but_others_do_not() {
+        let mut hub = Hub::default();
+        let s = Settings::default();
+        let quiet = hub.decide(
+            &CoreEvent::MessageAdded(msg("bob", "hi", None)),
+            &s,
+            false,
+            &MutedBob,
+        );
+        assert!(quiet.is_empty());
+        let loud = hub.decide(
+            &CoreEvent::MessageAdded(msg("amy", "hi", None)),
+            &s,
+            false,
+            &MutedBob,
+        );
+        assert_eq!(posted(loud).len(), 1);
     }
 
     fn msg(chat: &str, body: &str, sender: Option<&str>) -> Message {

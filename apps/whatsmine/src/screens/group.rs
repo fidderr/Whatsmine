@@ -189,7 +189,7 @@ pub fn GroupInfoScreen(id: String) -> Element {
                 span { class: "config-title", "{t(&tr, \"group.info\")}" }
             }
             div { class: "profile-head",
-                Avatar { id: id.clone(), name: name.clone(), size: "large", group: true }
+                Avatar { id: id.clone(), name: name.clone(), size: "large", group: true, zoom: true }
                 span { class: "profile-name", "{name}" }
                 span { class: "profile-sub", "{subtitle}" }
                 if !info.active {
@@ -233,6 +233,7 @@ pub fn GroupInfoScreen(id: String) -> Element {
                                 size: "small",
                                 online: m.online || m.is_me,
                                 image: core.contact(&m.id).and_then(|c| c.avatar),
+                                zoom: true,
                             }
                             div { class: "card-main",
                                 span { class: "card-title",

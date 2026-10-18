@@ -2,15 +2,15 @@ use dioxus::prelude::*;
 use whatsmine_core::ContactState;
 
 use crate::app::{Rev, Route, SettingsSig, ToastSig, t, toast, use_core, use_tr};
-use crate::components::{Avatar, ConfirmDialog, Icon, IconName, ToastLevel};
+use crate::components::{Avatar, ConfirmDialog, Icon, IconName, ToastLevel, ToggleRow};
 use crate::fmt;
 use crate::js;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Confirm {
-    Clear,
+    DeleteChat,
     Block,
-    Delete,
+    Remove,
 }
 
 #[component]
@@ -61,7 +61,9 @@ pub fn ContactInfo(id: String) -> Element {
         t(&tr, "contact.calls_themselves").replace("{name}", &contact.their_name);
 
     let (c_save, c_act, c_unblock) = (core.clone(), core.clone(), core.clone());
+    let (c_pin, c_mute) = (core.clone(), core.clone());
     let (id_save, id_act, id_unblock, id_copy) = (id.clone(), id.clone(), id.clone(), id.clone());
+    let (id_pin, id_mute, id_chat) = (id.clone(), id.clone(), id.clone());
 
     rsx! {
         div { class: "screen no-nav",
@@ -72,13 +74,38 @@ pub fn ContactInfo(id: String) -> Element {
                 span { class: "config-title", "{t(&tr, \"contact.title\")}" }
             }
             div { class: "profile-head",
-                Avatar { id: id.clone(), name: name.clone(), size: "large", online, image: contact.avatar.clone() }
+                Avatar { id: id.clone(), name: name.clone(), size: "large", online, image: contact.avatar.clone(), zoom: true }
                 span { class: "profile-name", "{name}" }
                 if !contact.their_name.is_empty() && contact.their_name != name {
                     span { class: "profile-sub", "{calls_themselves}" }
                 }
                 if !presence.is_empty() {
                     span { class: "profile-sub", "{presence}" }
+                }
+            }
+
+            div { class: "profile-actions",
+                button {
+                    class: "profile-action",
+                    onclick: move |_| {
+                        nav.push(Route::Chat { id: id_chat.clone() });
+                    },
+                    Icon { name: IconName::Chat, size: 22 }
+                    "{t(&tr, \"contact.message\")}"
+                }
+            }
+
+            div { class: "settings-section",
+                ToggleRow {
+                    label: t(&tr, "contact.pin"),
+                    checked: contact.pinned,
+                    on_change: move |v| c_pin.set_pinned(&id_pin, v),
+                }
+                ToggleRow {
+                    label: t(&tr, "contact.mute"),
+                    hint: t(&tr, "contact.mute_hint"),
+                    checked: contact.muted,
+                    on_change: move |v| c_mute.set_muted(&id_mute, v),
                 }
             }
 
@@ -130,14 +157,14 @@ pub fn ContactInfo(id: String) -> Element {
                         "{t(&tr, \"contact.unblock\")}"
                     }
                 } else {
-                    button { class: "delete-btn", onclick: move |_| confirm.set(Some(Confirm::Clear)),
-                        "{t(&tr, \"contact.clear_chat\")}"
+                    button { class: "delete-btn", onclick: move |_| confirm.set(Some(Confirm::DeleteChat)),
+                        "{t(&tr, \"contact.delete_chat\")}"
                     }
                     button { class: "delete-btn", onclick: move |_| confirm.set(Some(Confirm::Block)),
                         "{t(&tr, \"contact.block\")}"
                     }
                 }
-                button { class: "delete-btn", onclick: move |_| confirm.set(Some(Confirm::Delete)),
+                button { class: "delete-btn", onclick: move |_| confirm.set(Some(Confirm::Remove)),
                     "{t(&tr, \"contact.delete\")}"
                 }
             }
@@ -145,30 +172,30 @@ pub fn ContactInfo(id: String) -> Element {
             if let Some(which) = confirm() {
                 ConfirmDialog {
                     title: match which {
-                        Confirm::Clear => t(&tr, "contact.clear_title"),
+                        Confirm::DeleteChat => t(&tr, "contact.delete_chat_title").replace("{name}", &name),
                         Confirm::Block => t(&tr, "contact.block_title").replace("{name}", &name),
-                        Confirm::Delete => t(&tr, "contact.delete_title").replace("{name}", &name),
+                        Confirm::Remove => t(&tr, "contact.delete_title").replace("{name}", &name),
                     },
                     message: match which {
-                        Confirm::Clear => t(&tr, "contact.clear_message"),
+                        Confirm::DeleteChat => t(&tr, "contact.delete_chat_message").replace("{name}", &name),
                         Confirm::Block => t(&tr, "contact.block_message"),
-                        Confirm::Delete => t(&tr, "contact.delete_message"),
+                        Confirm::Remove => t(&tr, "contact.delete_message"),
                     },
                     confirm_label: match which {
-                        Confirm::Clear => t(&tr, "contact.clear_chat"),
+                        Confirm::DeleteChat => t(&tr, "contact.delete_chat"),
                         Confirm::Block => t(&tr, "contact.block"),
-                        Confirm::Delete => t(&tr, "contact.delete"),
+                        Confirm::Remove => t(&tr, "contact.delete"),
                     },
                     on_confirm: move |_| {
                         confirm.set(None);
                         match which {
-                            Confirm::Clear => c_act.clear_chat(&id_act),
+                            Confirm::DeleteChat => c_act.hide_chat(&id_act),
                             Confirm::Block => {
                                 let _ = c_act.block(&id_act);
                             }
-                            Confirm::Delete => {
+                            Confirm::Remove => {
                                 let _ = c_act.delete_contact(&id_act);
-                                nav.replace(Route::Chats {});
+                                nav.replace(Route::ContactsScreen {});
                             }
                         }
                     },

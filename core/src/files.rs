@@ -593,7 +593,24 @@ mod tests {
             .unwrap();
         // EXIF: "Exif\0\0", a little-endian TIFF header, one IFD entry.
         let mut tiff = vec![b'I', b'I', 42, 0, 8, 0, 0, 0, 1, 0];
-        tiff.extend_from_slice(&[0x12, 0x01, 3, 0, 1, 0, 0, 0, orientation, 0, 0, 0, 0, 0, 0, 0]);
+        tiff.extend_from_slice(&[
+            0x12,
+            0x01,
+            3,
+            0,
+            1,
+            0,
+            0,
+            0,
+            orientation,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ]);
         let mut seg = b"Exif\0\0".to_vec();
         seg.extend_from_slice(&tiff);
         let len = (seg.len() + 2) as u16;

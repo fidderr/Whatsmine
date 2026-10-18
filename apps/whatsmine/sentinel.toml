@@ -8,3 +8,5 @@
 [android]
 activity = "dev.dioxus.main.MainActivity"
 icon = "apps/whatsmine/assets/icon.webp"
+
+link_scheme = "whatsmine"

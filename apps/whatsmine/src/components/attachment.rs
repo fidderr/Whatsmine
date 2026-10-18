@@ -2,6 +2,7 @@ use dioxus::prelude::*;
 use whatsmine_core::{MediaKind, Message, TransferState};
 
 use crate::app::{ToastSig, Transfers, t, toast, use_core, use_tr};
+use crate::back::BackLayer;
 use crate::components::{Icon, IconName, ToastLevel};
 use crate::{fmt, js, media};
 
@@ -228,32 +229,121 @@ fn FileCard(
     }
 }
 
-/// Full-screen picture with close and save.
+/// Full-screen pictures: swipe or use the arrows to go through the chat's
+/// photos, tap a picture to zoom, save from the bar. Back and Esc close it.
 #[component]
-pub fn ImageViewer(message: Message, on_close: EventHandler<()>) -> Element {
+pub fn ImageViewer(ids: Vec<String>, start: String, on_close: EventHandler<()>) -> Element {
     let tr = use_tr();
+    let core = use_core();
     let toast_sig = use_context::<ToastSig>();
+    let mut index = use_signal(|| ids.iter().position(|i| *i == start).unwrap_or(0));
+    let mut zoomed = use_signal(|| false);
+    let mut touch_x = use_signal(|| None::<f64>);
+    use_hook(|| crate::js::focus("viewer"));
+
+    let total = ids.len();
+    let at = index().min(total.saturating_sub(1));
+    let Some(message) = ids.get(at).and_then(|id| core.message(id)) else {
+        return rsx! {
+            BackLayer { on_back: move |_| on_close.call(()) }
+        };
+    };
     let name = message
         .attachment
         .as_ref()
         .map(|a| a.name.clone())
         .unwrap_or_default();
     let src = format!("/media/{}", message.id);
+    let mut step = move |delta: isize| {
+        let next = index() as isize + delta;
+        if next >= 0 && (next as usize) < total {
+            index.set(next as usize);
+            zoomed.set(false);
+        }
+    };
     rsx! {
-        div { class: "viewer", onclick: move |_| on_close.call(()),
+        div {
+            id: "viewer",
+            class: "viewer",
+            tabindex: "0",
+            onclick: move |_| on_close.call(()),
+            onkeydown: move |e: KeyboardEvent| match e.key() {
+                Key::ArrowLeft => step(-1),
+                Key::ArrowRight => step(1),
+                _ => {}
+            },
+            ontouchstart: move |e| {
+                touch_x.set(e.touches().first().map(|t| t.client_coordinates().x));
+            },
+            ontouchend: move |e| {
+                let from = touch_x.take();
+                let to = e.touches_changed().first().map(|t| t.client_coordinates().x);
+                if let (Some(a), Some(b), false) = (from, to, zoomed()) {
+                    if b - a > 70.0 {
+                        step(-1);
+                    } else if a - b > 70.0 {
+                        step(1);
+                    }
+                }
+            },
+            BackLayer {
+                on_back: move |_| {
+                    if zoomed() {
+                        zoomed.set(false);
+                    } else {
+                        on_close.call(());
+                    }
+                },
+            }
             div { class: "viewer-bar", onclick: move |e| e.stop_propagation(),
                 button { class: "back-btn", onclick: move |_| on_close.call(()),
                     Icon { name: IconName::Xmark }
                 }
                 span { class: "viewer-name", "{name}" }
+                if total > 1 {
+                    span { class: "viewer-count", "{at + 1} / {total}" }
+                }
                 button {
                     class: "header-icon-btn",
                     title: "{t(&tr, \"file.save\")}",
-                    onclick: move |_| save_file(tr, toast_sig, &message),
+                    onclick: {
+                        let message = message.clone();
+                        move |_| save_file(tr, toast_sig, &message)
+                    },
                     Icon { name: IconName::Download }
                 }
             }
-            img { class: "viewer-img", src: "{src}", alt: "{name}" }
+            div { class: if zoomed() { "viewer-body zoomed" } else { "viewer-body" },
+                img {
+                    class: "viewer-img",
+                    src: "{src}",
+                    alt: "{name}",
+                    onclick: move |e| {
+                        e.stop_propagation();
+                        zoomed.toggle();
+                    },
+                }
+            }
+            if total > 1 && at > 0 {
+                button {
+                    class: "viewer-nav prev",
+                    onclick: move |e| {
+                        e.stop_propagation();
+                        step(-1);
+                    },
+                    Icon { name: IconName::ChevronLeft, size: 28 }
+                }
+            }
+            if total > 1 && at + 1 < total {
+                button {
+                    class: "viewer-nav next",
+                    onclick: move |e| {
+                        e.stop_propagation();
+                        step(1);
+                    },
+                    Icon { name: IconName::ChevronRight, size: 28 }
+                }
+            }
         }
     }
 }

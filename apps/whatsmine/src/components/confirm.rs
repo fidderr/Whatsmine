@@ -1,6 +1,7 @@
 use dioxus::prelude::*;
 
 use crate::app::{t, use_tr};
+use crate::back::BackLayer;
 
 #[component]
 pub fn ConfirmDialog(
@@ -17,6 +18,7 @@ pub fn ConfirmDialog(
         div {
             class: "confirm-dialog-overlay",
             onclick: move |_| on_cancel.call(()),
+            BackLayer { on_back: move |_| on_cancel.call(()) }
             div {
                 class: "confirm-dialog",
                 onclick: move |e| e.stop_propagation(),

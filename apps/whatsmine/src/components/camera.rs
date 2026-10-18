@@ -10,6 +10,7 @@ use std::time::Duration;
 use dioxus::prelude::*;
 
 use crate::app::{t, use_tr};
+use crate::back::BackLayer;
 use crate::components::{Icon, IconName};
 use crate::fmt;
 use crate::media::Picked;
@@ -146,14 +147,15 @@ pub fn CameraOverlay(mode: CameraMode, on_done: EventHandler<Option<Picked>>) ->
         let _ = page.send("close");
     });
 
-    let close = move |_| {
+    let close = move |_: ()| {
         let _ = page.send("close");
         on_done.call(None);
     };
     rsx! {
         div { class: "camera",
+            BackLayer { on_back: move |_| close(()) }
             div { class: "camera-bar",
-                button { class: "back-btn", onclick: close, Icon { name: IconName::Xmark } }
+                button { class: "back-btn", onclick: move |_| close(()), Icon { name: IconName::Xmark } }
                 if state() == Cam::Recording {
                     span { class: "rec-dot" }
                     span { class: "rec-time", "{fmt::duration(seconds() * 1000)}" }

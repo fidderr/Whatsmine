@@ -5,14 +5,18 @@
 use dioxus::prelude::*;
 
 use crate::app::{Route, SettingsSig, use_core};
+use crate::back::BackStack;
+use crate::links::{InviteDialog, InviteSig};
 use crate::notify;
 
 #[component]
 pub fn Shell() -> Element {
     let core = use_core();
     let nav = use_navigator();
-    let _ = &nav;
     let settings = use_context::<SettingsSig>().0;
+    let stack = use_context::<BackStack>();
+    let invite = use_context::<InviteSig>();
+    let _ = (&settings, invite);
 
     // Is the app in front of the user? Then the system stays quiet.
     use_future(move || async move {
@@ -29,10 +33,37 @@ pub fn Shell() -> Element {
             notify::set_ui_active(active);
             #[cfg(target_os = "android")]
             if active {
-                open_requested(nav);
+                open_requested(nav, invite);
             }
         }
     });
+
+    // Esc closes what is on top; the mouse's back button and Alt+Left go back.
+    {
+        let stack = stack.clone();
+        use_future(move || {
+            let stack = stack.clone();
+            async move {
+                let mut eval = document::eval(
+                    "document.addEventListener('keydown', e => {\n\
+                     if (e.key === 'Escape') dioxus.send('esc');\n\
+                     else if (e.altKey && e.key === 'ArrowLeft') dioxus.send('back');\n\
+                     });\n\
+                     window.addEventListener('mouseup', e => {\n\
+                     if (e.button === 3) { e.preventDefault(); dioxus.send('back'); }\n\
+                     });\n\
+                     await new Promise(() => {});",
+                );
+                while let Ok(what) = eval.recv::<String>().await {
+                    if what == "esc" {
+                        stack.close_top();
+                    } else if !stack.close_top() && nav.can_go_back() {
+                        nav.go_back();
+                    }
+                }
+            }
+        });
+    }
 
     // Keep the background setting in force (and the texts in the right language).
     #[cfg(target_os = "android")]
@@ -48,38 +79,52 @@ pub fn Shell() -> Element {
             let core = core.clone();
             use_hook(move || crate::android::ask_for_notifications_once(&core));
         }
-        // A notification may have started the app: open what it asked for.
+        // A notification or a link may have started the app: open what it asked for.
         use_hook(|| {
             spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-                open_requested(nav);
+                open_requested(nav, invite);
             });
         });
-        // Back goes up a screen, and from the first screen to the background.
-        use_future(move || async move {
-            let Some(mut rx) = crate::android::take_back_events() else {
-                return;
-            };
-            while rx.recv().await.is_some() {
-                if nav.can_go_back() {
-                    nav.go_back();
-                } else {
-                    mobile_sentinel::background_service::move_to_back();
+        // Back closes a picture or menu, else goes up a screen, and from the
+        // first screen to the background (or out of the app when it is not
+        // allowed to run in the background).
+        {
+            let stack = stack.clone();
+            use_future(move || {
+                let stack = stack.clone();
+                async move {
+                    let Some(mut rx) = crate::android::take_back_events() else {
+                        return;
+                    };
+                    while rx.recv().await.is_some() {
+                        if stack.close_top() {
+                            continue;
+                        }
+                        if nav.can_go_back() {
+                            nav.go_back();
+                        } else if settings.peek().background {
+                            mobile_sentinel::background_service::move_to_back();
+                        } else {
+                            mobile_sentinel::background_service::exit_app();
+                        }
+                    }
                 }
-            }
-        });
+            });
+        }
     }
 
     #[cfg(not(target_os = "android"))]
-    let _ = (&core, &settings);
+    let _ = &core;
 
     rsx! {
         Outlet::<Route> {}
+        InviteDialog {}
     }
 }
 
 #[cfg(target_os = "android")]
-fn open_requested(nav: dioxus::router::Navigator) {
+fn open_requested(nav: dioxus::router::Navigator, invite: InviteSig) {
     if let Some(what) = mobile_sentinel::background_service::take_open_request() {
         if let Some(chat) = what.strip_prefix("chat:") {
             nav.push(Route::Chat {
@@ -87,6 +132,8 @@ fn open_requested(nav: dioxus::router::Navigator) {
             });
         } else if what == "requests" {
             nav.push(Route::Requests {});
+        } else if let Some(link) = what.strip_prefix("link:") {
+            crate::links::offer(invite, link);
         }
     }
 }
@@ -94,7 +141,11 @@ fn open_requested(nav: dioxus::router::Navigator) {
 /// The desktop side: tray, window, single instance. Mounted above everything,
 /// onboarding included, so a hidden window can always be brought back.
 #[cfg(feature = "desktop")]
-pub fn desktop_shell(core: whatsmine_core::Core, settings: Signal<whatsmine_core::Settings>) {
+pub fn desktop_shell(
+    core: whatsmine_core::Core,
+    settings: Signal<whatsmine_core::Settings>,
+    invite: InviteSig,
+) {
     use dioxus::desktop::tao::event::{Event, WindowEvent};
     use dioxus::desktop::trayicon::menu::{Menu, MenuItem, PredefinedMenuItem};
     use dioxus::desktop::{WindowCloseBehaviour, use_window, use_wry_event_handler};
@@ -117,6 +168,12 @@ pub fn desktop_shell(core: whatsmine_core::Core, settings: Signal<whatsmine_core
         let tray = dioxus::desktop::trayicon::init_tray_icon(menu, tray_icon_image());
         let _ = tray.set_tooltip(Some("WhatsMine"));
         crate::desktop::promote_tray_icon();
+        // Clicking a whatsmine:// link anywhere opens this app.
+        crate::desktop::register_link_handler();
+        // This copy was started by such a link.
+        if let Some(link) = crate::desktop::take_startup_link() {
+            crate::links::offer(invite, &link);
+        }
     });
     {
         let (window, core) = (window.clone(), core.clone());
@@ -140,6 +197,10 @@ pub fn desktop_shell(core: whatsmine_core::Core, settings: Signal<whatsmine_core
                     match cmd {
                         crate::desktop::Command::Show => show(&window),
                         crate::desktop::Command::Quit => quit(&core),
+                        crate::desktop::Command::Open(link) => {
+                            crate::links::offer(invite, &link);
+                            show(&window);
+                        }
                     }
                 }
             }

@@ -37,6 +37,17 @@ pub enum IconName {
     PhoneOff,
     MicOff,
     VideoOff,
+    Book,
+    Pin,
+    Bell,
+    BellOff,
+    Share,
+    Link,
+    Scan,
+    Forward,
+    More,
+    ChevronLeft,
+    Info,
 }
 
 /// Inline stroke icon (24×24 grid). No fonts or CDN.
@@ -162,6 +173,51 @@ pub fn Icon(name: IconName, #[props(default = 20)] size: u32) -> Element {
         IconName::VideoOff => &[
             "M16 16v1a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h2m5.66 0H14a2 2 0 0 1 2 2v3.34l1 1L23 7v10",
             "M1 1l22 22",
+        ],
+        IconName::Book => &[
+            "M4 19.5A2.5 2.5 0 0 1 6.5 17H20",
+            "M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z",
+        ],
+        IconName::Pin => &[
+            "M12 17v5",
+            "M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z",
+        ],
+        IconName::Bell => &[
+            "M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9",
+            "M13.73 21a2 2 0 0 1-3.46 0",
+        ],
+        IconName::BellOff => &[
+            "M13.73 21a2 2 0 0 1-3.46 0",
+            "M18.63 13A17.89 17.89 0 0 1 18 8",
+            "M6.26 6.26A5.86 5.86 0 0 0 6 8c0 7-3 9-3 9h14",
+            "M18 8a6 6 0 0 0-9.33-5",
+            "M1 1l22 22",
+        ],
+        IconName::Share => &[
+            "M18 2a3 3 0 1 0 0 6 3 3 0 1 0 0-6z",
+            "M6 9a3 3 0 1 0 0 6 3 3 0 1 0 0-6z",
+            "M18 16a3 3 0 1 0 0 6 3 3 0 1 0 0-6z",
+            "M8.59 13.51l6.83 3.98",
+            "M15.41 6.51l-6.82 3.98",
+        ],
+        IconName::Link => &[
+            "M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71",
+            "M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71",
+        ],
+        IconName::Scan => &[
+            "M3 7V5a2 2 0 0 1 2-2h2",
+            "M17 3h2a2 2 0 0 1 2 2v2",
+            "M21 17v2a2 2 0 0 1-2 2h-2",
+            "M7 21H5a2 2 0 0 1-2-2v-2",
+            "M7 12h10",
+        ],
+        IconName::Forward => &["M15 14l5-5-5-5", "M4 20v-7a4 4 0 0 1 4-4h12"],
+        IconName::More => &["M12 5h.01", "M12 12h.01", "M12 19h.01"],
+        IconName::ChevronLeft => &["M15 18l-6-6 6-6"],
+        IconName::Info => &[
+            "M12 2a10 10 0 1 0 0 20 10 10 0 1 0 0-20z",
+            "M12 16v-4",
+            "M12 8h.01",
         ],
     };
 

@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 use dioxus::prelude::*;
 
 use crate::app::{t, use_tr};
+use crate::back::BackLayer;
 use crate::components::{Icon, IconName};
 use crate::fmt;
 use crate::media::{self, Picked};
@@ -29,18 +30,20 @@ pub fn VoiceBar(on_send: EventHandler<Picked>, on_cancel: EventHandler<()>) -> E
     use_drop(mobile_sentinel::recorder::cancel);
 
     let pct = (level() * 140.0).clamp(4.0, 100.0);
+    let discard = move |_: ()| {
+        spawn(async move {
+            media::cancel_voice().await;
+            on_cancel.call(());
+        });
+    };
     rsx! {
         div { class: "voice-bar",
+            BackLayer { on_back: move |_| discard(()) }
             button {
                 class: "icon-btn danger",
                 title: "{t(&tr, \"voice.discard\")}",
                 disabled: stopping(),
-                onclick: move |_| {
-                    spawn(async move {
-                        media::cancel_voice().await;
-                        on_cancel.call(());
-                    });
-                },
+                onclick: move |_| discard(()),
                 Icon { name: IconName::Trash, size: 22 }
             }
             span { class: "rec-dot" }
