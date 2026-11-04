@@ -101,6 +101,14 @@ pub fn App() -> Element {
         // One core for the whole process: it outlives this window.
         crate::boot::core()
     });
+    // On Android the UI's loop can lose a wake when another screen closes, and then everything
+    // here waits for a touch. And the page applies changes at once: nothing runs until the last
+    // change is applied, and a WebView that is not drawing has no animation frames for that.
+    use_hook(mobile_sentinel::keep_event_loop_awake);
+    #[cfg(target_os = "android")]
+    use_hook(|| {
+        document::eval("window.interpreter.headless = true;");
+    });
 
     match started {
         Ok(core) => rsx! { Main { core: AppCore(core) } },

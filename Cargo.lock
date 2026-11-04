@@ -4092,15 +4092,13 @@ dependencies = [
 
 [[package]]
 name = "mobile-sentinel"
-version = "0.2.2"
+version = "0.3.1"
 dependencies = [
  "android_logger",
  "chrono",
  "chrono-tz",
  "cpal",
  "dirs",
- "futures-channel",
- "futures-core",
  "hound",
  "jni 0.21.1",
  "libc",
@@ -4112,7 +4110,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
- "tokio",
  "uuid",
 ]
 
