@@ -29,5 +29,9 @@ directories = "6.0.0"
 jni = "0.21"
 ndk-context = "0.1"
 
+[features]
+# Test data for the app scenarios (devtest/). Never in a build for users.
+test-hooks = []
+
 [dev-dependencies]
 tempfile = "3"

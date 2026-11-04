@@ -21,6 +21,8 @@ pub mod identity;
 pub mod model;
 pub mod paths;
 pub mod protocol;
+#[cfg(feature = "test-hooks")]
+mod seed;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -61,6 +63,7 @@ struct Inner {
     me: PublicKey,
     key: SecretKey,
     recovery: DbRecovery,
+    started_clean: bool,
     cmds: mpsc::UnboundedSender<Cmd>,
     events: broadcast::Sender<CoreEvent>,
     shared: Shared,
@@ -88,6 +91,7 @@ impl Core {
     /// runtime: the core runs on its own.
     pub fn start(dir: &Path, mode: NetMode) -> anyhow::Result<Core> {
         std::fs::create_dir_all(dir)?;
+        let started_clean = paths::clean_start(dir).context("removing old data")?;
         let key = identity::load_or_create(dir).context("loading identity")?;
         let (db, recovery) = Database::open_with_recovery(&dir.join(DB_FILE));
         let db = Arc::new(db);
@@ -125,6 +129,7 @@ impl Core {
                 me: key.public(),
                 key: key.clone(),
                 recovery,
+                started_clean,
                 cmds,
                 events,
                 shared,
@@ -270,6 +275,11 @@ impl Core {
     /// This device's key: the thing you share so people can reach you.
     pub fn my_key(&self) -> String {
         identity::key_to_string(&self.inner.me)
+    }
+
+    /// This start removed data of an earlier generation (see [`paths::clean_start`]): say so.
+    pub fn started_clean(&self) -> bool {
+        self.inner.started_clean
     }
 
     pub fn db_recovery(&self) -> DbRecovery {
@@ -548,6 +558,11 @@ impl Core {
     }
 
     /// Where files are kept on this device.
+    /// The folder everything of this identity lives in.
+    pub fn data_dir(&self) -> &Path {
+        &self.inner.dir
+    }
+
     pub fn media_dir(&self) -> PathBuf {
         files::media_dir(&self.inner.dir)
     }

@@ -8,5 +8,9 @@
 [android]
 activity = "dev.dioxus.main.MainActivity"
 icon = "apps/whatsmine/assets/icon.webp"
+# Until the page has painted, the window and the splash screen: the light and dark `--bg` of
+# style.css. Without them Android shows white, and a dark app flashes.
+window_background = "F5F5FA"
+window_background_dark = "12121A"
 
 link_scheme = "whatsmine"

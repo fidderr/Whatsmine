@@ -244,6 +244,9 @@ pub fn promote_tray_icon() {
 
 /// Shows a Windows toast. False if the system refused it.
 pub fn toast(n: &Notice) -> bool {
+    if crate::platform::test_run() {
+        return true;
+    }
     #[cfg(windows)]
     {
         static ICON: OnceLock<()> = OnceLock::new();

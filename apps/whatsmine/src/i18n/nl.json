@@ -9,6 +9,8 @@
   "common.copy": "Kopiëren",
   "common.copied": "Gekopieerd",
 
+  "db.clean_start": "WhatsMine begint opnieuw in deze versie. Je oude chats en sleutel zijn verwijderd, dus voeg je contacten opnieuw toe.",
+
   "db.recovered": "Je berichtendatabase was beschadigd en is opnieuw aangemaakt. De beschadigde kopie staat ernaast.",
   "db.volatile": "Berichten kunnen nu niet worden opgeslagen op dit apparaat. Ze gaan verloren als je de app sluit.",
 

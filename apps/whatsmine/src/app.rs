@@ -93,6 +93,49 @@ pub fn toast(sig: &mut ToastSig, message: String, level: ToastLevel) {
 
 const TYPING_SHOWN_MS: u64 = 5000;
 
+/// In the binary and as a plain element: no file to load and nothing to wait for, so the first
+/// frame already looks as it should.
+const STYLESHEET: &str = include_str!("../assets/style.css");
+
+/// Says when the window may have changed. Edge to edge, a keyboard changes nothing the page can
+/// see, so it also looks for as long as something can be typed in, and keeps what is being typed
+/// in out from under the keyboard. `--text-zoom` is how much the phone's font size setting
+/// scales text, for what has to fit whatever it is set to.
+#[cfg(target_os = "android")]
+const WINDOW_WATCH: &str = "\
+    const measureText = () => { \
+        const probe = document.createElement('div'); \
+        probe.style.cssText = 'position:absolute;visibility:hidden;font-size:100px;line-height:1'; \
+        probe.textContent = '0'; \
+        document.body.append(probe); \
+        document.documentElement.style.setProperty('--text-zoom', probe.getBoundingClientRect().height / 100); \
+        probe.remove(); \
+    }; \
+    const tell = () => { measureText(); dioxus.send(innerWidth); }; \
+    addEventListener('resize', tell); \
+    document.addEventListener('visibilitychange', tell); \
+    matchMedia('(prefers-color-scheme: dark)').addEventListener('change', tell); \
+    const typing = () => document.activeElement?.matches('input:not([type=range]):not([type=date]), textarea'); \
+    const showField = () => { \
+        const root = document.querySelector('.app-root'); \
+        if (!root || !typing()) return; \
+        const free = innerHeight - parseFloat(getComputedStyle(root).getPropertyValue('--safe-bottom')); \
+        const box = document.activeElement.getBoundingClientRect(); \
+        if (box.bottom > free || box.top < 0) document.activeElement.scrollIntoView({ block: 'center' }); \
+    }; \
+    let watching = 0; \
+    document.addEventListener('focusin', () => { \
+        if (watching) return; \
+        let quiet = 0; \
+        watching = setInterval(() => { \
+            tell(); \
+            showField(); \
+            quiet = typing() ? 0 : quiet + 1; \
+            if (quiet > 5) { clearInterval(watching); watching = 0; } \
+        }, 200); \
+    }); \
+    tell();";
+
 #[component]
 pub fn App() -> Element {
     let started = use_hook(|| {
@@ -113,7 +156,7 @@ pub fn App() -> Element {
     match started {
         Ok(core) => rsx! { Main { core: AppCore(core) } },
         Err(e) => rsx! {
-            document::Link { rel: "stylesheet", href: asset!("/assets/style.css") }
+            style { "{STYLESHEET}" }
             div { class: "app-root",
                 div { class: "screen no-nav",
                     div { class: "empty-state",
@@ -171,8 +214,17 @@ fn Main(core: AppCore) -> Element {
         std::thread::spawn(move || crate::media::clean_scratch(&core));
     });
 
-    // Tell the user if the database had to be reset or cannot persist.
+    // Tell the user if the old data had to go, once, or if the database had to be reset or
+    // cannot persist.
     use_hook(|| {
+        if core.0.started_clean() {
+            toast(
+                &mut toast_sig,
+                t(&translations, "db.clean_start"),
+                ToastLevel::Info,
+            );
+            return;
+        }
         let key = match core.0.db_recovery() {
             DbRecovery::Healthy => return,
             DbRecovery::Recovered { .. } => "db.recovered",
@@ -286,30 +338,55 @@ fn Main(core: AppCore) -> Element {
     };
     let onboarded = s.onboarded;
     drop(s);
-    // System bars: how far they overlap us (rotation and window changes alter it).
+    // System bars and keyboard: how far they overlap us (rotation and window changes alter it),
+    // and the bars' colour.
     let mut safe_area = use_signal(crate::platform::safe_area_style);
     #[cfg(target_os = "android")]
     {
+        let mut system_dark = use_signal(crate::platform::system_dark);
+        let read_window = move || {
+            let now = crate::platform::safe_area_style();
+            if now != *safe_area.peek() {
+                safe_area.set(now);
+            }
+            let dark = crate::platform::system_dark();
+            if dark != *system_dark.peek() {
+                system_dark.set(dark);
+            }
+        };
+        // Right after the start the window does not know them yet.
         use_future(move || async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                let now = crate::platform::safe_area_style();
-                if now != *safe_area.peek() {
-                    safe_area.set(now);
-                }
+            let mut read_window = read_window;
+            for delay_ms in [100, 300, 600, 1200, 2500] {
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                read_window();
             }
         });
-        // The status bar is blue (light theme) or dark (dark theme): light icons on both.
+        use_future(move || async move {
+            let mut read_window = read_window;
+            let mut changes = document::eval(WINDOW_WATCH);
+            while changes.recv::<i32>().await.is_ok() {
+                read_window();
+            }
+        });
         use_effect(move || {
-            let _ = safe_area.read();
-            crate::platform::set_light_system_bars(false);
+            let dark = crate::platform::is_dark(&settings.read().theme, *system_dark.read());
+            crate::platform::set_system_bars(dark);
         });
     }
     #[cfg(not(target_os = "android"))]
     let _ = &mut safe_area;
 
+    // What the test scenarios drive the app with.
+    #[cfg(feature = "test-hooks")]
+    {
+        let dir = core.0.data_dir().to_path_buf();
+        use_hook(move || crate::debug_hooks::start(dir));
+        use_future(crate::debug_hooks::script_loop);
+    }
+
     rsx! {
-        document::Link { rel: "stylesheet", href: asset!("/assets/style.css") }
+        style { "{STYLESHEET}" }
         document::Meta {
             name: "viewport",
             content: "width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content",

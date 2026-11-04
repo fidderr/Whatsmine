@@ -9,6 +9,8 @@
   "common.copy": "Kopieren",
   "common.copied": "Kopiert",
 
+  "db.clean_start": "WhatsMine beginnt in dieser Version neu. Deine alten Chats und dein Schlüssel wurden entfernt, füge deine Kontakte also erneut hinzu.",
+
   "db.recovered": "Deine Nachrichtendatenbank war beschädigt und wurde zurückgesetzt. Die beschädigte Kopie liegt daneben.",
   "db.volatile": "Nachrichten können auf diesem Gerät gerade nicht gespeichert werden. Sie gehen beim Schließen der App verloren.",
 

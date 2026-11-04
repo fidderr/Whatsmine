@@ -9,6 +9,8 @@
   "common.copy": "Copy",
   "common.copied": "Copied",
 
+  "db.clean_start": "WhatsMine starts fresh in this version. Your old chats and key were removed, so add your contacts again.",
+
   "db.recovered": "Your message database was damaged and has been reset. The damaged copy was kept next to it.",
   "db.volatile": "Messages can't be saved on this device right now. They will be lost when you close the app.",
 

@@ -9,6 +9,8 @@
   "common.copy": "Copier",
   "common.copied": "Copié",
 
+  "db.clean_start": "WhatsMine repart de zéro dans cette version. Tes anciennes discussions et ta clé ont été supprimées : ajoute à nouveau tes contacts.",
+
   "db.recovered": "Ta base de messages était endommagée et a été réinitialisée. La copie endommagée a été conservée à côté.",
   "db.volatile": "Les messages ne peuvent pas être enregistrés sur cet appareil pour le moment. Ils seront perdus à la fermeture de l'app.",
 
@@ -100,7 +102,7 @@
   "contact.unblock": "Débloquer",
   "contact.delete": "Supprimer le contact",
   "contact.delete_title": "Supprimer {name} ?",
-  "contact.delete_message": "La personne est retirée de tes contacts et la discussion est supprimée de cet appareil. Action irréversible.",
+  "contact.delete_message": "{name} est retiré(e) de tes contacts et la discussion est supprimée de cet appareil. Action irréversible.",
 
   "settings.title": "Réglages",
   "settings.profile": "Ton nom",

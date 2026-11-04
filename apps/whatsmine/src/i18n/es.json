@@ -9,6 +9,8 @@
   "common.copy": "Copiar",
   "common.copied": "Copiado",
 
+  "db.clean_start": "WhatsMine empieza de cero en esta versión. Tus chats y tu clave anteriores se han eliminado, así que vuelve a añadir tus contactos.",
+
   "db.recovered": "Tu base de datos de mensajes estaba dañada y se ha restablecido. La copia dañada se guardó al lado.",
   "db.volatile": "Ahora mismo no se pueden guardar mensajes en este dispositivo. Se perderán al cerrar la app.",
 
@@ -100,7 +102,7 @@
   "contact.unblock": "Desbloquear",
   "contact.delete": "Eliminar contacto",
   "contact.delete_title": "¿Eliminar a {name}?",
-  "contact.delete_message": "Se elimina a la persona de tus contactos y el chat de este dispositivo. No se puede deshacer.",
+  "contact.delete_message": "{name} se elimina de tus contactos y el chat se borra de este dispositivo. No se puede deshacer.",
 
   "settings.title": "Ajustes",
   "settings.profile": "Tu nombre",

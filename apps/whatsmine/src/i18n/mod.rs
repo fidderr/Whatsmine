@@ -44,43 +44,75 @@ mod tests {
         }
     }
 
-    /// Every key the code uses must exist in en.json.
+    fn placeholders(text: &str) -> Vec<&str> {
+        let mut found: Vec<&str> = text
+            .split('{')
+            .skip(1)
+            .filter_map(|rest| rest.split('}').next())
+            .collect();
+        found.sort_unstable();
+        found
+    }
+
+    /// A placeholder a translation lacks would never be filled in, and one with another name
+    /// would show as `{name}`.
     #[test]
-    fn keys_used_in_code_exist() {
+    fn every_translation_has_the_placeholders_of_the_english() {
         let en = load_translations("en");
-        let src = concat!(
-            include_str!("../app.rs"),
-            include_str!("../fmt.rs"),
-            include_str!("../components/bottom_nav.rs"),
-            include_str!("../components/confirm.rs"),
-            include_str!("../components/net_banner.rs"),
-            include_str!("../components/attachment.rs"),
-            include_str!("../components/voice.rs"),
-            include_str!("../components/camera.rs"),
-            include_str!("../screens/onboarding.rs"),
-            include_str!("../screens/chats.rs"),
-            include_str!("../screens/chat.rs"),
-            include_str!("../screens/add.rs"),
-            include_str!("../screens/requests.rs"),
-            include_str!("../screens/contact.rs"),
-            include_str!("../screens/settings.rs"),
+        for (code, _) in LANGUAGES {
+            for (key, text) in load_translations(code) {
+                assert_eq!(
+                    placeholders(&text),
+                    placeholders(&en[&key]),
+                    "{code} {key}: {text}"
+                );
+            }
+        }
+    }
+
+    fn rust_files(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                rust_files(&path, found);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                found.push(path);
+            }
+        }
+    }
+
+    /// A key that does not exist shows on screen as the key.
+    #[test]
+    fn every_key_the_code_names_exists() {
+        let en = load_translations("en");
+        let groups: std::collections::HashSet<&str> =
+            en.keys().filter_map(|key| key.split('.').next()).collect();
+        let mut files = Vec::new();
+        rust_files(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut files,
         );
+        assert!(files.len() > 20, "found {} files", files.len());
         let mut missing = Vec::new();
-        for (i, _) in src.match_indices("t(&tr, ") {
-            let rest = &src[i + 7..];
-            let rest = rest.trim_start_matches('\\');
-            if let Some(stripped) = rest.strip_prefix('"') {
-                let key: String = stripped
-                    .chars()
-                    .take_while(|c| *c != '"' && *c != '\\')
-                    .collect();
-                if !en.contains_key(&key) {
-                    missing.push(key);
+        for file in files {
+            let text = std::fs::read_to_string(&file).unwrap();
+            let code = text.split("#[cfg(test)]").next().unwrap_or_default();
+            // Inside `{t(&tr, \"key\")}` the quotes are escaped, so drop the escapes first.
+            let code = code.replace("\\\"", "\"");
+            // Between quotes: every second piece.
+            for quoted in code.split('"').skip(1).step_by(2) {
+                let looks_like_key = quoted.contains('.')
+                    && !quoted.ends_with('.')
+                    && !quoted.ends_with(".js")
+                    && quoted.chars().all(|c| {
+                        c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '_'
+                    })
+                    && quoted.split('.').next().is_some_and(|g| groups.contains(g));
+                if looks_like_key && !en.contains_key(quoted) {
+                    missing.push(format!("{}: {quoted}", file.display()));
                 }
             }
         }
-        missing.sort();
-        missing.dedup();
-        assert!(missing.is_empty(), "keys missing from en.json: {missing:?}");
+        assert!(missing.is_empty(), "not in en.json: {missing:#?}");
     }
 }

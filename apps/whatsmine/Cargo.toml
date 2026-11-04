@@ -30,6 +30,8 @@ mobile-sentinel = { version = "0.3.0", path = "../../../mobile-sentinel", featur
 default = []
 desktop = ["dioxus/desktop"]
 mobile = ["dioxus/mobile"]
+# What the test scenarios (devtest/) drive the app with. Never in a build for users.
+test-hooks = ["whatsmine-core/test-hooks"]
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 arboard = "3.7.0"

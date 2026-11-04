@@ -158,6 +158,9 @@ pub fn desktop_shell(
 
     // The tray icon: left click opens the window, the menu can open or quit.
     use_hook(|| {
+        if crate::platform::test_run() {
+            return;
+        }
         let menu = Menu::new();
         let strings = crate::i18n::load_translations(&core.settings().locale);
         let label = |key: &str, fallback: &str| {
@@ -248,7 +251,9 @@ pub fn desktop_shell(
     use_effect(move || {
         let on = settings.read().start_with_system;
         let profile = std::env::var("WHATSMINE_PROFILE").ok();
-        crate::desktop::set_autostart(on, profile.as_deref());
+        if !crate::platform::test_run() {
+            crate::desktop::set_autostart(on, profile.as_deref());
+        }
     });
 
     // Focus decides whether the system should notify; shutting down on a real close.
@@ -277,7 +282,9 @@ pub fn desktop_shell(
 fn show(window: &dioxus::desktop::DesktopContext) {
     window.set_visible(true);
     window.set_minimized(false);
-    window.set_focus();
+    if !crate::platform::test_run() {
+        window.set_focus();
+    }
     notify::set_ui_active(true);
 }
 

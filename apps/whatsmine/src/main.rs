@@ -39,16 +39,19 @@ fn main() {
             whatsmine::desktop::set_startup_link(link);
         }
 
+        let window = WindowBuilder::new()
+            .with_title("WhatsMine")
+            .with_visible(!background)
+            .with_inner_size(LogicalSize::new(440.0, 780.0))
+            .with_min_inner_size(LogicalSize::new(340.0, 480.0));
+        #[cfg(feature = "test-hooks")]
+        let window = whatsmine::debug_hooks::test_window(window);
         let config = Config::new()
             .with_menu(None)
             .with_close_behaviour(WindowCloseBehaviour::WindowHides)
-            .with_window(
-                WindowBuilder::new()
-                    .with_title("WhatsMine")
-                    .with_visible(!background)
-                    .with_inner_size(LogicalSize::new(440.0, 780.0))
-                    .with_min_inner_size(LogicalSize::new(340.0, 480.0)),
-            );
+            // The page's colour before it has painted anything: the engine's own is white.
+            .with_background_color(whatsmine::platform::start_background())
+            .with_window(window);
         let config = match dioxus::desktop::icon_from_memory(include_bytes!("../assets/icon.png")) {
             Ok(icon) => config.with_icon(icon),
             Err(_) => config,
@@ -64,6 +67,14 @@ fn main() {
             .launch(whatsmine::app::App);
     }
 
-    #[cfg(not(feature = "desktop"))]
+    // Same on a phone. The mobile configuration only exists in a build for one.
+    #[cfg(all(not(feature = "desktop"), target_os = "android"))]
+    dioxus::LaunchBuilder::new()
+        .with_cfg(
+            dioxus::mobile::Config::new()
+                .with_background_color(whatsmine::platform::start_background()),
+        )
+        .launch(whatsmine::app::App);
+    #[cfg(all(not(feature = "desktop"), not(target_os = "android")))]
     dioxus::launch(whatsmine::app::App);
 }

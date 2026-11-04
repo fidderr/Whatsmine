@@ -1209,16 +1209,6 @@ textarea {
   pointer-events: none;
 }
 
-.theme-light .status-bar-bg {
-  background: var(--primary);
-}
-
-@media (prefers-color-scheme: light) {
-  .theme-system .status-bar-bg {
-    background: var(--primary);
-  }
-}
-
 .bubble.in {
   box-shadow: 0 1px 1px rgba(0, 0, 0, 0.06);
 }
