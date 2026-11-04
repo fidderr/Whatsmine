@@ -71,7 +71,7 @@ pub fn InviteDialog() -> Element {
         t(&tr, "invite.body")
     };
 
-    let (add_key, open_key) = (key.clone(), key.clone());
+    let open_key = key.clone();
     let (add_name, add_core) = (invite.name.clone(), core.clone());
     rsx! {
         div { class: "confirm-dialog-overlay", onclick: move |_| sig.set(None),
