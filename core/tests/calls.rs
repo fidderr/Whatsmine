@@ -3,9 +3,9 @@
 
 use std::time::Duration;
 
-use iroh::address_lookup::MemoryLookup;
 use tokio::sync::broadcast::Receiver;
 use whatsmine_core::calls::{CallEndReason, CallEvent, MediaKind};
+use whatsmine_core::records::LocalRecords as MemoryLookup;
 use whatsmine_core::{Core, CoreEvent, NetMode, Settings};
 
 const WAIT: Duration = Duration::from_secs(40);
@@ -56,7 +56,7 @@ async fn online_pair(
     let (ka, kb) = (a.my_key(), b.my_key());
     let mut ra = a.subscribe();
     let mut rb = b.subscribe();
-    a.add_contact(&kb, None).unwrap();
+    a.add_contact(&b.invite_link(), None).unwrap();
     loop {
         if let Ok(CoreEvent::RequestReceived { .. }) = tokio::time::timeout(WAIT, rb.recv())
             .await
@@ -79,7 +79,7 @@ async fn online_pair(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn call_lifecycle_with_media() {
-    let lookup = MemoryLookup::new();
+    let lookup = MemoryLookup::default();
     let (a, b, ka, kb, _da, _db) = online_pair(&lookup).await;
     let (mut ra, mut rb) = (a.subscribe(), b.subscribe());
     let mut media_a = a.call_media();
@@ -164,7 +164,7 @@ async fn call_lifecycle_with_media() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn decline_busy_cancel_and_lost() {
-    let lookup = MemoryLookup::new();
+    let lookup = MemoryLookup::default();
     let (a, b, _ka, kb, _da, _db) = online_pair(&lookup).await;
     let (mut ra, mut rb) = (a.subscribe(), b.subscribe());
 
@@ -253,7 +253,7 @@ async fn decline_busy_cancel_and_lost() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_call_state_can_be_read_by_a_screen_that_opens_late() {
     use whatsmine_core::calls::CallPhase;
-    let lookup = MemoryLookup::new();
+    let lookup = MemoryLookup::default();
     let (a, b, ka, kb, _da, _db) = online_pair(&lookup).await;
     assert!(a.call_snapshot().is_none() && b.call_snapshot().is_none());
 

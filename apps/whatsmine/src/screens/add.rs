@@ -1,6 +1,6 @@
 use dioxus::prelude::*;
 use whatsmine_core::ContactState;
-use whatsmine_core::identity::{invite_link, key_to_string, parse_invite};
+use whatsmine_core::identity::{key_to_string, parse_invite};
 
 use crate::app::{Route, SettingsSig, ToastSig, t, toast, use_core, use_tr};
 use crate::components::scan::{self, ScanOverlay};
@@ -32,7 +32,13 @@ pub fn AddContact() -> Element {
     let mut error = use_signal(|| None::<String>);
     let mut scanning = use_signal(|| false);
     let my_key = core.my_key();
-    let link = invite_link(&my_key, &settings.read().display_name);
+    let _ = settings.read();
+    let link = core.invite_link();
+    // Scanned right here, in person: both are added without asking.
+    let in_person = use_signal({
+        let core = core.clone();
+        move || core.in_person_code()
+    });
 
     // An invitation waiting on the clipboard is offered right away.
     let mut on_clipboard = use_signal(|| None::<(String, String)>);
@@ -47,12 +53,15 @@ pub fn AddContact() -> Element {
                 let Some(found) = parse_invite(&text) else {
                     return;
                 };
-                let key = key_to_string(&found.key);
+                let Some(person) = found.key() else {
+                    return;
+                };
+                let key = key_to_string(&person);
                 let already = core
                     .contact(&key)
                     .is_some_and(|c| c.state != ContactState::PendingIn);
                 if key != my_key && !already {
-                    on_clipboard.set(Some((text, found.name.unwrap_or_default())));
+                    on_clipboard.set(Some((text, found.name.clone())));
                 }
             });
         });
@@ -62,11 +71,8 @@ pub fn AddContact() -> Element {
         let core = core.clone();
         move |_| {
             let typed = their_key.peek().clone();
-            // A pasted link or message also works here.
-            let key = parse_invite(&typed)
-                .map(|i| key_to_string(&i.key))
-                .unwrap_or(typed);
-            match core.add_contact(&key, Some(nickname.peek().as_str())) {
+            // A pasted link or message.
+            match core.add_contact(&typed, Some(nickname.peek().as_str())) {
                 Ok(c) => {
                     nav.replace(Route::Chat { id: c.id });
                 }
@@ -123,7 +129,7 @@ pub fn AddContact() -> Element {
             div { class: "settings-section",
                 label { class: "section-label", "{t(&tr, \"add.your_key\")}" }
                 p { class: "setting-hint", "{t(&tr, \"add.your_key_hint\")}" }
-                QrCode { data: link.clone() }
+                QrCode { data: in_person() }
                 div { class: "button-row",
                     button {
                         class: "secondary-btn grow",

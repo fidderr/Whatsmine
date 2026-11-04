@@ -5,8 +5,8 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use iroh::address_lookup::MemoryLookup;
 use whatsmine_core::calls::{CallEvent, MediaKind};
+use whatsmine_core::records::LocalRecords as MemoryLookup;
 use whatsmine_core::{
     ContactKind, ContactState, Core, CoreEvent, MessageStatus, NetMode, Settings, TransferState,
 };
@@ -35,7 +35,7 @@ fn start(dir: &std::path::Path, lookup: &MemoryLookup, name: &str) -> Core {
 
 /// `a` asks `b`; `b` accepts; both online.
 async fn befriend(a: &Core, b: &Core) {
-    a.add_contact(&b.my_key(), None).unwrap();
+    a.add_contact(&b.invite_link(), None).unwrap();
     until("request", || !b.requests().is_empty()).await;
     b.accept(&a.my_key()).unwrap();
     until("online", || {
@@ -54,7 +54,7 @@ struct Trio {
 }
 
 async fn trio() -> Trio {
-    let lookup = MemoryLookup::new();
+    let lookup = MemoryLookup::default();
     let dirs: Vec<_> = (0..3).map(|_| tempfile::tempdir().unwrap()).collect();
     let a = start(dirs[0].path(), &lookup, "Alice");
     let b = start(dirs[1].path(), &lookup, "Bob");
@@ -297,7 +297,7 @@ async fn leaving_and_closing() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_stranger_cannot_add_you_to_a_group() {
-    let lookup = MemoryLookup::new();
+    let lookup = MemoryLookup::default();
     let dirs: Vec<_> = (0..3).map(|_| tempfile::tempdir().unwrap()).collect();
     let a = start(dirs[0].path(), &lookup, "Alice");
     let b = start(dirs[1].path(), &lookup, "Bob");

@@ -3,8 +3,8 @@
 
 use std::time::Duration;
 
-use iroh::address_lookup::MemoryLookup;
 use whatsmine_core::power::{Device, Level, Network, SpeedMode};
+use whatsmine_core::records::LocalRecords as MemoryLookup;
 use whatsmine_core::{ContactState, Core, CoreEvent, MessageStatus, NetMode, Settings};
 
 async fn until(what: &str, mut cond: impl FnMut() -> bool) {
@@ -30,7 +30,7 @@ fn start(dir: &std::path::Path, lookup: &MemoryLookup, name: &str) -> Core {
 }
 
 async fn befriend(a: &Core, b: &Core) {
-    a.add_contact(&b.my_key(), None).unwrap();
+    a.add_contact(&b.invite_link(), None).unwrap();
     until("the request", || !b.requests().is_empty()).await;
     b.accept(&a.my_key()).unwrap();
     until("being accepted", || {
@@ -78,7 +78,7 @@ async fn until_up(core: &Core, up: bool, what: &str) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_new_device_on_mobile_data_holds_nothing_and_asks_to_be_woken() {
-    let lookup = MemoryLookup::new();
+    let lookup = MemoryLookup::default();
     let dir = tempfile::tempdir().unwrap();
     let a = start(dir.path(), &lookup, "Alice");
     let mut events = a.subscribe();
@@ -104,7 +104,7 @@ async fn a_new_device_on_mobile_data_holds_nothing_and_asks_to_be_woken() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_resting_device_catches_up_when_woken_and_rests_again() {
-    let lookup = MemoryLookup::new();
+    let lookup = MemoryLookup::default();
     let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let a = start(dir_a.path(), &lookup, "Alice");
     let b = start(dir_b.path(), &lookup, "Bob");
@@ -146,7 +146,7 @@ async fn a_resting_device_catches_up_when_woken_and_rests_again() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn writing_from_a_resting_device_brings_the_network_back() {
-    let lookup = MemoryLookup::new();
+    let lookup = MemoryLookup::default();
     let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let a = start(dir_a.path(), &lookup, "Alice");
     let b = start(dir_b.path(), &lookup, "Bob");
@@ -171,7 +171,7 @@ async fn writing_from_a_resting_device_brings_the_network_back() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn opening_the_app_brings_it_all_back() {
-    let lookup = MemoryLookup::new();
+    let lookup = MemoryLookup::default();
     let dir = tempfile::tempdir().unwrap();
     let a = start(dir.path(), &lookup, "Alice");
     a.set_device(phone_on_mobile_data());
@@ -186,7 +186,7 @@ async fn opening_the_app_brings_it_all_back() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn no_network_is_offline_and_a_network_brings_it_back() {
-    let lookup = MemoryLookup::new();
+    let lookup = MemoryLookup::default();
     let dir = tempfile::tempdir().unwrap();
     let a = start(dir.path(), &lookup, "Alice");
     until_up(&a, true, "the endpoint to come up").await;
@@ -214,7 +214,7 @@ async fn no_network_is_offline_and_a_network_brings_it_back() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_setting_decides_on_mobile_data() {
-    let lookup = MemoryLookup::new();
+    let lookup = MemoryLookup::default();
     let dir = tempfile::tempdir().unwrap();
     let a = start(dir.path(), &lookup, "Alice");
     a.set_device(phone_on_mobile_data());
@@ -238,7 +238,7 @@ async fn the_setting_decides_on_mobile_data() {
 /// A connection that is not used costs a heartbeat every few seconds, so it goes.
 #[tokio::test(flavor = "multi_thread")]
 async fn after_a_check_nothing_stays_open() {
-    let lookup = MemoryLookup::new();
+    let lookup = MemoryLookup::default();
     let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let a = start(dir_a.path(), &lookup, "Alice");
     let b = start(dir_b.path(), &lookup, "Bob");

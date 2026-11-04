@@ -14,6 +14,7 @@ static CORE: OnceLock<Result<Core, String>> = OnceLock::new();
 
 fn start(dir: Result<std::path::PathBuf, String>) -> Result<Core, String> {
     let dir = dir?;
+    crate::platform::install_key_protector();
     let core = Core::start(&dir, NetMode::Internet).map_err(|e| format!("{e:#}"))?;
     #[cfg(feature = "test-hooks")]
     crate::debug_hooks::seed_if_asked(&core);

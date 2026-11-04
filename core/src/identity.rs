@@ -1,25 +1,128 @@
-//! Identity: an Ed25519 keypair generated on this device.
+//! Who you are, and how you can be found. These are separate things on purpose:
 //!
-//! The public key is the user's address and identity. It is unique by math,
-//! so nothing registers it. The secret key never leaves the device.
-
-use std::path::Path;
+//! - The **person key** says who you are. Contacts know it. It says nothing about where you are,
+//!   so a leaked one is harmless. It comes from 12 recovery words.
+//! - The **network key** is the QUIC address. Whoever you are connected to sees it. It rotates
+//!   weekly and on a reset.
+//! - The **location secret** finds your sealed address in the DHT, under a key that changes daily.
+//!   Only accepted contacts have it. It rotates on a block and on a reset.
+//! - **Invites** let a stranger leave a sealed request in the DHT. They never reach your phone,
+//!   never learn your address, and cost you no battery. Each can be revoked.
 
 use iroh::{PublicKey, SecretKey};
+use serde::{Deserialize, Serialize};
 
+use crate::db::Database;
+use crate::model::{Millis, now_ms};
+use crate::vault::random;
+
+/// The file an earlier generation kept its key in, for the clean start to remove.
 pub(crate) const KEY_FILE: &str = "identity.key";
+const SECRET_NAME: &str = "identity";
+/// The network key changes this often.
+pub const NETWORK_KEY_LIFE_MS: i64 = 7 * 24 * 3600 * 1000;
+/// After a rotation the old location is still looked at for this long, for contacts who were
+/// away and do not know the new one yet.
+pub const OLD_LOCATION_LIFE_MS: i64 = 90 * 24 * 3600 * 1000;
 
-pub fn load_or_create(dir: &Path) -> anyhow::Result<SecretKey> {
-    let path = dir.join(KEY_FILE);
-    if let Ok(bytes) = std::fs::read(&path) {
-        let bytes: [u8; 32] = bytes
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("{} is damaged", path.display()))?;
-        return Ok(SecretKey::from_bytes(&bytes));
+/// Base of the links people share. Chat apps do not make `whatsmine://` clickable, and what comes
+/// after the `#` never reaches the web server.
+pub const LINK_BASE: &str = "https://fidderr.github.io/whatsmine/add#";
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Identity {
+    entropy: [u8; 16],
+    network: [u8; 32],
+    network_since: Millis,
+    pub location: [u8; 32],
+    /// Earlier location secrets, and until when they are looked at.
+    pub old_locations: Vec<([u8; 32], Millis)>,
+}
+
+impl Identity {
+    pub fn load_or_create(db: &Database) -> anyhow::Result<Self> {
+        if let Some(bytes) = db.secret(SECRET_NAME) {
+            return postcard::from_bytes(&bytes)
+                .map_err(|e| anyhow::anyhow!("the stored identity is damaged: {e}"));
+        }
+        let identity = Self::from_entropy(random());
+        identity.save(db)?;
+        Ok(identity)
     }
-    let key = SecretKey::generate();
-    std::fs::write(&path, key.to_bytes())?;
-    Ok(key)
+
+    fn from_entropy(entropy: [u8; 16]) -> Self {
+        Self {
+            entropy,
+            network: random(),
+            network_since: now_ms(),
+            location: random(),
+            old_locations: Vec::new(),
+        }
+    }
+
+    pub fn save(&self, db: &Database) -> anyhow::Result<()> {
+        db.set_secret(SECRET_NAME, &postcard::to_stdvec(self)?)?;
+        Ok(())
+    }
+
+    pub fn person(&self) -> SecretKey {
+        SecretKey::from_bytes(&blake3::derive_key(
+            "whatsmine person key v1",
+            &self.entropy,
+        ))
+    }
+
+    pub fn network(&self) -> SecretKey {
+        SecretKey::from_bytes(&self.network)
+    }
+
+    /// The 12 words that bring this person key back.
+    pub fn recovery_words(&self) -> Vec<String> {
+        bip39::Mnemonic::from_entropy(&self.entropy)
+            .expect("16 bytes make 12 words")
+            .words()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// The same person again, from the words: new network key and location, since whoever had
+    /// the old device may still have those.
+    pub fn from_words(words: &str) -> anyhow::Result<Self> {
+        let mnemonic: bip39::Mnemonic = words
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase()
+            .parse()
+            .map_err(|e| anyhow::anyhow!("those words do not fit: {e}"))?;
+        let entropy: [u8; 16] = mnemonic
+            .to_entropy()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("12 words are needed"))?;
+        Ok(Self::from_entropy(entropy))
+    }
+
+    /// A new network key once the old one has served its time. True if it changed.
+    pub fn network_due(&mut self, now: Millis) -> bool {
+        if now - self.network_since < NETWORK_KEY_LIFE_MS {
+            return false;
+        }
+        self.rotate_network(now);
+        true
+    }
+
+    pub fn rotate_network(&mut self, now: Millis) {
+        self.network = random();
+        self.network_since = now;
+    }
+
+    /// A new location secret. The old one is still looked at for a while, never published to.
+    pub fn rotate_location(&mut self, now: Millis) {
+        self.old_locations
+            .push((self.location, now + OLD_LOCATION_LIFE_MS));
+        self.old_locations.retain(|(_, until)| *until > now);
+        self.location = random();
+    }
 }
 
 /// How a key is shown and shared: z-base-32, 52 lowercase characters chosen
@@ -28,12 +131,10 @@ pub fn key_to_string(key: &PublicKey) -> String {
     key.to_z32()
 }
 
-/// Parses a key someone pasted. Accepts z-base-32 or hex, ignores spaces,
-/// dashes and a `whatsmine:` prefix.
+/// Parses a person's key. Accepts z-base-32 or hex, ignores spaces and dashes.
 pub fn parse_key(input: &str) -> Option<PublicKey> {
     let s: String = input
         .trim()
-        .trim_start_matches("whatsmine:")
         .chars()
         .filter(|c| !c.is_whitespace() && *c != '-')
         .collect::<String>()
@@ -44,143 +145,174 @@ pub fn parse_key(input: &str) -> Option<PublicKey> {
     PublicKey::from_z32(&s).ok()
 }
 
-/// Someone's invitation: their key and, if the link carried it, their name.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Someone's invitation: who, and how to leave them a request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Invite {
-    pub key: PublicKey,
-    pub name: Option<String>,
+    pub person: [u8; 32],
+    pub name: String,
+    /// Where requests are left in the DHT.
+    pub drop_secret: [u8; 32],
+    /// What requests are sealed to.
+    pub box_key: [u8; 32],
+    /// Whoever scanned this in person: added both ways without asking.
+    pub met_token: Option<[u8; 16]>,
 }
 
-/// The link that adds you: `whatsmine://add/<key>?n=<name>`. Opening it
-/// (or scanning it as a QR code) offers to add you.
-pub fn invite_link(key: &str, name: &str) -> String {
-    let name = name.trim();
-    if name.is_empty() {
-        format!("whatsmine://add/{key}")
-    } else {
-        format!("whatsmine://add/{key}?n={}", percent_encode(name))
+impl Invite {
+    pub fn key(&self) -> Option<PublicKey> {
+        PublicKey::from_bytes(&self.person).ok()
+    }
+
+    /// The name to show, if it has one.
+    pub fn name(&self) -> Option<&str> {
+        let name = self.name.trim();
+        (!name.is_empty()).then_some(name)
+    }
+
+    fn encoded(&self) -> String {
+        let bytes = postcard::to_stdvec(self).expect("an invite serializes");
+        data_encoding::BASE32_NOPAD.encode(&bytes).to_lowercase()
+    }
+
+    /// The link to share anywhere: opens the app, or a page that says how to get it.
+    pub fn link(&self) -> String {
+        format!("{LINK_BASE}{}", self.encoded())
+    }
+
+    /// What goes in a QR code: smaller than the link, and it is scanned by the app anyway.
+    pub fn qr_text(&self) -> String {
+        format!("whatsmine://add/{}", self.encoded())
     }
 }
 
-/// Finds an invitation in whatever was pasted, scanned or clicked: a link,
-/// `whatsmine:<key>`, a bare key, or a message that contains one of those.
+/// Finds an invitation in whatever was pasted, scanned or clicked: a link, or a message that
+/// contains one.
 pub fn parse_invite(text: &str) -> Option<Invite> {
-    let from_token = |token: &str| -> Option<Invite> {
+    for token in text.split_whitespace() {
         let token = token.trim_matches(|c: char| !c.is_alphanumeric());
-        if let Some(rest) = token
+        let Some(rest) = token
             .strip_prefix("whatsmine://add/")
-            .or_else(|| token.strip_prefix("whatsmine:///add/"))
-        {
-            let (key, query) = rest.split_once('?').unwrap_or((rest, ""));
-            let name = query
-                .split('&')
-                .find_map(|kv| kv.strip_prefix("n="))
-                .map(percent_decode)
-                .map(|n| n.trim().chars().take(64).collect::<String>())
-                .filter(|n| !n.is_empty());
-            return Some(Invite {
-                key: parse_key(key)?,
-                name,
-            });
-        }
-        parse_key(token).map(|key| Invite { key, name: None })
-    };
-    // A link in a message ends at the first space; a key with spaces in it
-    // (as shown on screen) is the whole text.
-    text.split_whitespace()
-        .find_map(|t| t.starts_with("whatsmine:").then(|| from_token(t)).flatten())
-        .or_else(|| from_token(text))
-        .or_else(|| text.split_whitespace().find_map(from_token))
-}
-
-fn percent_encode(s: &str) -> String {
-    let mut out = String::new();
-    for b in s.bytes() {
-        if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
-}
-
-fn percent_decode(s: &str) -> String {
-    let b = s.as_bytes();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'%'
-            && let Some(v) = s
-                .get(i + 1..i + 3)
-                .and_then(|h| u8::from_str_radix(h, 16).ok())
-        {
-            out.push(v);
-            i += 3;
+            .or_else(|| token.split_once("/add#").map(|(_, rest)| rest))
+        else {
             continue;
+        };
+        let upper = rest.to_ascii_uppercase();
+        if let Ok(bytes) = data_encoding::BASE32_NOPAD.decode(upper.as_bytes())
+            && let Ok(invite) = postcard::from_bytes::<Invite>(&bytes)
+            && invite.key().is_some()
+        {
+            return Some(invite);
         }
-        out.push(if b[i] == b'+' { b' ' } else { b[i] });
-        i += 1;
     }
-    String::from_utf8_lossy(&out).into_owned()
+    None
+}
+
+/// Only a key's short form is shown here and there.
+pub fn short_handle(name: &str, person: &PublicKey) -> String {
+    const LETTERS: &[u8] = b"abcdefghjkmnpqrstuvwxyz23456789";
+    let hash = blake3::derive_key("whatsmine handle v1", person.as_bytes());
+    let code: String = hash[..6]
+        .iter()
+        .map(|b| LETTERS[*b as usize % LETTERS.len()] as char)
+        .collect();
+    let first: String = name
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(12)
+        .collect::<String>()
+        .to_lowercase();
+    if first.is_empty() {
+        code
+    } else {
+        format!("{first}-{code}")
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn identity_persists() {
-        let dir = tempfile::tempdir().unwrap();
-        let a = load_or_create(dir.path()).unwrap();
-        let b = load_or_create(dir.path()).unwrap();
-        assert_eq!(a.public(), b.public());
+    fn invite() -> Invite {
+        Invite {
+            person: SecretKey::generate().public().as_bytes().to_owned(),
+            name: "Roy".into(),
+            drop_secret: random(),
+            box_key: random(),
+            met_token: None,
+        }
     }
 
     #[test]
-    fn invites_round_trip_and_are_found_in_text() {
-        let key = SecretKey::generate().public();
-        let z = key_to_string(&key);
-        let link = invite_link(&z, "Zoë & co");
-        assert!(link.starts_with("whatsmine://add/"));
-        let got = parse_invite(&link).unwrap();
-        assert_eq!(got.key, key);
-        assert_eq!(got.name.as_deref(), Some("Zoë & co"));
-        // Inside a message, with punctuation around it.
-        let msg = format!("hey, add me: {link}.\nthanks!");
-        let found = parse_invite(&msg).unwrap();
-        assert_eq!((found.key, found.name.as_deref()), (key, Some("Zoë & co")));
-        // Older forms still work.
-        assert_eq!(parse_invite(&format!("whatsmine:{z}")).unwrap().name, None);
-        assert_eq!(parse_invite(&z).unwrap().key, key);
-        assert_eq!(parse_invite(&invite_link(&z, "")).unwrap().name, None);
-        assert!(parse_invite("whatsmine://add/nonsense").is_none());
-        assert!(parse_invite("just words").is_none());
+    fn links_and_qr_codes_come_back_as_they_went() {
+        let i = invite();
+        assert_eq!(parse_invite(&i.link()), Some(i.clone()));
+        assert_eq!(parse_invite(&i.qr_text()), Some(i.clone()));
+        let text = format!("Add me: {} thanks!", i.link());
+        assert_eq!(parse_invite(&text), Some(i.clone()));
+        assert_eq!(parse_invite("nothing here"), None);
+        assert_eq!(parse_invite("whatsmine://add/notbase32!!"), None);
+        assert_eq!(i.name(), Some("Roy"));
     }
 
     #[test]
-    fn parse_accepts_z32_hex_and_noise() {
+    fn a_met_token_makes_it_through_a_qr_code() {
+        let mut i = invite();
+        i.met_token = Some(random());
+        assert_eq!(parse_invite(&i.qr_text()).unwrap().met_token, i.met_token);
+    }
+
+    #[test]
+    fn the_words_bring_back_the_person_and_nothing_else() {
+        let first = Identity::from_entropy(random());
+        let words = first.recovery_words();
+        assert_eq!(words.len(), 12);
+        let back = Identity::from_words(&words.join("  ").to_uppercase()).unwrap();
+        assert_eq!(back.person().public(), first.person().public());
+        assert_ne!(back.network, first.network);
+        assert_ne!(back.location, first.location);
+        assert!(Identity::from_words("not the right words").is_err());
+    }
+
+    #[test]
+    fn the_network_key_rotates_when_it_is_time() {
+        let mut me = Identity::from_entropy(random());
+        let (network, person) = (me.network, me.person().public());
+        let since = me.network_since;
+        assert!(!me.network_due(since + NETWORK_KEY_LIFE_MS - 1));
+        assert_eq!(me.network, network);
+        assert!(me.network_due(since + NETWORK_KEY_LIFE_MS));
+        assert_ne!(me.network, network);
+        assert_eq!(me.person().public(), person);
+    }
+
+    #[test]
+    fn an_old_location_is_kept_for_a_while_then_goes() {
+        let mut me = Identity::from_entropy(random());
+        let first = me.location;
+        me.rotate_location(1000);
+        assert_ne!(me.location, first);
+        assert_eq!(me.old_locations, vec![(first, 1000 + OLD_LOCATION_LIFE_MS)]);
+        me.rotate_location(1000 + OLD_LOCATION_LIFE_MS + 1);
+        assert_eq!(me.old_locations.len(), 1);
+        assert_ne!(me.old_locations[0].0, first);
+    }
+
+    #[test]
+    fn the_identity_survives_the_database() {
+        let db = Database::open_in_memory().unwrap();
+        let first = Identity::load_or_create(&db).unwrap();
+        let again = Identity::load_or_create(&db).unwrap();
+        assert_eq!(first.person().public(), again.person().public());
+        assert_eq!(first.location, again.location);
+    }
+
+    #[test]
+    fn handles_are_short_stable_and_show_the_name() {
         let key = SecretKey::generate().public();
-        let z = key_to_string(&key);
-        assert_eq!(z.len(), 52);
-        assert_eq!(parse_key(&z), Some(key));
-        assert_eq!(
-            parse_key(&format!("  whatsmine:{}  ", z.to_uppercase())),
-            Some(key)
-        );
-        let spaced: String = z
-            .chars()
-            .enumerate()
-            .flat_map(|(i, c)| {
-                if i > 0 && i % 4 == 0 {
-                    vec![' ', c]
-                } else {
-                    vec![c]
-                }
-            })
-            .collect();
-        assert_eq!(parse_key(&spaced), Some(key));
-        assert_eq!(parse_key(&key.to_string()), Some(key));
-        assert_eq!(parse_key("hello"), None);
+        let handle = short_handle("Roy!", &key);
+        assert_eq!(handle, short_handle("Roy!", &key));
+        assert!(handle.starts_with("roy-"));
+        assert_eq!(handle.len(), "roy-".len() + 6);
+        assert_eq!(short_handle("", &key).len(), 6);
     }
 }

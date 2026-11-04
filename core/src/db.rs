@@ -4,7 +4,7 @@
 //! open-with-recovery (a corrupt file is quarantined, not deleted).
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
@@ -12,23 +12,51 @@ use crate::model::{
     Attachment, ChatSummary, Contact, ContactKind, ContactState, Message, MessageStatus, Millis,
     Settings, TransferState, now_ms,
 };
+use crate::model::{ContactKeys, MyInvite};
 use crate::protocol::GroupState;
+use crate::vault::Vault;
 
-const CURRENT_VERSION: u32 = 4;
+const CURRENT_VERSION: u32 = 5;
 
-/// v3 → v4: a chat can be hidden (deleted from the chat list while the
-/// contact stays; a new message brings it back), pinned, or muted.
-const MIGRATE_V4: &str = "
-ALTER TABLE contacts ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE contacts ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE contacts ADD COLUMN muted  INTEGER NOT NULL DEFAULT 0;
-";
-
-/// v2 → v3: groups. A group is a row in `contacts` (kind 'group') so chats,
-/// messages, drafts and unread counts work unchanged; the rest lives here.
-const MIGRATE_V3: &str = "
-ALTER TABLE contacts ADD COLUMN kind TEXT NOT NULL DEFAULT 'person';
-ALTER TABLE messages ADD COLUMN sender TEXT;
+/// The clean start of this generation removed everything older, so there is one schema. Sealed
+/// with the vault: names, message text, attachment details, drafts, settings, keys.
+const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS settings (
+    id   INTEGER PRIMARY KEY CHECK (id = 1),
+    data BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS contacts (
+    id             TEXT PRIMARY KEY,
+    their_name     BLOB,
+    nickname       BLOB,
+    state          TEXT NOT NULL,
+    last_seen      INTEGER,
+    created_at     INTEGER NOT NULL,
+    last_activity  INTEGER NOT NULL,
+    avatar         TEXT,
+    kind           TEXT NOT NULL DEFAULT 'person',
+    hidden         INTEGER NOT NULL DEFAULT 0,
+    pinned         INTEGER NOT NULL DEFAULT 0,
+    muted          INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS messages (
+    id                 TEXT PRIMARY KEY,
+    contact_id         TEXT NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+    outgoing           INTEGER NOT NULL,
+    body               BLOB NOT NULL,
+    sent_at            INTEGER NOT NULL,
+    received_at        INTEGER NOT NULL,
+    status             INTEGER NOT NULL DEFAULT 0,
+    read               INTEGER NOT NULL DEFAULT 0,
+    read_receipt_sent  INTEGER NOT NULL DEFAULT 0,
+    attachment         BLOB,
+    sender             TEXT
+);
+CREATE INDEX IF NOT EXISTS messages_by_contact ON messages(contact_id, sent_at);
+CREATE TABLE IF NOT EXISTS drafts (
+    contact_id TEXT PRIMARY KEY REFERENCES contacts(id) ON DELETE CASCADE,
+    text       BLOB NOT NULL
+);
 CREATE TABLE IF NOT EXISTS groups (
     id       TEXT PRIMARY KEY REFERENCES contacts(id) ON DELETE CASCADE,
     admin    TEXT NOT NULL,
@@ -49,43 +77,30 @@ CREATE TABLE IF NOT EXISTS group_acks (
     status     INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (message_id, member_id)
 );
-";
-
-/// v1 → v2: attachments (JSON) on messages, profile pictures on contacts.
-const MIGRATE_V2: &str = "
-ALTER TABLE messages ADD COLUMN attachment TEXT;
-ALTER TABLE contacts ADD COLUMN avatar TEXT;
-";
-
-const SCHEMA_V1: &str = "
-CREATE TABLE IF NOT EXISTS settings (
-    id   INTEGER PRIMARY KEY CHECK (id = 1),
-    data TEXT NOT NULL
+CREATE TABLE IF NOT EXISTS seen_ids (
+    id TEXT PRIMARY KEY,
+    at INTEGER NOT NULL
 );
-CREATE TABLE IF NOT EXISTS contacts (
-    id             TEXT PRIMARY KEY,
-    their_name     TEXT NOT NULL DEFAULT '',
-    nickname       TEXT,
-    state          TEXT NOT NULL,
-    last_seen      INTEGER,
-    created_at     INTEGER NOT NULL,
-    last_activity  INTEGER NOT NULL
+CREATE TABLE IF NOT EXISTS tombstones (
+    id TEXT PRIMARY KEY,
+    at INTEGER NOT NULL
 );
-CREATE TABLE IF NOT EXISTS messages (
-    id                 TEXT PRIMARY KEY,
-    contact_id         TEXT NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
-    outgoing           INTEGER NOT NULL,
-    body               TEXT NOT NULL,
-    sent_at            INTEGER NOT NULL,
-    received_at        INTEGER NOT NULL,
-    status             INTEGER NOT NULL DEFAULT 0,
-    read               INTEGER NOT NULL DEFAULT 0,
-    read_receipt_sent  INTEGER NOT NULL DEFAULT 0
+CREATE TABLE IF NOT EXISTS secrets (
+    name  TEXT PRIMARY KEY,
+    value BLOB NOT NULL
 );
-CREATE INDEX IF NOT EXISTS messages_by_contact ON messages(contact_id, sent_at);
-CREATE TABLE IF NOT EXISTS drafts (
+CREATE TABLE IF NOT EXISTS olm_sessions (
+    person TEXT PRIMARY KEY,
+    pickle BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS contact_keys (
     contact_id TEXT PRIMARY KEY REFERENCES contacts(id) ON DELETE CASCADE,
-    text       TEXT NOT NULL
+    sealed     BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS invites (
+    id         TEXT PRIMARY KEY,
+    sealed     BLOB NOT NULL,
+    created_at INTEGER NOT NULL
 );
 ";
 
@@ -103,55 +118,47 @@ pub enum DbRecovery {
 
 pub struct Database {
     conn: Mutex<Connection>,
+    vault: Arc<Vault>,
 }
 
 impl Database {
-    pub fn open(path: &Path) -> rusqlite::Result<Self> {
+    pub fn open(path: &Path, vault: Arc<Vault>) -> rusqlite::Result<Self> {
         let conn = Connection::open(path)?;
-        Self::init(conn)
+        Self::init(conn, vault)
     }
 
     pub fn open_in_memory() -> rusqlite::Result<Self> {
-        Self::init(Connection::open_in_memory()?)
+        Self::init(Connection::open_in_memory()?, Arc::new(Vault::in_memory()))
     }
 
-    fn init(conn: Connection) -> rusqlite::Result<Self> {
+    fn init(conn: Connection, vault: Arc<Vault>) -> rusqlite::Result<Self> {
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
-        let version: u32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version < 1 {
-            conn.execute_batch(SCHEMA_V1)?;
-        }
-        if version < 2 {
-            conn.execute_batch(MIGRATE_V2)?;
-        }
-        if version < 3 {
-            conn.execute_batch(MIGRATE_V3)?;
-        }
-        if version < 4 {
-            conn.execute_batch(MIGRATE_V4)?;
-        }
+        conn.execute_batch(SCHEMA)?;
         conn.execute_batch(&format!("PRAGMA user_version = {CURRENT_VERSION}"))?;
         Ok(Self {
             conn: Mutex::new(conn),
+            vault,
         })
     }
 
     /// Opens `path`, recovering from corruption instead of failing.
-    pub fn open_with_recovery(path: &Path) -> (Self, DbRecovery) {
-        if let Ok(db) = Self::open_healthy(path) {
+    pub fn open_with_recovery(path: &Path, vault: Arc<Vault>) -> (Self, DbRecovery) {
+        if let Ok(db) = Self::open_healthy(path, vault.clone()) {
             return (db, DbRecovery::Healthy);
         }
         if let Some(backup) = quarantine(path)
-            && let Ok(db) = Self::open_healthy(path)
+            && let Ok(db) = Self::open_healthy(path, vault.clone())
         {
             return (db, DbRecovery::Recovered { backup });
         }
-        let db = Self::open_in_memory().expect("in-memory SQLite must open");
+        let db = Connection::open_in_memory()
+            .and_then(|conn| Self::init(conn, vault))
+            .expect("in-memory SQLite must open");
         (db, DbRecovery::Volatile)
     }
 
-    fn open_healthy(path: &Path) -> rusqlite::Result<Self> {
-        let db = Self::open(path)?;
+    fn open_healthy(path: &Path, vault: Arc<Vault>) -> rusqlite::Result<Self> {
+        let db = Self::open(path, vault)?;
         let ok: String = db
             .lock()
             .query_row("PRAGMA quick_check", [], |r| r.get(0))?;
@@ -169,7 +176,7 @@ impl Database {
     /// Deletes every row and compacts the file so nothing lingers on disk.
     pub fn wipe(&self) -> rusqlite::Result<()> {
         self.lock().execute_batch(
-            "DELETE FROM drafts; DELETE FROM group_acks; DELETE FROM messages; DELETE FROM group_members; DELETE FROM groups; DELETE FROM contacts;
+            "DELETE FROM tombstones; DELETE FROM secrets; DELETE FROM olm_sessions; DELETE FROM contact_keys; DELETE FROM invites; DELETE FROM seen_ids; DELETE FROM drafts; DELETE FROM group_acks; DELETE FROM messages; DELETE FROM group_members; DELETE FROM groups; DELETE FROM contacts;
              DELETE FROM settings; PRAGMA wal_checkpoint(TRUNCATE); VACUUM;",
         )
     }
@@ -179,21 +186,22 @@ impl Database {
     pub fn settings(&self) -> Settings {
         self.lock()
             .query_row("SELECT data FROM settings WHERE id = 1", [], |r| {
-                r.get::<_, String>(0)
+                r.get::<_, Vec<u8>>(0)
             })
             .optional()
             .ok()
             .flatten()
-            .and_then(|s| serde_json::from_str(&s).ok())
+            .and_then(|sealed| self.vault.open(&sealed))
+            .and_then(|json| serde_json::from_slice(&json).ok())
             .unwrap_or_default()
     }
 
     pub fn save_settings(&self, s: &Settings) -> rusqlite::Result<()> {
-        let json = serde_json::to_string(s).expect("settings serialize");
+        let json = serde_json::to_vec(s).expect("settings serialize");
         self.lock().execute(
             "INSERT INTO settings (id, data) VALUES (1, ?1)
              ON CONFLICT(id) DO UPDATE SET data = excluded.data",
-            params![json],
+            params![self.vault.seal(&json)],
         )?;
         Ok(())
     }
@@ -206,7 +214,7 @@ impl Database {
                 "SELECT id, their_name, nickname, state, last_seen, created_at, avatar, kind, pinned, muted
                  FROM contacts WHERE id = ?1",
                 params![id],
-                contact_from_row,
+                |r| contact_from_row(r, &self.vault),
             )
             .optional()
             .ok()
@@ -227,7 +235,7 @@ impl Database {
                  FROM contacts WHERE {condition} ORDER BY pinned DESC, last_activity DESC"
             ))
             .expect("valid SQL");
-        stmt.query_map([], contact_from_row)
+        stmt.query_map([], |r| contact_from_row(r, &self.vault))
             .map(|rows| {
                 rows.filter_map(Result::ok)
                     .filter(|c| states.contains(&c.state))
@@ -245,11 +253,13 @@ impl Database {
         nickname: Option<&str>,
     ) -> rusqlite::Result<Contact> {
         let now = now_ms();
+        let their_name = their_name.map(|n| self.vault.seal_str(n));
+        let nickname = nickname.map(|n| self.vault.seal_str(n));
         {
             let conn = self.lock();
             conn.execute(
                 "INSERT INTO contacts (id, their_name, nickname, state, created_at, last_activity)
-                 VALUES (?1, COALESCE(?2, ''), ?3, ?4, ?5, ?5)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?5)
                  ON CONFLICT(id) DO UPDATE SET
                     state = excluded.state,
                     their_name = COALESCE(?2, contacts.their_name),
@@ -263,10 +273,13 @@ impl Database {
     }
 
     pub fn set_their_name(&self, id: &str, name: &str) -> bool {
+        if self.contact(id).is_none_or(|c| c.their_name == name) {
+            return false;
+        }
         self.lock()
             .execute(
-                "UPDATE contacts SET their_name = ?2 WHERE id = ?1 AND their_name != ?2",
-                params![id, name],
+                "UPDATE contacts SET their_name = ?2 WHERE id = ?1",
+                params![id, self.vault.seal_str(name)],
             )
             .map(|n| n > 0)
             .unwrap_or(false)
@@ -275,7 +288,7 @@ impl Database {
     pub fn set_nickname(&self, id: &str, nickname: Option<&str>) {
         let _ = self.lock().execute(
             "UPDATE contacts SET nickname = ?2 WHERE id = ?1",
-            params![id, nickname],
+            params![id, nickname.map(|n| self.vault.seal_str(n))],
         );
     }
 
@@ -316,9 +329,18 @@ impl Database {
     }
 
     pub fn clear_chat(&self, id: &str) {
-        let _ = self
-            .lock()
-            .execute("DELETE FROM messages WHERE contact_id = ?1", params![id]);
+        let conn = self.lock();
+        let _ = conn.execute(
+            "INSERT OR IGNORE INTO tombstones (id, at)
+             SELECT id, ?2 FROM messages WHERE contact_id = ?1",
+            params![id, now_ms()],
+        );
+        // Remembered long enough for anything still on its way, and no longer.
+        let _ = conn.execute(
+            "DELETE FROM tombstones WHERE at < ?1",
+            params![now_ms() - 90 * 24 * 3600 * 1000],
+        );
+        let _ = conn.execute("DELETE FROM messages WHERE contact_id = ?1", params![id]);
     }
 
     pub fn chat_summaries(&self) -> Vec<ChatSummary> {
@@ -337,7 +359,7 @@ impl Database {
                              ORDER BY sent_at DESC, id DESC LIMIT 1"
                         ),
                         params![contact.id],
-                        message_from_row,
+                        |r| message_from_row(r, &self.vault),
                     )
                     .optional()
                     .ok()
@@ -362,8 +384,25 @@ impl Database {
     // ---- messages ----
 
     /// Inserts a message. Returns false if a message with this id already exists.
+    /// Stores a message once, ever: also if it was deleted since, a late copy of it stays away.
     pub fn insert_message(&self, m: &Message) -> rusqlite::Result<bool> {
         let conn = self.lock();
+        // Deleted here, and sent again by someone who has not heard it arrived: stays deleted.
+        let deleted: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tombstones WHERE id = ?1)",
+            params![m.id],
+            |r| r.get(0),
+        )?;
+        if deleted {
+            return Ok(false);
+        }
+        let first = conn.execute(
+            "INSERT OR IGNORE INTO seen_ids (id, at) VALUES (?1, ?2)",
+            params![m.id, now_ms()],
+        )?;
+        if first == 0 {
+            return Ok(false);
+        }
         let n = conn.execute(
             "INSERT OR IGNORE INTO messages
              (id, contact_id, outgoing, body, sent_at, received_at, status, read, attachment, sender)
@@ -372,14 +411,14 @@ impl Database {
                 m.id,
                 m.contact_id,
                 m.outgoing,
-                m.body,
+                self.vault.seal_str(&m.body),
                 m.sent_at,
                 m.received_at,
                 m.status as i64,
                 m.read,
-                m.attachment
-                    .as_ref()
-                    .map(|a| serde_json::to_string(a).expect("attachment serializes")),
+                m.attachment.as_ref().map(|a| self
+                    .vault
+                    .seal(&serde_json::to_vec(a).expect("attachment serializes"))),
                 m.sender
             ],
         )?;
@@ -397,7 +436,7 @@ impl Database {
             .query_row(
                 &format!("SELECT {MSG_COLS} FROM messages WHERE id = ?1"),
                 params![id],
-                message_from_row,
+                |r| message_from_row(r, &self.vault),
             )
             .optional()
             .ok()
@@ -417,7 +456,7 @@ impl Database {
         let mut out: Vec<Message> = stmt
             .query_map(
                 params![contact_id, before.unwrap_or(i64::MAX), limit],
-                message_from_row,
+                |r| message_from_row(r, &self.vault),
             )
             .map(|rows| rows.filter_map(Result::ok).collect())
             .unwrap_or_default();
@@ -435,7 +474,7 @@ impl Database {
                  ORDER BY sent_at ASC, id ASC"
             ))
             .expect("valid SQL");
-        stmt.query_map(params![contact_id], message_from_row)
+        stmt.query_map(params![contact_id], |r| message_from_row(r, &self.vault))
             .map(|rows| rows.filter_map(Result::ok).collect())
             .unwrap_or_default()
     }
@@ -446,23 +485,151 @@ impl Database {
     /// goodbye to a group's admin. Who is blocked or deleted is owed nothing.
     pub fn peers_owed(&self) -> Vec<String> {
         let conn = self.lock();
-        let mut stmt = conn
-            .prepare(
-                "SELECT m.contact_id FROM messages m JOIN contacts c ON c.id = m.contact_id
-                 WHERE m.outgoing = 1 AND m.status < 2 AND c.kind = 'person'
-                   AND c.state = 'accepted'
-                   AND (m.attachment IS NULL OR m.attachment NOT LIKE '%\"state\":\"Declined\"%')
-                 UNION
-                 SELECT id FROM contacts WHERE state = 'pending_out'
-                 UNION
-                 SELECT a.member_id FROM group_acks a WHERE a.status < 2
-                 UNION
-                 SELECT g.admin FROM groups g WHERE g.left = 1",
+        let mut owed: Vec<String> = Vec::new();
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT m.contact_id, m.attachment FROM messages m
+             JOIN contacts c ON c.id = m.contact_id
+             WHERE m.outgoing = 1 AND m.status < 2 AND c.kind = 'person' AND c.state = 'accepted'",
+        ) && let Ok(rows) = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<Vec<u8>>>(1)?))
+        }) {
+            for (contact, attachment) in rows.filter_map(Result::ok) {
+                let declined = attachment
+                    .and_then(|sealed| self.vault.open(&sealed))
+                    .and_then(|json| serde_json::from_slice::<Attachment>(&json).ok())
+                    .is_some_and(|a| a.state == TransferState::Declined);
+                if !declined {
+                    owed.push(contact);
+                }
+            }
+        }
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT a.member_id FROM group_acks a WHERE a.status < 2
+             UNION SELECT g.admin FROM groups g WHERE g.left = 1",
+        ) && let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0))
+        {
+            owed.extend(rows.filter_map(Result::ok));
+        }
+        owed.sort();
+        owed.dedup();
+        owed
+    }
+
+    /// Forgets which messages were seen after so long that no copy can still be under way.
+    pub fn forget_old_seen(&self, before: Millis) {
+        let _ = self
+            .lock()
+            .execute("DELETE FROM seen_ids WHERE at < ?1", params![before]);
+    }
+
+    /// A secret kept in the database, sealed.
+    pub fn secret(&self, name: &str) -> Option<Vec<u8>> {
+        let sealed: Vec<u8> = self
+            .lock()
+            .query_row(
+                "SELECT value FROM secrets WHERE name = ?1",
+                params![name],
+                |r| r.get(0),
             )
-            .expect("valid SQL");
-        stmt.query_map([], |row| row.get(0))
-            .map(|rows| rows.filter_map(Result::ok).collect())
+            .optional()
+            .ok()
+            .flatten()?;
+        self.vault.open(&sealed)
+    }
+
+    pub fn set_secret(&self, name: &str, value: &[u8]) -> rusqlite::Result<()> {
+        self.lock().execute(
+            "INSERT INTO secrets (name, value) VALUES (?1, ?2)
+             ON CONFLICT(name) DO UPDATE SET value = excluded.value",
+            params![name, self.vault.seal(value)],
+        )?;
+        Ok(())
+    }
+
+    /// The key that seals an Olm pickle: a purpose of its own.
+    pub fn pickle_key(&self) -> [u8; 32] {
+        self.vault.derive("olm pickles")
+    }
+
+    pub fn olm_session(&self, person: &str) -> Option<Vec<u8>> {
+        self.lock()
+            .query_row(
+                "SELECT pickle FROM olm_sessions WHERE person = ?1",
+                params![person],
+                |r| r.get(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+    }
+
+    pub fn set_olm_session(&self, person: &str, pickle: &[u8]) {
+        let _ = self.lock().execute(
+            "INSERT INTO olm_sessions (person, pickle) VALUES (?1, ?2)
+             ON CONFLICT(person) DO UPDATE SET pickle = excluded.pickle",
+            params![person, pickle],
+        );
+    }
+
+    pub fn drop_olm_session(&self, person: &str) {
+        let _ = self.lock().execute(
+            "DELETE FROM olm_sessions WHERE person = ?1",
+            params![person],
+        );
+    }
+
+    /// What we know to reach this contact by.
+    pub fn contact_keys(&self, contact_id: &str) -> Option<ContactKeys> {
+        let sealed: Vec<u8> = self
+            .lock()
+            .query_row(
+                "SELECT sealed FROM contact_keys WHERE contact_id = ?1",
+                params![contact_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .ok()
+            .flatten()?;
+        postcard::from_bytes(&self.vault.open(&sealed)?).ok()
+    }
+
+    pub fn set_contact_keys(&self, contact_id: &str, keys: &ContactKeys) {
+        let bytes = postcard::to_stdvec(keys).expect("keys serialize");
+        let _ = self.lock().execute(
+            "INSERT INTO contact_keys (contact_id, sealed) VALUES (?1, ?2)
+             ON CONFLICT(contact_id) DO UPDATE SET sealed = excluded.sealed",
+            params![contact_id, self.vault.seal(&bytes)],
+        );
+    }
+
+    /// Our invitations, newest first.
+    pub fn invites(&self) -> Vec<MyInvite> {
+        let conn = self.lock();
+        let Ok(mut stmt) = conn.prepare("SELECT sealed FROM invites ORDER BY created_at DESC")
+        else {
+            return Vec::new();
+        };
+        stmt.query_map([], |r| r.get::<_, Vec<u8>>(0))
+            .map(|rows| {
+                rows.filter_map(Result::ok)
+                    .filter_map(|sealed| self.vault.open(&sealed))
+                    .filter_map(|bytes| postcard::from_bytes(&bytes).ok())
+                    .collect()
+            })
             .unwrap_or_default()
+    }
+
+    pub fn save_invite(&self, invite: &MyInvite) {
+        let bytes = postcard::to_stdvec(invite).expect("invite serializes");
+        let _ = self.lock().execute(
+            "INSERT INTO invites (id, sealed, created_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(id) DO UPDATE SET sealed = excluded.sealed",
+            params![invite.id, self.vault.seal(&bytes), invite.created_at],
+        );
+    }
+
+    pub fn delete_invites(&self) {
+        let _ = self.lock().execute("DELETE FROM invites", []);
     }
 
     pub fn advance_status(&self, contact_id: &str, id: &str, status: MessageStatus) -> bool {
@@ -518,17 +685,20 @@ impl Database {
     }
 
     pub fn delete_message(&self, id: &str) {
-        let _ = self
-            .lock()
-            .execute("DELETE FROM messages WHERE id = ?1", params![id]);
+        let conn = self.lock();
+        let _ = conn.execute(
+            "INSERT OR IGNORE INTO tombstones (id, at) VALUES (?1, ?2)",
+            params![id, now_ms()],
+        );
+        let _ = conn.execute("DELETE FROM messages WHERE id = ?1", params![id]);
     }
 
     /// Replaces a message's attachment metadata.
     pub fn set_attachment(&self, id: &str, a: &Attachment) {
-        let json = serde_json::to_string(a).expect("attachment serializes");
+        let json = serde_json::to_vec(a).expect("attachment serializes");
         let _ = self.lock().execute(
             "UPDATE messages SET attachment = ?2 WHERE id = ?1",
-            params![id, json],
+            params![id, self.vault.seal(&json)],
         );
     }
 
@@ -579,13 +749,16 @@ impl Database {
             .optional()
             .ok()
             .flatten()?;
-        let name: String = conn
+        let name: Option<Vec<u8>> = conn
             .query_row(
                 "SELECT their_name FROM contacts WHERE id = ?1",
                 params![id],
                 |r| r.get(0),
             )
             .ok()?;
+        let name = name
+            .map(|sealed| self.vault.open_str(&sealed))
+            .unwrap_or_default();
         let mut members: Vec<String> = conn
             .prepare("SELECT member_id FROM group_members WHERE group_id = ?1")
             .and_then(|mut s| {
@@ -624,7 +797,7 @@ impl Database {
             "INSERT INTO contacts (id, their_name, state, created_at, last_activity, kind)
              VALUES (?1, ?2, 'accepted', ?3, ?3, 'group')
              ON CONFLICT(id) DO UPDATE SET their_name = excluded.their_name",
-            params![state.id, state.name, now],
+            params![state.id, self.vault.seal_str(&state.name), now],
         )?;
         conn.execute(
             "INSERT INTO groups (id, admin, version, closed, active, sig)
@@ -659,13 +832,22 @@ impl Database {
                     "INSERT OR IGNORE INTO contacts
                         (id, their_name, state, created_at, last_activity, kind)
                      VALUES (?1, ?2, 'group_peer', ?3, ?3, 'person')",
-                    params![m, name, now],
+                    params![m, self.vault.seal_str(name), now],
                 )?;
                 if !name.is_empty() {
-                    conn.execute(
-                        "UPDATE contacts SET their_name = ?2 WHERE id = ?1 AND their_name = ''",
-                        params![m, name],
-                    )?;
+                    let known: Option<Vec<u8>> = conn
+                        .query_row(
+                            "SELECT their_name FROM contacts WHERE id = ?1",
+                            params![m],
+                            |r| r.get(0),
+                        )
+                        .unwrap_or(None);
+                    if known.is_none_or(|sealed| self.vault.open_str(&sealed).is_empty()) {
+                        conn.execute(
+                            "UPDATE contacts SET their_name = ?2 WHERE id = ?1",
+                            params![m, self.vault.seal_str(name)],
+                        )?;
+                    }
                 }
             }
         }
@@ -810,7 +992,7 @@ impl Database {
                  ORDER BY sent_at ASC, id ASC"
             ))
             .expect("valid SQL");
-        stmt.query_map(params![member], message_from_row)
+        stmt.query_map(params![member], |r| message_from_row(r, &self.vault))
             .map(|rows| rows.filter_map(Result::ok).collect())
             .unwrap_or_default()
     }
@@ -834,7 +1016,7 @@ impl Database {
                  ORDER BY sent_at ASC, id ASC"
             ))
             .expect("valid SQL");
-        stmt.query_map(params![group_id], message_from_row)
+        stmt.query_map(params![group_id], |r| message_from_row(r, &self.vault))
             .map(|rows| rows.filter_map(Result::ok).collect())
             .unwrap_or_default()
     }
@@ -846,8 +1028,9 @@ impl Database {
             .query_row(
                 "SELECT text FROM drafts WHERE contact_id = ?1",
                 params![contact_id],
-                |r| r.get(0),
+                |r| r.get::<_, Vec<u8>>(0),
             )
+            .map(|sealed| self.vault.open_str(&sealed))
             .unwrap_or_default()
     }
 
@@ -862,7 +1045,7 @@ impl Database {
             conn.execute(
                 "INSERT INTO drafts (contact_id, text) VALUES (?1, ?2)
                  ON CONFLICT(contact_id) DO UPDATE SET text = excluded.text",
-                params![contact_id, text],
+                params![contact_id, self.vault.seal_str(text)],
             )
         };
     }
@@ -871,11 +1054,16 @@ impl Database {
 const MSG_COLS: &str =
     "id, contact_id, outgoing, body, sent_at, received_at, status, read, attachment, sender";
 
-fn contact_from_row(r: &Row<'_>) -> rusqlite::Result<Contact> {
+fn contact_from_row(r: &Row<'_>, vault: &Vault) -> rusqlite::Result<Contact> {
     Ok(Contact {
         id: r.get(0)?,
-        their_name: r.get(1)?,
-        nickname: r.get(2)?,
+        their_name: r
+            .get::<_, Option<Vec<u8>>>(1)?
+            .map(|sealed| vault.open_str(&sealed))
+            .unwrap_or_default(),
+        nickname: r
+            .get::<_, Option<Vec<u8>>>(2)?
+            .map(|sealed| vault.open_str(&sealed)),
         state: ContactState::parse(&r.get::<_, String>(3)?),
         last_seen: r.get(4)?,
         created_at: r.get(5)?,
@@ -886,18 +1074,20 @@ fn contact_from_row(r: &Row<'_>) -> rusqlite::Result<Contact> {
     })
 }
 
-fn message_from_row(r: &Row<'_>) -> rusqlite::Result<Message> {
-    let attachment: Option<String> = r.get(8)?;
+fn message_from_row(r: &Row<'_>, vault: &Vault) -> rusqlite::Result<Message> {
+    let attachment: Option<Vec<u8>> = r.get(8)?;
     Ok(Message {
         id: r.get(0)?,
         contact_id: r.get(1)?,
         outgoing: r.get(2)?,
-        body: r.get(3)?,
+        body: vault.open_str(&r.get::<_, Vec<u8>>(3)?),
         sent_at: r.get(4)?,
         received_at: r.get(5)?,
         status: MessageStatus::from_i64(r.get(6)?),
         read: r.get(7)?,
-        attachment: attachment.and_then(|s| serde_json::from_str(&s).ok()),
+        attachment: attachment
+            .and_then(|sealed| vault.open(&sealed))
+            .and_then(|json| serde_json::from_slice(&json).ok()),
         sender: r.get(9)?,
     })
 }
@@ -937,7 +1127,7 @@ mod tests {
     }
 
     #[test]
-    fn attachments_round_trip_and_migration_upgrades_a_v1_file() {
+    fn attachments_round_trip() {
         let db = Database::open_in_memory().unwrap();
         db.upsert_contact("k", ContactState::Accepted, None, None)
             .unwrap();
@@ -963,90 +1153,6 @@ mod tests {
         );
         db.set_avatar("k", Some("/x/k.jpg"));
         assert_eq!(db.contact("k").unwrap().avatar.as_deref(), Some("/x/k.jpg"));
-
-        // A database written by the previous version (schema v1) upgrades in place.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("old.db");
-        {
-            let conn = Connection::open(&path).unwrap();
-            conn.execute_batch(SCHEMA_V1).unwrap();
-            conn.execute_batch("PRAGMA user_version = 1").unwrap();
-            conn.execute(
-                "INSERT INTO contacts (id, state, created_at, last_activity) VALUES ('c', 'accepted', 1, 1)",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO messages (id, contact_id, outgoing, body, sent_at, received_at) VALUES ('m', 'c', 1, 'hoi', 1, 1)",
-                [],
-            )
-            .unwrap();
-        }
-        let db = Database::open(&path).unwrap();
-        let old = db.message("m").unwrap();
-        assert_eq!((old.body.as_str(), old.attachment), ("hoi", None));
-        assert_eq!(db.contact("c").unwrap().avatar, None);
-    }
-
-    #[test]
-    fn a_v2_database_upgrades_to_groups_without_losing_anything() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("v2.db");
-        {
-            let conn = Connection::open(&path).unwrap();
-            conn.execute_batch(SCHEMA_V1).unwrap();
-            conn.execute_batch(MIGRATE_V2).unwrap();
-            conn.execute_batch("PRAGMA user_version = 2").unwrap();
-            conn.execute(
-                "INSERT INTO contacts (id, their_name, state, created_at, last_activity) VALUES ('c', 'Cleo', 'accepted', 1, 1)",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO messages (id, contact_id, outgoing, body, sent_at, received_at) VALUES ('m', 'c', 0, 'hoi', 1, 1)",
-                [],
-            )
-            .unwrap();
-        }
-        let db = Database::open(&path).unwrap();
-        let c = db.contact("c").unwrap();
-        assert_eq!(
-            (c.kind, c.state),
-            (ContactKind::Person, ContactState::Accepted)
-        );
-        let m = db.message("m").unwrap();
-        assert_eq!((m.body.as_str(), m.sender), ("hoi", None));
-        // Groups work on the upgraded file.
-        let state = GroupState {
-            id: "g:1".into(),
-            name: "Team".into(),
-            admin: "me".into(),
-            version: 1,
-            members: vec!["c".into(), "me".into(), "x".into()],
-            closed: false,
-        };
-        db.save_group(
-            &state,
-            &[1, 2],
-            true,
-            &[("x".into(), "Xander".into())],
-            "me",
-        )
-        .unwrap();
-        assert_eq!(db.group("g:1").unwrap().0, state);
-        assert_eq!(db.contact("x").unwrap().state, ContactState::GroupPeer);
-        assert_eq!(db.contact("x").unwrap().their_name, "Xander");
-        assert_eq!(db.contact("g:1").unwrap().kind, ContactKind::Group);
-        assert!(db.is_group_member("g:1", "x"));
-        assert_eq!(db.groups_with_member("x"), vec!["g:1".to_string()]);
-        db.set_group_active("g:1", false);
-        assert!(
-            !db.is_group_member("g:1", "x"),
-            "inactive groups have no live members"
-        );
-        db.delete_group("g:1");
-        assert!(db.contact("x").is_none(), "group peers go with the group");
-        assert!(db.contact("c").is_some());
     }
 
     #[test]
@@ -1155,7 +1261,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("whatsmine.db");
         std::fs::write(&path, b"this is not a sqlite database at all, just junk").unwrap();
-        let (db, rec) = Database::open_with_recovery(&path);
+        let (db, rec) = Database::open_with_recovery(&path, Arc::new(Vault::in_memory()));
         match rec {
             DbRecovery::Recovered { backup } => assert!(backup.exists()),
             other => panic!("expected Recovered, got {other:?}"),

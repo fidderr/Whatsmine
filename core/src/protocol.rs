@@ -2,16 +2,18 @@
 //!
 //! One QUIC bi-directional stream per connection carries length-prefixed
 //! `postcard` frames: a 4-byte big-endian length, then the encoded [`Frame`].
-//! The transport (iroh/QUIC with TLS) already encrypts and authenticates
-//! both ends, so frames carry no keys or signatures of their own.
+//!
+//! The first frame each way proves who is there ([`Frame::Auth`]). After that only
+//! [`Frame::Sealed`] counts: everything else is sealed end to end inside it, so what the
+//! transport encrypts is encrypted twice, and a message can also travel another way.
 
 use iroh::endpoint::{RecvStream, SendStream};
 use serde::{Deserialize, Serialize};
 
 /// ALPN for this protocol. Bump the suffix on incompatible changes.
-pub const ALPN: &[u8] = b"whatsmine/1";
+pub const ALPN: &[u8] = b"whatsmine/2";
 
-pub const PROTO_VERSION: u16 = 1;
+pub const PROTO_VERSION: u16 = 2;
 
 /// Upper bound for one frame, to stop a peer from making us allocate wildly.
 pub const MAX_FRAME: usize = 256 * 1024;
@@ -21,21 +23,33 @@ pub const MAX_TEXT: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Frame {
-    /// Always the first frame on a connection, in both directions.
+    /// The very first frame each way: who is here, proven with the person key over this very
+    /// connection, and what it takes to start an encrypted session with them.
+    Auth {
+        person: [u8; 32],
+        curve: [u8; 32],
+        one_time: [u8; 32],
+        sig: Vec<u8>,
+    },
+    /// Everything after that, end to end. Inside is one encoded [`Frame`].
+    Sealed {
+        kind: u8,
+        bytes: Vec<u8>,
+    },
+    /// "I cannot read what you sealed": start the session over, and send it again.
+    NeedSession,
+    /// The first frame inside the seal, in both directions.
     Hello {
         version: u16,
         name: String,
         /// Whether the sender agrees to have their last seen shown.
         share_last_seen: bool,
     },
-    /// "Please add me as a contact."
-    Request {
-        name: String,
-    },
-    /// "I accept you as a contact." Sent on every connection while accepted,
-    /// so a peer that missed it catches up.
+    /// "I accept you as a contact", and how to find me. Sent on every connection while accepted,
+    /// so a peer that missed it, or an earlier location of mine, catches up.
     Accept {
         name: String,
+        location: [u8; 32],
     },
     Msg {
         id: [u8; 16],
@@ -49,10 +63,6 @@ pub enum Frame {
         ids: Vec<[u8; 16]>,
     },
     Typing,
-    /// Not sent any more: QUIC has its own heartbeat. A peer that stays silent longer than a time-out was
-    /// treated as gone, so "online" stops showing within seconds when an app
-    /// is killed without closing its connection.
-    Ping,
     /// Our profile picture (JPEG, at most [`MAX_AVATAR`] bytes), or `None`
     /// to remove it. Sent on every session start and when it changes.
     Profile {
@@ -108,6 +118,8 @@ pub enum Frame {
         sig: Vec<u8>,
         /// Display names (key, name) for members the receiver may not know.
         names: Vec<(String, String)>,
+        /// What the members find each other with. A new one when someone is removed.
+        secret: [u8; 32],
     },
     /// "I am leaving this group."
     GroupLeave {
@@ -227,9 +239,9 @@ mod tests {
                 name: "Roy 🦀".into(),
                 share_last_seen: false,
             },
-            Frame::Request { name: "x".into() },
             Frame::Accept {
                 name: String::new(),
+                location: [7; 32],
             },
             Frame::Msg {
                 id: [7; 16],
@@ -242,7 +254,6 @@ mod tests {
                 ids: vec![[1; 16], [2; 16]],
             },
             Frame::Typing,
-            Frame::Ping,
             Frame::Profile {
                 avatar: Some(vec![0xff, 0xd8, 1, 2]),
             },
@@ -278,6 +289,7 @@ mod tests {
                 },
                 sig: vec![1; 64],
                 names: vec![("b".into(), "Bob".into())],
+                secret: [9; 32],
             },
             Frame::GroupLeave {
                 group: "g:1".into(),

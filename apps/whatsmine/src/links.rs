@@ -38,7 +38,11 @@ pub fn InviteDialog() -> Element {
         return rsx! {};
     };
 
-    let key = key_to_string(&invite.key);
+    let Some(person) = invite.key() else {
+        return rsx! {};
+    };
+    let key = key_to_string(&person);
+    let invite_text = invite.link();
     let me = core.my_key() == key;
     let known = core
         .contact(&key)
@@ -47,8 +51,8 @@ pub fn InviteDialog() -> Element {
         .contact(&key)
         .is_some_and(|c| c.state == ContactState::Blocked);
     let name = invite
-        .name
-        .clone()
+        .name()
+        .map(str::to_owned)
         .or_else(|| core.contact(&key).map(|c| c.display_name()))
         .unwrap_or_else(|| t(&tr, "invite.someone"));
 
@@ -99,7 +103,7 @@ pub fn InviteDialog() -> Element {
                             class: "btn-confirm",
                             onclick: move |_| {
                                 sig.set(None);
-                                match add_core.add_contact(&add_key, add_name.as_deref()) {
+                                match add_core.add_contact(&invite_text, (!add_name.is_empty()).then_some(add_name.as_str())) {
                                     Ok(c) => {
                                         nav.push(Route::Chat { id: c.id });
                                     }

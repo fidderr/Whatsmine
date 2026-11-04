@@ -212,7 +212,7 @@ mod tests {
     #[tokio::test]
     async fn seeding_leaves_chats_requests_and_a_group() {
         let dir = tempfile::tempdir().unwrap();
-        let lookup = iroh::address_lookup::MemoryLookup::new();
+        let lookup = crate::records::LocalRecords::default();
         let core = Core::start(dir.path(), NetMode::Local(lookup)).unwrap();
         core.seed_demo().unwrap();
         let chats = core.chats();

@@ -17,6 +17,11 @@ pub fn new_group_id() -> String {
     format!("{GROUP_ID_PREFIX}{}", uuid::Uuid::now_v7())
 }
 
+/// Where a group's secret is kept.
+pub fn secret_name(id: &str) -> String {
+    format!("group:{id}")
+}
+
 /// Is this a plausible group id (as opposed to a key)?
 pub fn is_group_id(id: &str) -> bool {
     id.starts_with(GROUP_ID_PREFIX) && id.len() <= 64

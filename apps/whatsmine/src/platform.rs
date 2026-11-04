@@ -19,6 +19,87 @@ pub fn safe_area_style() -> String {
     String::new()
 }
 
+/// The key that seals everything on disk is held by the system: the Android Keystore, or
+/// Windows' DPAPI. A copied folder is then no stolen identity and no readable chats.
+pub fn install_key_protector() {
+    #[cfg(target_os = "android")]
+    whatsmine_core::vault::set_protector(whatsmine_core::vault::KeyProtector {
+        wrap: mobile_sentinel::secure_storage::wrap,
+        unwrap: mobile_sentinel::secure_storage::unwrap,
+    });
+    #[cfg(windows)]
+    whatsmine_core::vault::set_protector(whatsmine_core::vault::KeyProtector {
+        wrap: dpapi::protect,
+        unwrap: dpapi::unprotect,
+    });
+}
+
+#[cfg(windows)]
+mod dpapi {
+    use windows_sys::Win32::Foundation::{HLOCAL, LocalFree};
+    use windows_sys::Win32::Security::Cryptography::{
+        CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData, CryptUnprotectData,
+    };
+
+    fn blob(bytes: &[u8]) -> CRYPT_INTEGER_BLOB {
+        CRYPT_INTEGER_BLOB {
+            cbData: bytes.len() as u32,
+            pbData: bytes.as_ptr().cast_mut(),
+        }
+    }
+
+    fn take(out: CRYPT_INTEGER_BLOB) -> Vec<u8> {
+        // SAFETY: Windows gave us this buffer of this length, and it is ours to free.
+        unsafe {
+            let bytes = std::slice::from_raw_parts(out.pbData, out.cbData as usize).to_vec();
+            LocalFree(out.pbData as HLOCAL);
+            bytes
+        }
+    }
+
+    pub fn protect(secret: &[u8]) -> Option<Vec<u8>> {
+        let input = blob(secret);
+        let mut out = CRYPT_INTEGER_BLOB {
+            cbData: 0,
+            pbData: std::ptr::null_mut(),
+        };
+        // SAFETY: the input outlives the call, and the output is written by Windows.
+        let ok = unsafe {
+            CryptProtectData(
+                &input,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                CRYPTPROTECT_UI_FORBIDDEN,
+                &mut out,
+            )
+        };
+        (ok != 0).then(|| take(out))
+    }
+
+    pub fn unprotect(wrapped: &[u8]) -> Option<Vec<u8>> {
+        let input = blob(wrapped);
+        let mut out = CRYPT_INTEGER_BLOB {
+            cbData: 0,
+            pbData: std::ptr::null_mut(),
+        };
+        // SAFETY: the input outlives the call, and the output is written by Windows.
+        let ok = unsafe {
+            CryptUnprotectData(
+                &input,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                CRYPTPROTECT_UI_FORBIDDEN,
+                &mut out,
+            )
+        };
+        (ok != 0).then(|| take(out))
+    }
+}
+
 /// Whether the system is set to dark.
 pub fn system_dark() -> bool {
     #[cfg(target_os = "android")]
@@ -102,6 +183,15 @@ pub fn shortened(name: &str, normal: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_gives_a_protected_secret_back() {
+        let wrapped = dpapi::protect(b"a secret").unwrap();
+        assert!(!wrapped.windows(8).any(|w| w == b"a secret"));
+        assert_eq!(dpapi::unprotect(&wrapped).unwrap(), b"a secret");
+        assert_eq!(dpapi::unprotect(b"not protected by anyone"), None);
+    }
 
     #[test]
     fn saved_theme_decides_unless_it_follows_the_system() {

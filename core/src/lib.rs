@@ -18,13 +18,18 @@ mod engine;
 pub mod files;
 pub mod groups;
 pub mod identity;
+pub mod location;
 pub mod model;
 pub mod paths;
 pub mod power;
 pub mod protocol;
+pub mod records;
+pub mod requests;
 pub mod retry;
+pub mod sealing;
 #[cfg(feature = "test-hooks")]
 mod seed;
+pub mod vault;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -41,6 +46,13 @@ pub use model::*;
 use db::Database;
 use engine::{Cmd, Engine, Shared};
 
+/// There is always a main invite: the plain link and the name code stand for it.
+fn ensure_main_invite(db: &Database) {
+    if !db.invites().iter().any(|i| i.main && !i.revoked) {
+        db.save_invite(&MyInvite::new("", None, None, true));
+    }
+}
+
 pub const DB_FILE: &str = "whatsmine.db";
 
 /// How the core reaches the network.
@@ -50,8 +62,8 @@ pub enum NetMode {
     /// fallback.
     #[default]
     Internet,
-    /// Loopback only, addresses shared in memory. For tests.
-    Local(iroh::address_lookup::MemoryLookup),
+    /// Loopback only, with a DHT that lives in this process. For tests.
+    Local(records::LocalRecords),
 }
 
 #[derive(Clone)]
@@ -94,9 +106,12 @@ impl Core {
     pub fn start(dir: &Path, mode: NetMode) -> anyhow::Result<Core> {
         std::fs::create_dir_all(dir)?;
         let started_clean = paths::clean_start(dir).context("removing old data")?;
-        let key = identity::load_or_create(dir).context("loading identity")?;
-        let (db, recovery) = Database::open_with_recovery(&dir.join(DB_FILE));
+        let vault = Arc::new(vault::Vault::open_or_create(dir).context("opening the vault")?);
+        let (db, recovery) = Database::open_with_recovery(&dir.join(DB_FILE), vault);
         let db = Arc::new(db);
+        let me = identity::Identity::load_or_create(&db).context("loading identity")?;
+        let key = me.person();
+        ensure_main_invite(&db);
 
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -115,7 +130,7 @@ impl Core {
         };
         runtime.spawn(Engine::run(
             db.clone(),
-            key.clone(),
+            me,
             mode,
             events.clone(),
             shared.clone(),
@@ -268,7 +283,7 @@ impl Core {
         self.inner.db.wipe()?;
         let _ = std::fs::remove_dir_all(self.media_dir());
         let _ = std::fs::remove_file(self.inner.dir.join("avatar.jpg"));
-        std::fs::remove_file(self.inner.dir.join(identity::KEY_FILE))?;
+        let _ = std::fs::remove_file(self.inner.dir.join(identity::KEY_FILE));
         Ok(())
     }
 
@@ -393,21 +408,39 @@ impl Core {
         self.inner.db.contact(id)
     }
 
-    /// Adds someone by their key and asks them to connect.
-    pub fn add_contact(&self, key: &str, nickname: Option<&str>) -> anyhow::Result<Contact> {
-        let Some(peer) = identity::parse_key(key) else {
+    /// Adds someone from their invite, and leaves them a request.
+    pub fn add_contact(&self, invite: &str, nickname: Option<&str>) -> anyhow::Result<Contact> {
+        self.add_contact_with_greeting(invite, nickname, "")
+    }
+
+    /// The same, with a few words so they know who is asking.
+    pub fn add_contact_with_greeting(
+        &self,
+        invite: &str,
+        nickname: Option<&str>,
+        greeting: &str,
+    ) -> anyhow::Result<Contact> {
+        let Some(invite) = identity::parse_invite(invite) else {
+            bail!("invalid_key");
+        };
+        let Some(peer) = invite.key() else {
             bail!("invalid_key");
         };
         ensure!(peer != self.inner.me, "own_key");
         let id = identity::key_to_string(&peer);
         let nickname = nickname.map(str::trim).filter(|n| !n.is_empty());
-        let state = match self.inner.db.contact(&id).map(|c| c.state) {
+        let current = self.inner.db.contact(&id).map(|c| c.state);
+        let state = match current {
             Some(ContactState::Accepted) => ContactState::Accepted,
             // They already asked us: adding them back is accepting.
             Some(ContactState::PendingIn) => ContactState::Accepted,
             _ => ContactState::PendingOut,
         };
-        let contact = self.inner.db.upsert_contact(&id, state, None, nickname)?;
+        let their_name = invite.name().map(str::to_owned);
+        let contact = self
+            .inner
+            .db
+            .upsert_contact(&id, state, their_name.as_deref(), nickname)?;
         self.emit(CoreEvent::ContactsChanged);
         if state == ContactState::Accepted {
             self.emit(CoreEvent::Accepted {
@@ -415,9 +448,100 @@ impl Core {
             });
             self.cmd(Cmd::Accepted(peer));
         } else {
-            self.cmd(Cmd::Dial(peer));
+            let mut keys = self.inner.db.contact_keys(&id).unwrap_or_default();
+            keys.invite = Some(invite);
+            keys.greeting = greeting.chars().take(requests::MAX_GREETING).collect();
+            self.inner.db.set_contact_keys(&id, &keys);
+            self.cmd(Cmd::SendRequest(peer));
         }
         Ok(contact)
+    }
+
+    // ---- our public address ----
+
+    /// The invite behind our plain link and name code.
+    pub fn main_invite(&self) -> identity::Invite {
+        let mine = self
+            .inner
+            .db
+            .invites()
+            .into_iter()
+            .find(|i| i.main && !i.revoked)
+            .unwrap_or_else(|| {
+                let fresh = MyInvite::new("", None, None, true);
+                self.inner.db.save_invite(&fresh);
+                fresh
+            });
+        mine.to_invite(&self.inner.me, &self.settings().display_name)
+    }
+
+    /// The link that adds us.
+    pub fn invite_link(&self) -> String {
+        self.main_invite().link()
+    }
+
+    /// What a QR code shows when it is meant to be scanned right here: a token for this one
+    /// meeting means both are added without asking, and it works once.
+    pub fn in_person_code(&self) -> String {
+        let mut mine = MyInvite::new("In person", None, Some(1), false);
+        mine.met_token = Some(vault::random());
+        mine.expires_at = Some(now_ms() + 15 * 60 * 1000);
+        self.inner.db.save_invite(&mine);
+        mine.to_invite(&self.inner.me, &self.settings().display_name)
+            .qr_text()
+    }
+
+    /// Our name code, like `roy-7kq4x2`.
+    pub fn handle(&self) -> String {
+        identity::short_handle(&self.settings().display_name, &self.inner.me)
+    }
+
+    pub fn invites(&self) -> Vec<MyInvite> {
+        self.inner.db.invites()
+    }
+
+    /// Another link, for one place or one person, that can be revoked by itself.
+    pub fn new_invite(
+        &self,
+        label: &str,
+        expires_at: Option<Millis>,
+        max_uses: Option<u32>,
+    ) -> String {
+        let mine = MyInvite::new(label, expires_at, max_uses, false);
+        self.inner.db.save_invite(&mine);
+        mine.to_invite(&self.inner.me, &self.settings().display_name)
+            .link()
+    }
+
+    pub fn revoke_invite(&self, id: &str) {
+        if let Some(mut mine) = self.inner.db.invites().into_iter().find(|i| i.id == id) {
+            mine.revoked = true;
+            self.inner.db.save_invite(&mine);
+        }
+    }
+
+    /// "Being bothered": all links and codes stop working, waiting requests go, a new address
+    /// comes straight away. Contacts keep talking to us and do nothing: they are told.
+    pub fn reset_public_address(&self) -> identity::Invite {
+        for contact in self.requests() {
+            self.inner.db.delete_contact(&contact.id);
+        }
+        self.inner.db.delete_invites();
+        self.cmd(Cmd::Rotate { network: true });
+        self.emit(CoreEvent::ContactsChanged);
+        self.main_invite()
+    }
+
+    /// The 12 words that bring this person back on another device.
+    pub fn recovery_words(&self) -> Vec<String> {
+        identity::Identity::load_or_create(&self.inner.db)
+            .map(|me| me.recovery_words())
+            .unwrap_or_default()
+    }
+
+    /// What we know about how this contact got here.
+    pub fn contact_keys(&self, id: &str) -> ContactKeys {
+        self.inner.db.contact_keys(id).unwrap_or_default()
     }
 
     pub fn accept(&self, id: &str) -> anyhow::Result<()> {
@@ -448,6 +572,8 @@ impl Core {
             .db
             .upsert_contact(id, ContactState::Blocked, None, None)?;
         self.cmd(Cmd::Disconnect(peer));
+        // They knew where we were. Not any more, and contacts are told.
+        self.cmd(Cmd::Rotate { network: true });
         self.emit(CoreEvent::ContactsChanged);
         Ok(())
     }
@@ -861,6 +987,9 @@ impl Core {
         };
         let sig = groups::sign(&self.inner.key, &state);
         self.inner.db.save_group(&state, &sig, true, &[], &me)?;
+        self.inner
+            .db
+            .set_secret(&groups::secret_name(&state.id), &vault::random::<32>())?;
         self.emit(CoreEvent::ContactsChanged);
         self.broadcast_group(&state, sig, Vec::new());
         self.inner
@@ -952,6 +1081,10 @@ impl Core {
         state.members.retain(|m| m != member);
         self.inner.db.remove_member_acks(id, member);
         let removed = identity::parse_key(member).into_iter().collect();
+        // They knew how the others find each other.
+        self.inner
+            .db
+            .set_secret(&groups::secret_name(id), &vault::random::<32>())?;
         self.publish_new_state(state, removed)?;
         self.inner.db.prune_group_peers();
         Ok(())

@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use iroh::endpoint::{Connection, RecvStream, SendStream, presets};
-use iroh::{Endpoint, PublicKey, SecretKey};
+use iroh::{Endpoint, EndpointAddr, PublicKey, SecretKey, Signature};
 use tokio::sync::{broadcast, mpsc};
 use tokio::time::Instant;
 
@@ -27,24 +27,28 @@ use crate::calls::{self, ActiveCall, CallSnapshot, MediaIn, MediaSink};
 use crate::db::Database;
 use crate::files::{self, ReceiveCtx, Received};
 use crate::groups;
-use crate::identity::key_to_string;
+use crate::identity::{Identity, key_to_string};
+use crate::location::{self, LocationRecord};
 use crate::model::{
-    Attachment, ContactState, CoreEvent, Message, MessageStatus, NetStatus, Settings,
-    TransferState, now_ms,
+    Attachment, ContactState, CoreEvent, Message, MessageStatus, MyInvite, NetStatus, Settings,
+    TransferState, Trust, now_ms,
 };
 use crate::power::{self, Conditions, Device, Plan};
 use crate::protocol::{
     self, ALPN, Frame, GroupState, MAX_TEXT, PROTO_VERSION, ReceiptKind, VIDEO_STREAM_MAGIC,
     id_from_bytes, id_to_bytes,
 };
+use crate::records::{self, Records};
+use crate::requests::{self, Request};
 use crate::retry;
+use crate::sealing::{OpenError, Sealing};
 
 mod call;
 mod group;
 
 use call::{CallState, GroupCalls};
 
-const DIAL_TIMEOUT: Duration = Duration::from_secs(30);
+const DIAL_TIMEOUT: Duration = Duration::from_secs(15);
 /// A connection that broke by itself is tried again this soon: most are network blips.
 const BLIP_RETRY: Duration = Duration::from_secs(3);
 /// Keep trying someone whose connection just broke for this long.
@@ -58,6 +62,24 @@ const RADIO_LOOK_EVERY: Duration = Duration::from_secs(60);
 const AWAKE_FOR: Duration = Duration::from_secs(30);
 /// Looking around dials this many people at a time.
 const LOOK_AROUND_DIALS: usize = 8;
+/// A copy of a message can be under way for about as long as the sender keeps trying, at most.
+const SEEN_KEPT_MS: i64 = 400 * 24 * 3600 * 1000;
+/// Republish where we are at least this often, also if nothing changed.
+const PUBLISH_EVERY: Duration = Duration::from_secs(3600);
+/// How long the other side gets to prove who it is.
+const AUTH_TIMEOUT: Duration = Duration::from_secs(10);
+/// Look for requests this often while the app is in use, and this often otherwise.
+const REQUESTS_IN_USE: Duration = Duration::from_secs(60);
+const REQUESTS_REACHABLE: Duration = Duration::from_secs(5 * 60);
+/// Tests have no time for that.
+const REQUESTS_LOCAL: Duration = Duration::from_millis(100);
+/// A request of ours is left again after this long, while unanswered.
+const REQUEST_AGAIN: [Duration; 4] = [
+    Duration::from_secs(30),
+    Duration::from_secs(2 * 60),
+    Duration::from_secs(10 * 60),
+    Duration::from_secs(60 * 60),
+];
 /// A wake-up scheduled with the system only changes for a difference of this much.
 const WAKE_SLACK: Duration = Duration::from_secs(5);
 
@@ -65,6 +87,13 @@ const WAKE_SLACK: Duration = Duration::from_secs(5);
 pub(crate) enum Cmd {
     /// Connect to this contact now if not connected.
     Dial(PublicKey),
+    /// Leave this contact our request.
+    SendRequest(PublicKey),
+    /// A new location, and a new network address if asked: whoever knew the old ones cannot
+    /// follow. Contacts are told.
+    Rotate {
+        network: bool,
+    },
     /// The device's state changed.
     Device(Device),
     /// The network may be another one now, also if it is the same kind.
@@ -147,13 +176,28 @@ pub(crate) enum Cmd {
 
 /// Events from the connection tasks back into the engine.
 enum Internal {
+    /// A connection, before anyone has said who they are.
+    Connected {
+        conn: Connection,
+        send: SendStream,
+        recv: RecvStream,
+        /// Whoever we dialled, or nobody when they called us.
+        expect: Option<PublicKey>,
+    },
+    /// Both sides have proven who they are.
     NewConn {
         conn: Connection,
         send: SendStream,
         recv: RecvStream,
         outgoing: bool,
+        peer: PublicKey,
+        curve: [u8; 32],
+        one_time: [u8; 32],
     },
     DialFailed(PublicKey),
+    Published(Option<EndpointAddr>),
+    /// Notes found in the DHT: the invite they were left for, and what they say.
+    RequestsFound(Vec<(String, Vec<u8>)>),
     Bound(anyhow::Result<Endpoint>),
     Frame {
         peer: PublicKey,
@@ -190,6 +234,13 @@ struct Session {
     initiator: PublicKey,
     /// When a frame last went either way.
     last_frame: Cell<Instant>,
+    /// What they gave at the handshake to start an encrypted session with them.
+    curve: [u8; 32],
+    one_time: [u8; 32],
+    /// Waiting for the encrypted session to exist.
+    waiting: std::cell::RefCell<Vec<Frame>>,
+    /// Asked for a new session once on this connection: no asking in circles.
+    asked_new_session: Cell<bool>,
 }
 
 /// State shared with the `Core` handle for cheap synchronous reads.
@@ -205,8 +256,22 @@ pub(crate) struct Shared {
 
 pub(crate) struct Engine {
     db: Arc<Database>,
+    identity: Identity,
+    sealing: Sealing,
     key: SecretKey,
     me: PublicKey,
+    /// The DHT, while there is an endpoint.
+    records: Option<Records>,
+    /// What we last published, and when.
+    published: Option<(EndpointAddr, Instant)>,
+    publishing: bool,
+    next_request_poll: Option<Instant>,
+    polling_requests: bool,
+    /// Requests of ours waiting for an answer: when to leave them again, and how often we did.
+    requests_out: HashMap<PublicKey, (Instant, usize)>,
+    /// Contacts that do not have our current location yet.
+    owe_accept: HashSet<PublicKey>,
+    seen_notes: HashSet<[u8; 32]>,
     events: broadcast::Sender<CoreEvent>,
     shared: Shared,
     mode: NetMode,
@@ -231,6 +296,8 @@ pub(crate) struct Engine {
     blips: HashMap<PublicKey, Instant>,
     /// Who to look up once, a few at a time.
     look_around: VecDeque<PublicKey>,
+    /// Who got a few more tries since the last look around.
+    tried_again: HashSet<PublicKey>,
     /// The wake-up last asked of the system.
     asked_wake: Option<Instant>,
     sessions: HashMap<PublicKey, Session>,
@@ -264,7 +331,7 @@ impl Engine {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn run(
         db: Arc<Database>,
-        key: SecretKey,
+        identity: Identity,
         mode: NetMode,
         events: broadcast::Sender<CoreEvent>,
         shared: Shared,
@@ -273,8 +340,27 @@ impl Engine {
         mut cmds: mpsc::UnboundedReceiver<Cmd>,
     ) {
         let (tx, mut rx) = mpsc::unbounded_channel();
+        let key = identity.person();
         let me = key.public();
+        let sealing = match Sealing::load(db.clone()) {
+            Ok(sealing) => sealing,
+            Err(e) => {
+                tracing::error!("the encryption state cannot be read: {e:#}");
+                let _ = events.send(CoreEvent::Net(NetStatus::Offline));
+                return;
+            }
+        };
         let mut engine = Engine {
+            identity,
+            sealing,
+            records: None,
+            published: None,
+            publishing: false,
+            next_request_poll: None,
+            polling_requests: false,
+            requests_out: HashMap::new(),
+            owe_accept: HashSet::new(),
+            seen_notes: HashSet::new(),
             media,
             uploads: HashSet::new(),
             downloads: Arc::new(Mutex::new(HashSet::new())),
@@ -306,6 +392,7 @@ impl Engine {
             chat_open: None,
             blips: HashMap::new(),
             look_around: VecDeque::new(),
+            tried_again: HashSet::new(),
             asked_wake: None,
             sessions: HashMap::new(),
             dialing: HashSet::new(),
@@ -318,6 +405,8 @@ impl Engine {
 
         // The first look around, once there is an endpoint.
         engine.look_around_all();
+        engine.load_what_is_owed();
+        engine.db.forget_old_seen(now_ms() - SEEN_KEPT_MS);
         loop {
             engine.reconcile();
             let sleep = tokio::time::sleep_until(engine.next_deadline());
@@ -412,6 +501,9 @@ impl Engine {
 
         self.close_idle(&plan, now);
         self.dial_due(now);
+        self.publish_due(now);
+        self.poll_requests_due(&plan, now);
+        self.leave_requests_due(now);
         self.ask_for_wake(&plan, now);
     }
 
@@ -424,7 +516,10 @@ impl Engine {
     fn start_binding(&mut self) {
         self.binding = true;
         self.set_net(NetStatus::Connecting);
-        let (key, mode, tx) = (self.key.clone(), self.mode.clone(), self.tx.clone());
+        if self.identity.network_due(now_ms()) {
+            let _ = self.identity.save(&self.db);
+        }
+        let (key, mode, tx) = (self.identity.network(), self.mode.clone(), self.tx.clone());
         let settings = self.settings();
         self.bound_with_relays = settings.use_relays;
         tokio::spawn(async move {
@@ -443,6 +538,18 @@ impl Engine {
                     matches!(self.mode, NetMode::Local(_)),
                 );
                 self.ep = Some(ep);
+                self.records = match &self.mode {
+                    NetMode::Local(local) => Some(Records::Local(local.clone())),
+                    NetMode::Internet => match Records::join() {
+                        Ok(records) => Some(records),
+                        Err(e) => {
+                            tracing::warn!("could not join the DHT: {e:#}");
+                            None
+                        }
+                    },
+                };
+                self.published = None;
+                self.next_request_poll = Some(Instant::now());
             }
             Err(e) => {
                 tracing::warn!("bind failed: {e:#}");
@@ -461,6 +568,10 @@ impl Engine {
     /// Nothing held: the radio can rest.
     fn take_down(&mut self) {
         let Some(ep) = self.ep.take() else { return };
+        self.records = None;
+        self.published = None;
+        self.publishing = false;
+        self.polling_requests = false;
         let peers: Vec<PublicKey> = self.sessions.keys().copied().collect();
         for peer in peers {
             self.close_session(peer);
@@ -512,6 +623,7 @@ impl Engine {
             .collect();
         wanted.extend(self.chat_open);
         wanted.extend(self.blips.keys());
+        wanted.extend(self.owe_accept.iter().copied());
         if let Some(c) = &self.call
             && c.connected.is_none()
             && c.outgoing
@@ -526,6 +638,7 @@ impl Engine {
     fn look_around_all(&mut self) {
         let in_groups: HashSet<String> = self.db.group_peer_ids().into_iter().collect();
         self.look_around.clear();
+        self.tried_again.clear();
         for c in self.db.contacts_in(&[
             ContactState::Accepted,
             ContactState::PendingOut,
@@ -580,6 +693,15 @@ impl Engine {
                     sooner(self.backoff.get(peer).map_or(now, |(at, _)| *at));
                 }
             }
+            if let Some(at) = self.next_request_poll {
+                sooner(at);
+            }
+            for (at, _) in self.requests_out.values() {
+                sooner(*at);
+            }
+            if let Some((_, at)) = &self.published {
+                sooner(*at + PUBLISH_EVERY);
+            }
         }
         next
     }
@@ -607,6 +729,329 @@ impl Engine {
             self.asked_wake = Some(next);
             let ms = next.saturating_duration_since(now).as_millis() as u64;
             emit(&self.events, CoreEvent::WakeIn { ms });
+        }
+    }
+
+    // ---- being found ----
+
+    /// Contacts who still have to hear from us, and requests still unanswered, after a restart.
+    fn load_what_is_owed(&mut self) {
+        let now = Instant::now();
+        for c in self
+            .db
+            .contacts_in(&[ContactState::Accepted, ContactState::PendingOut])
+        {
+            let Some(peer) = crate::identity::parse_key(&c.id) else {
+                continue;
+            };
+            let keys = self.db.contact_keys(&c.id).unwrap_or_default();
+            match c.state {
+                ContactState::Accepted
+                    if !keys.told && c.kind == crate::model::ContactKind::Person =>
+                {
+                    self.owe_accept.insert(peer);
+                }
+                ContactState::PendingOut if keys.invite.is_some() => {
+                    self.requests_out.insert(peer, (now, 0));
+                }
+                _ => {}
+            }
+        }
+        self.wanted_dirty = true;
+    }
+
+    /// Where we can be reached right now.
+    fn current_addr(&self) -> Option<EndpointAddr> {
+        let ep = self.ep.as_ref()?;
+        if matches!(self.mode, NetMode::Local(_)) {
+            let mut addr = EndpointAddr::new(ep.id());
+            for sock in ep.bound_sockets() {
+                addr = addr.with_ip_addr(sock);
+            }
+            return Some(addr);
+        }
+        Some(ep.addr())
+    }
+
+    /// Writes where we are to the DHT when that changed, or after a while. For contacts under
+    /// the location secret, and for each group under what its members share.
+    fn publish_due(&mut self, now: Instant) {
+        if self.publishing {
+            return;
+        }
+        let (Some(records), Some(addr)) = (self.records.clone(), self.current_addr()) else {
+            return;
+        };
+        if addr.is_empty() {
+            return;
+        }
+        let due = self
+            .published
+            .as_ref()
+            .is_none_or(|(last, at)| *last != addr || now.duration_since(*at) >= PUBLISH_EVERY);
+        if !due {
+            return;
+        }
+        self.publishing = true;
+        let mut secrets = vec![self.identity.location];
+        for gid in self.db.active_groups() {
+            if let Some(secret) = self.group_secret(&gid) {
+                secrets.push(location::group_secret(&secret, &self.me));
+            }
+        }
+        let person = self.key.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let at = now_ms();
+            let record = LocationRecord::from_addr(&addr, at);
+            let mut any = false;
+            for secret in secrets {
+                let sealed = location::seal(&secret, record.clone(), &person);
+                any |= location::publish(&records, &secret, &sealed, at).await;
+            }
+            let _ = tx.send(Internal::Published(any.then_some(addr)));
+        });
+    }
+
+    fn poll_requests_due(&mut self, plan: &Plan, now: Instant) {
+        if self.polling_requests || self.next_request_poll.is_none_or(|at| at > now) {
+            return;
+        }
+        let Some(records) = self.records.clone() else {
+            return;
+        };
+        let every = if matches!(self.mode, NetMode::Local(_)) {
+            REQUESTS_LOCAL
+        } else if plan.level == power::Level::InUse {
+            REQUESTS_IN_USE
+        } else {
+            REQUESTS_REACHABLE
+        };
+        self.next_request_poll = Some(now + every);
+        let wall = now_ms();
+        let invites: Vec<MyInvite> = self
+            .db
+            .invites()
+            .into_iter()
+            .filter(|i| i.open_for_requests(wall))
+            .collect();
+        self.polling_requests = true;
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let today = records::day_of(wall);
+            let mut reads = tokio::task::JoinSet::new();
+            for invite in invites {
+                for day in [today, today.saturating_sub(1)] {
+                    for slot in 0..requests::SLOTS {
+                        let (records, id) = (records.clone(), invite.id.clone());
+                        let seed = requests::slot_seed(&invite.drop_secret, day, slot);
+                        reads.spawn(async move { (id, records.get(&seed).await) });
+                    }
+                }
+            }
+            let mut found = Vec::new();
+            while let Some(read) = reads.join_next().await {
+                if let Ok((id, Some(note))) = read {
+                    found.push((id, note));
+                }
+            }
+            let _ = tx.send(Internal::RequestsFound(found));
+        });
+    }
+
+    fn on_requests_found(&mut self, found: Vec<(String, Vec<u8>)>) {
+        self.polling_requests = false;
+        let invites = self.db.invites();
+        for (id, note) in found {
+            if !self.seen_notes.insert(*blake3::hash(&note).as_bytes()) {
+                continue;
+            }
+            let Some(invite) = invites.iter().find(|i| i.id == id) else {
+                continue;
+            };
+            if let Some(request) = requests::open(invite, &note) {
+                self.on_request(invite.clone(), request);
+            }
+        }
+    }
+
+    /// Someone left us a note.
+    fn on_request(&mut self, mut invite: MyInvite, request: Request) {
+        let Ok(peer) = PublicKey::from_bytes(&request.person) else {
+            return;
+        };
+        if peer == self.me || !invite.open_for_requests(now_ms()) {
+            return;
+        }
+        let id = key_to_string(&peer);
+        let name = clean_name(&request.name);
+        let state = self.db.contact(&id).map(|c| c.state);
+        if state == Some(ContactState::Blocked) {
+            return;
+        }
+        let met = invite.met_token.is_some() && invite.met_token == request.met_token;
+        let mut keys = self.db.contact_keys(&id).unwrap_or_default();
+        keys.location = Some(request.location);
+        keys.via.clone_from(&invite.label);
+        if met {
+            keys.trust = Trust::MetInPerson;
+        }
+        match state {
+            // They asked again, so they have not heard: repeat the answer.
+            Some(ContactState::Accepted) => {
+                self.db.set_contact_keys(&id, &keys);
+                self.owe_accept.insert(peer);
+                self.wanted_dirty = true;
+            }
+            // We both asked, or we met: that is mutual consent.
+            Some(ContactState::PendingOut) => {
+                keys.invite = None;
+                keys.told = false;
+                self.db.set_contact_keys(&id, &keys);
+                self.requests_out.remove(&peer);
+                self.become_accepted(peer, &name);
+                self.owe_accept.insert(peer);
+            }
+            _ if met => {
+                keys.told = false;
+                let _ = self
+                    .db
+                    .upsert_contact(&id, ContactState::Accepted, Some(&name), None);
+                self.db.set_contact_keys(&id, &keys);
+                self.become_accepted(peer, &name);
+                self.owe_accept.insert(peer);
+            }
+            Some(ContactState::PendingIn) => {
+                keys.greeting = request
+                    .greeting
+                    .chars()
+                    .take(requests::MAX_GREETING)
+                    .collect();
+                self.db.set_contact_keys(&id, &keys);
+                self.db.set_their_name(&id, &name);
+            }
+            None | Some(ContactState::GroupPeer) => {
+                keys.greeting = request
+                    .greeting
+                    .chars()
+                    .take(requests::MAX_GREETING)
+                    .collect();
+                if self
+                    .db
+                    .upsert_contact(&id, ContactState::PendingIn, Some(&name), None)
+                    .is_ok()
+                {
+                    self.db.set_contact_keys(&id, &keys);
+                    emit(
+                        &self.events,
+                        CoreEvent::RequestReceived {
+                            contact_id: id,
+                            name,
+                        },
+                    );
+                    emit(&self.events, CoreEvent::ContactsChanged);
+                }
+            }
+            Some(ContactState::Blocked) => {}
+        }
+        invite.uses += 1;
+        self.db.save_invite(&invite);
+        self.wanted_dirty = true;
+    }
+
+    /// Leaves our notes for whoever has not answered yet.
+    fn leave_requests_due(&mut self, now: Instant) {
+        let Some(records) = self.records.clone() else {
+            return;
+        };
+        let due: Vec<PublicKey> = self
+            .requests_out
+            .iter()
+            .filter(|(_, (at, _))| *at <= now)
+            .map(|(peer, _)| *peer)
+            .collect();
+        for peer in due {
+            let id = key_to_string(&peer);
+            let keys = self.db.contact_keys(&id).unwrap_or_default();
+            let Some(invite) = keys.invite else {
+                self.requests_out.remove(&peer);
+                continue;
+            };
+            let tries = self.requests_out.get(&peer).map_or(0, |(_, n)| *n);
+            let delay = REQUEST_AGAIN[tries.min(REQUEST_AGAIN.len() - 1)];
+            self.requests_out.insert(peer, (now + delay, tries + 1));
+            let request = Request {
+                person: *self.me.as_bytes(),
+                name: self.settings().display_name,
+                greeting: keys.greeting,
+                location: self.identity.location,
+                met_token: invite.met_token,
+                at: now_ms(),
+            };
+            let Some(sealed) = requests::seal(&invite, &request, &self.key) else {
+                tracing::warn!("an invite with a key that cannot be used");
+                self.requests_out.remove(&peer);
+                continue;
+            };
+            let seed = requests::slot_seed(
+                &invite.drop_secret,
+                records::day_of(request.at),
+                requests::random_slot(),
+            );
+            let records = records.clone();
+            tokio::spawn(async move {
+                records.put(&seed, &sealed).await;
+            });
+        }
+    }
+
+    /// A new location, and a new address if asked. Whoever knew the old ones cannot follow, and
+    /// everyone else gets told at the next connection, which we go and make.
+    fn rotate(&mut self, network: bool) {
+        let now = now_ms();
+        self.identity.rotate_location(now);
+        if network {
+            self.identity.rotate_network(now);
+        }
+        if let Err(e) = self.identity.save(&self.db) {
+            tracing::error!("could not save the new address: {e:#}");
+        }
+        for c in self.db.contacts_in(&[ContactState::Accepted]) {
+            if c.kind != crate::model::ContactKind::Person {
+                continue;
+            }
+            let Some(peer) = crate::identity::parse_key(&c.id) else {
+                continue;
+            };
+            let mut keys = self.db.contact_keys(&c.id).unwrap_or_default();
+            keys.told = false;
+            self.db.set_contact_keys(&c.id, &keys);
+            self.owe_accept.insert(peer);
+            self.backoff.remove(&peer);
+        }
+        self.published = None;
+        self.wanted_dirty = true;
+        if network {
+            self.take_down();
+        } else {
+            let peers: Vec<PublicKey> = self.sessions.keys().copied().collect();
+            for peer in peers {
+                self.tell_where_we_are(peer);
+            }
+        }
+    }
+
+    /// They get to know how to find us.
+    fn tell_where_we_are(&mut self, peer: PublicKey) {
+        let name = self.settings().display_name;
+        let location = self.identity.location;
+        if self.send(peer, Frame::Accept { name, location }) {
+            let id = key_to_string(&peer);
+            let mut keys = self.db.contact_keys(&id).unwrap_or_default();
+            keys.told = true;
+            self.db.set_contact_keys(&id, &keys);
+            self.owe_accept.remove(&peer);
+            self.wanted_dirty = true;
         }
     }
 
@@ -676,6 +1121,11 @@ impl Engine {
                 }
                 self.wanted_dirty = true;
             }
+            Cmd::SendRequest(peer) => {
+                self.note_activity();
+                self.requests_out.insert(peer, (Instant::now(), 0));
+            }
+            Cmd::Rotate { network } => self.rotate(network),
             Cmd::Device(device) => {
                 let changed = device.network != self.device.network;
                 self.device = device;
@@ -726,13 +1176,20 @@ impl Engine {
             }
             Cmd::Accepted(peer) => {
                 self.note_activity();
+                self.requests_out.remove(&peer);
+                let id = key_to_string(&peer);
+                let mut keys = self.db.contact_keys(&id).unwrap_or_default();
+                keys.invite = None;
+                keys.told = false;
+                self.db.set_contact_keys(&id, &keys);
                 if self.sessions.contains_key(&peer) {
-                    let name = self.settings().display_name;
-                    self.send(peer, Frame::Accept { name });
+                    self.tell_where_we_are(peer);
                     self.on_accepted_session(peer);
                 } else {
+                    self.owe_accept.insert(peer);
                     self.backoff.remove(&peer);
                     self.look_around.push_front(peer);
+                    self.wanted_dirty = true;
                 }
             }
             Cmd::ReadReceipts(peer) => self.send_read_receipts(peer),
@@ -757,6 +1214,8 @@ impl Engine {
                 }
                 self.look_around.retain(|p| *p != peer);
                 self.blips.remove(&peer);
+                self.owe_accept.remove(&peer);
+                self.requests_out.remove(&peer);
                 self.wanted_dirty = true;
                 self.set_online(peer, false, None);
             }
@@ -832,6 +1291,10 @@ impl Engine {
                         self.look_around.push_back(*p);
                     }
                 }
+                self.published = None;
+                let Some(secret) = self.group_secret(&state.id) else {
+                    return;
+                };
                 for p in to {
                     self.send(
                         p,
@@ -839,6 +1302,7 @@ impl Engine {
                             state: state.clone(),
                             sig: sig.clone(),
                             names: names.clone(),
+                            secret,
                         },
                     );
                 }
@@ -905,20 +1369,46 @@ impl Engine {
         if peer == self.me || !self.dialing.insert(peer) {
             return;
         }
-        let ep = ep.clone();
-        let tx = self.tx.clone();
+        let id = key_to_string(&peer);
+        let keys = self.db.contact_keys(&id).unwrap_or_default();
+        // What they can be looked up with: what they told us, and what we share in groups.
+        let mut secrets: Vec<[u8; 32]> = keys.location.into_iter().collect();
+        for gid in self.db.groups_with_member(&id) {
+            if let Some(secret) = self.group_secret(&gid) {
+                secrets.push(location::group_secret(&secret, &peer));
+            }
+        }
+        let (ep, tx, records) = (ep.clone(), self.tx.clone(), self.records.clone());
         tokio::spawn(async move {
             let attempt = async {
-                let conn = ep.connect(peer, ALPN).await?;
+                let mut addr = None;
+                if let Some(records) = &records {
+                    for secret in &secrets {
+                        let found = location::lookup(records, secret, &peer, now_ms()).await;
+                        if let Some(record) = found.and_then(|r| r.to_addr()) {
+                            addr = Some(record);
+                            break;
+                        }
+                    }
+                }
+                // Not to be found: the last address we knew, for the same Wi-Fi without internet.
+                let addr = addr
+                    .or_else(|| {
+                        keys.network
+                            .and_then(|n| iroh::EndpointId::from_bytes(&n).ok())
+                            .map(EndpointAddr::new)
+                    })
+                    .ok_or_else(|| anyhow::anyhow!("nowhere to look"))?;
+                let conn = ep.connect(addr, ALPN).await?;
                 let (send, recv) = conn.open_bi().await?;
                 anyhow::Ok((conn, send, recv))
             };
             let ev = match tokio::time::timeout(DIAL_TIMEOUT, attempt).await {
-                Ok(Ok((conn, send, recv))) => Internal::NewConn {
+                Ok(Ok((conn, send, recv))) => Internal::Connected {
                     conn,
                     send,
                     recv,
-                    outgoing: true,
+                    expect: Some(peer),
                 },
                 Ok(Err(e)) => {
                     tracing::debug!("dial {} failed: {e:#}", peer.fmt_short());
@@ -927,6 +1417,48 @@ impl Engine {
                 Err(_) => Internal::DialFailed(peer),
             };
             let _ = tx.send(ev);
+        });
+    }
+
+    /// A connection: each side now proves who it is.
+    fn start_auth(
+        &mut self,
+        conn: Connection,
+        send: SendStream,
+        recv: RecvStream,
+        expect: Option<PublicKey>,
+    ) {
+        let (curve, one_time) = self.sealing.keys_to_give();
+        let (person, tx) = (self.key.clone(), self.tx.clone());
+        tokio::spawn(async move {
+            let (mut send, mut recv) = (send, recv);
+            let them = tokio::time::timeout(
+                AUTH_TIMEOUT,
+                prove_and_check(&conn, &mut send, &mut recv, &person, curve, one_time),
+            )
+            .await;
+            match them {
+                Ok(Ok((peer, curve, one_time))) if expect.is_none_or(|wanted| wanted == peer) => {
+                    let _ = tx.send(Internal::NewConn {
+                        conn,
+                        send,
+                        recv,
+                        outgoing: expect.is_some(),
+                        peer,
+                        curve,
+                        one_time,
+                    });
+                }
+                other => {
+                    if let Ok(Err(e)) = other {
+                        tracing::debug!("no proof from the other side: {e:#}");
+                    }
+                    conn.close(3u32.into(), b"who are you");
+                    if let Some(wanted) = expect {
+                        let _ = tx.send(Internal::DialFailed(wanted));
+                    }
+                }
+            }
         });
     }
 
@@ -945,29 +1477,47 @@ impl Engine {
 
     fn handle_internal(&mut self, ev: Internal) {
         match ev {
+            Internal::Connected {
+                conn,
+                send,
+                recv,
+                expect,
+            } => self.start_auth(conn, send, recv, expect),
             Internal::NewConn {
                 conn,
                 send,
                 recv,
                 outgoing,
-            } => self.on_new_conn(conn, send, recv, outgoing),
+                peer,
+                curve,
+                one_time,
+            } => self.on_new_conn(conn, send, recv, outgoing, peer, curve, one_time),
+            Internal::Published(addr) => {
+                self.publishing = false;
+                // If nothing took it: again in a while, not in a loop.
+                let now = Instant::now();
+                let addr = addr.or_else(|| self.current_addr());
+                if let Some(addr) = addr {
+                    self.published = Some((addr, now));
+                }
+            }
+            Internal::RequestsFound(found) => self.on_requests_found(found),
             Internal::DialFailed(peer) => {
                 self.dialing.remove(&peer);
                 self.bump_backoff(peer);
+                // What we looked up may be from before they came back: worth a few more tries,
+                // once per look around.
+                if self.tried_again.insert(peer) {
+                    self.blips.insert(peer, Instant::now());
+                    self.wanted_dirty = true;
+                }
             }
             Internal::Bound(result) => self.on_bound(result),
             Internal::Frame { peer, frame } => {
                 if let Some(s) = self.sessions.get(&peer) {
                     s.last_frame.set(Instant::now());
                 }
-                match &frame {
-                    Frame::Msg { .. } | Frame::FileOffer { .. } => self.note_activity(),
-                    Frame::Receipt { .. } | Frame::Accept { .. } | Frame::GroupUpdate { .. } => {
-                        self.wanted_dirty = true;
-                    }
-                    _ => {}
-                }
-                self.on_frame(peer, frame);
+                self.on_wire_frame(peer, frame);
             }
             Internal::Closed { peer, sid, broken } => {
                 let current = self.sessions.get(&peer).map(|s| s.sid) == Some(sid);
@@ -1093,14 +1643,112 @@ impl Engine {
         });
     }
 
+    /// What came off the wire: only what is sealed counts.
+    fn on_wire_frame(&mut self, peer: PublicKey, frame: Frame) {
+        let id = key_to_string(&peer);
+        match frame {
+            Frame::Sealed { kind, bytes } => {
+                let Some(curve) = self.sessions.get(&peer).map(|s| s.curve) else {
+                    return;
+                };
+                match self.sealing.open(&id, &curve, kind, &bytes) {
+                    Ok(plain) => {
+                        self.flush_waiting(peer);
+                        match postcard::from_bytes::<Frame>(&plain) {
+                            Ok(inner) => self.on_opened_frame(peer, inner),
+                            // From a newer version: nothing to do with it, and not fatal.
+                            Err(e) => tracing::debug!("a frame we do not know: {e}"),
+                        }
+                    }
+                    Err(OpenError::Invalid) => {
+                        tracing::debug!("{} sent something invalid", peer.fmt_short());
+                    }
+                    Err(_) => {
+                        // They have a session we lost, or the other way around.
+                        let asked = self
+                            .sessions
+                            .get(&peer)
+                            .is_none_or(|s| s.asked_new_session.replace(true));
+                        if !asked {
+                            self.send_plain(peer, Frame::NeedSession);
+                        }
+                    }
+                }
+            }
+            Frame::NeedSession => {
+                let keys = self.sessions.get(&peer).map(|s| (s.curve, s.one_time));
+                let Some((curve, one_time)) = keys else {
+                    return;
+                };
+                if self.sealing.start_session(&id, &curve, &one_time) {
+                    // A first message opens the session on their side.
+                    self.send(
+                        peer,
+                        Frame::Hello {
+                            version: PROTO_VERSION,
+                            name: self.settings().display_name,
+                            share_last_seen: self.settings().share_last_seen,
+                        },
+                    );
+                    self.flush_waiting(peer);
+                    self.on_session_start(peer);
+                }
+            }
+            // Anything else in the clear is not to be believed.
+            other => tracing::debug!("ignoring an unsealed frame: {other:?}"),
+        }
+    }
+
+    fn on_opened_frame(&mut self, peer: PublicKey, frame: Frame) {
+        match &frame {
+            Frame::Msg { .. } | Frame::FileOffer { .. } => self.note_activity(),
+            Frame::Receipt { .. } | Frame::Accept { .. } | Frame::GroupUpdate { .. } => {
+                self.wanted_dirty = true;
+            }
+            _ => {}
+        }
+        self.on_frame(peer, frame);
+    }
+
+    /// What was waiting for the encrypted session to exist.
+    fn flush_waiting(&self, peer: PublicKey) {
+        let waiting = self
+            .sessions
+            .get(&peer)
+            .map(|s| std::mem::take(&mut *s.waiting.borrow_mut()))
+            .unwrap_or_default();
+        for frame in waiting {
+            self.send(peer, frame);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn on_new_conn(
         &mut self,
         conn: Connection,
         send: SendStream,
         recv: RecvStream,
         outgoing: bool,
+        peer: PublicKey,
+        curve: [u8; 32],
+        one_time: [u8; 32],
     ) {
-        let peer = conn.remote_id();
+        // Whoever we have nothing to do with gets nothing. They should not even have the address.
+        let known = self.db.contact(&key_to_string(&peer)).map(|c| c.state);
+        let allowed = match known {
+            Some(ContactState::Accepted | ContactState::PendingOut) => true,
+            Some(ContactState::GroupPeer) => {
+                !self.db.groups_with_member(&key_to_string(&peer)).is_empty()
+            }
+            _ => false,
+        };
+        if !allowed {
+            conn.close(1u32.into(), b"no");
+            if outgoing {
+                self.dialing.remove(&peer);
+            }
+            return;
+        }
         if outgoing {
             self.dialing.remove(&peer);
         }
@@ -1109,13 +1757,12 @@ impl Engine {
         self.blips.remove(&peer);
         self.wanted_dirty = true;
         let id = key_to_string(&peer);
-        if self
-            .db
-            .contact(&id)
-            .is_some_and(|c| c.state == ContactState::Blocked)
-        {
-            conn.close(1u32.into(), b"blocked");
-            return;
+        // For the same Wi-Fi without internet next time.
+        let mut keys = self.db.contact_keys(&id).unwrap_or_default();
+        let network = *conn.remote_id().as_bytes();
+        if keys.network != Some(network) {
+            keys.network = Some(network);
+            self.db.set_contact_keys(&id, &keys);
         }
 
         // Both sides may dial each other at the same moment. Both then apply
@@ -1159,33 +1806,24 @@ impl Engine {
                 conn,
                 initiator,
                 last_frame: Cell::new(Instant::now()),
+                curve,
+                one_time,
+                waiting: std::cell::RefCell::new(Vec::new()),
+                asked_new_session: Cell::new(false),
             },
         );
+        // One side starts the encrypted session, and which one is plain from the keys.
+        if !self.sealing.has_session(&id) && self.me.as_bytes() < peer.as_bytes() {
+            self.sealing.start_session(&id, &curve, &one_time);
+        }
         self.on_session_start(peer);
     }
 
     fn on_session_start(&mut self, peer: PublicKey) {
         self.send_hello(peer);
-        let settings = self.settings();
-        match self.db.contact(&key_to_string(&peer)).map(|c| c.state) {
-            Some(ContactState::Accepted) => {
-                self.send(
-                    peer,
-                    Frame::Accept {
-                        name: settings.display_name,
-                    },
-                );
-                self.on_accepted_session(peer);
-            }
-            Some(ContactState::PendingOut) => {
-                self.send(
-                    peer,
-                    Frame::Request {
-                        name: settings.display_name,
-                    },
-                );
-            }
-            _ => {}
+        if self.db.contact(&key_to_string(&peer)).map(|c| c.state) == Some(ContactState::Accepted) {
+            self.tell_where_we_are(peer);
+            self.on_accepted_session(peer);
         }
         self.on_group_session(peer);
         self.call_on_session(peer);
@@ -1257,44 +1895,26 @@ impl Engine {
                     emit(&self.events, CoreEvent::ContactsChanged);
                 }
             }
-            Frame::Request { name } => match state {
-                None | Some(ContactState::GroupPeer) => {
-                    let name = clean_name(&name);
-                    if self
-                        .db
-                        .upsert_contact(&id, ContactState::PendingIn, Some(&name), None)
-                        .is_ok()
-                    {
-                        emit(
-                            &self.events,
-                            CoreEvent::RequestReceived {
-                                contact_id: id,
-                                name,
-                            },
-                        );
-                        emit(&self.events, CoreEvent::ContactsChanged);
-                    }
-                }
+            Frame::Accept { name, location } => match state {
                 Some(ContactState::PendingOut) => {
-                    // We both asked: that is mutual consent.
+                    let mut keys = self.db.contact_keys(&id).unwrap_or_default();
+                    keys.location = Some(location);
+                    keys.invite = None;
+                    keys.told = false;
+                    self.db.set_contact_keys(&id, &keys);
+                    self.requests_out.remove(&peer);
                     self.become_accepted(peer, &name);
-                    let my_name = self.settings().display_name;
-                    self.send(peer, Frame::Accept { name: my_name });
+                    self.tell_where_we_are(peer);
                 }
                 Some(ContactState::Accepted) => {
-                    // They lost their copy of our acceptance; repeat it.
-                    let my_name = self.settings().display_name;
-                    self.send(peer, Frame::Accept { name: my_name });
-                }
-                Some(ContactState::PendingIn) => {
-                    self.db.set_their_name(&id, &clean_name(&name));
-                }
-                Some(ContactState::Blocked) => self.drop_session(peer),
-            },
-            Frame::Accept { name } => match state {
-                Some(ContactState::PendingOut) => self.become_accepted(peer, &name),
-                Some(ContactState::Accepted) if self.db.set_their_name(&id, &clean_name(&name)) => {
-                    emit(&self.events, CoreEvent::ContactsChanged);
+                    let mut keys = self.db.contact_keys(&id).unwrap_or_default();
+                    if keys.location != Some(location) {
+                        keys.location = Some(location);
+                        self.db.set_contact_keys(&id, &keys);
+                    }
+                    if self.db.set_their_name(&id, &clean_name(&name)) {
+                        emit(&self.events, CoreEvent::ContactsChanged);
+                    }
                 }
                 // An Accept we never asked for is ignored: nobody can force
                 // themselves into our contacts.
@@ -1385,8 +2005,8 @@ impl Engine {
                     emit(&self.events, CoreEvent::Typing { contact_id: id });
                 }
             }
-            // Only keeps the session alive; see the reader's timeout.
-            Frame::Ping => {}
+            // Only ever on the wire, and handled there.
+            Frame::Auth { .. } | Frame::Sealed { .. } | Frame::NeedSession => {}
             Frame::Profile { avatar } => {
                 if state == Some(ContactState::Accepted) {
                     self.on_profile(&id, contact.and_then(|c| c.avatar), avatar);
@@ -1460,9 +2080,12 @@ impl Engine {
                     self.start_upload(peer, &m, offset);
                 }
             }
-            Frame::GroupUpdate { state, sig, names } => {
-                self.on_group_update(peer, state, sig, names)
-            }
+            Frame::GroupUpdate {
+                state,
+                sig,
+                names,
+                secret,
+            } => self.on_group_update(peer, state, sig, names, secret),
             Frame::GroupLeave { group } => self.on_group_leave(peer, group),
             f @ (Frame::CallInvite { .. }
             | Frame::CallAnswer { .. }
@@ -1521,7 +2144,16 @@ impl Engine {
             emit(&self.events, CoreEvent::MessageAdded(offered.clone()));
             emit(&self.events, CoreEvent::ContactsChanged);
         }
+        let Some(raw) = id_to_bytes(&mid) else { return };
         let Some(m) = self.db.message(&mid) else {
+            // Seen before and deleted since: they can stop offering it.
+            self.send(
+                peer,
+                Frame::Receipt {
+                    kind: ReceiptKind::Delivered,
+                    ids: vec![raw],
+                },
+            );
             return;
         };
         let Some(att) = m.attachment.as_ref() else {
@@ -1530,7 +2162,6 @@ impl Engine {
         if m.outgoing || m.contact_id != offered.contact_id {
             return;
         }
-        let Some(raw) = id_to_bytes(&mid) else { return };
         match att.state {
             // Re-offered after our ack got lost: ack again.
             TransferState::Done => {
@@ -1576,11 +2207,29 @@ impl Engine {
 
     // ---- sending ----
 
+    /// Sends, sealed end to end. If the encrypted session is not there yet it waits for it.
     fn send(&self, peer: PublicKey, frame: Frame) -> bool {
-        self.sessions.get(&peer).is_some_and(|s| {
-            s.last_frame.set(Instant::now());
-            s.out.send(frame).is_ok()
-        })
+        let Some(s) = self.sessions.get(&peer) else {
+            return false;
+        };
+        s.last_frame.set(Instant::now());
+        let Ok(plain) = postcard::to_stdvec(&frame) else {
+            return false;
+        };
+        match self.sealing.seal(&key_to_string(&peer), &plain) {
+            Some((kind, bytes)) => s.out.send(Frame::Sealed { kind, bytes }).is_ok(),
+            None => {
+                s.waiting.borrow_mut().push(frame);
+                true
+            }
+        }
+    }
+
+    /// The little that goes outside the seal.
+    fn send_plain(&self, peer: PublicKey, frame: Frame) -> bool {
+        self.sessions
+            .get(&peer)
+            .is_some_and(|s| s.out.send(frame).is_ok())
     }
 
     fn send_hello(&self, peer: PublicKey) {
@@ -1680,12 +2329,6 @@ impl Engine {
         }
     }
 
-    fn drop_session(&mut self, peer: PublicKey) {
-        if let Some(s) = self.sessions.remove(&peer) {
-            s.conn.close(1u32.into(), b"blocked");
-        }
-    }
-
     fn set_online(&self, peer: PublicKey, online: bool, last_seen: Option<i64>) {
         let id = key_to_string(&peer);
         let changed = {
@@ -1761,30 +2404,22 @@ async fn bind(key: SecretKey, mode: NetMode, settings: Settings) -> anyhow::Resu
                 .secret_key(key)
                 .alpns(vec![ALPN.to_vec()])
                 .relay_mode(relay_mode(&settings))
-                // Publish and resolve on the BitTorrent Mainline DHT, so finding a peer does not
-                // depend on any one company.
-                .address_lookup(iroh_mainline_address_lookup::DhtAddressLookup::builder())
-                // Find peers on the same Wi-Fi without the internet.
+                // Where we are goes in the DHT sealed, see `location`. This only finds peers on the
+                // same Wi-Fi without the internet.
                 .address_lookup(iroh_mdns_address_lookup::MdnsAddressLookup::builder())
                 .bind()
                 .await?;
             Ok(ep)
         }
-        NetMode::Local(lookup) => {
+        NetMode::Local(_) => {
             let ep = Endpoint::builder(presets::Minimal)
                 .secret_key(key)
                 .alpns(vec![ALPN.to_vec()])
                 .relay_mode(iroh::RelayMode::Disabled)
                 .clear_ip_transports()
                 .bind_addr("127.0.0.1:0")?
-                .address_lookup(lookup.clone())
                 .bind()
                 .await?;
-            let mut addr = iroh::EndpointAddr::new(ep.id());
-            for sock in ep.bound_sockets() {
-                addr = addr.with_ip_addr(sock);
-            }
-            lookup.set_endpoint_info(addr);
             Ok(ep)
         }
     }
@@ -1812,11 +2447,11 @@ fn spawn_accept_loop(ep: Endpoint, tx: mpsc::UnboundedSender<Internal>) {
                 };
                 match tokio::time::timeout(DIAL_TIMEOUT, attempt).await {
                     Ok(Ok((conn, send, recv))) => {
-                        let _ = tx.send(Internal::NewConn {
+                        let _ = tx.send(Internal::Connected {
                             conn,
                             send,
                             recv,
-                            outgoing: false,
+                            expect: None,
                         });
                     }
                     Ok(Err(e)) => tracing::debug!("incoming failed: {e:#}"),
@@ -1825,6 +2460,65 @@ fn spawn_accept_loop(ep: Endpoint, tx: mpsc::UnboundedSender<Internal>) {
             });
         }
     });
+}
+
+/// What each side signs: this very connection, so a proof cannot be replayed on another one.
+fn auth_bytes(exporter: &[u8; 32], curve: &[u8; 32], one_time: &[u8; 32]) -> Vec<u8> {
+    let mut out = b"whatsmine-auth-v2".to_vec();
+    out.extend_from_slice(exporter);
+    out.extend_from_slice(curve);
+    out.extend_from_slice(one_time);
+    out
+}
+
+/// Says who we are and hears who they are. Both signed over this connection's own secret.
+async fn prove_and_check(
+    conn: &Connection,
+    send: &mut SendStream,
+    recv: &mut RecvStream,
+    person: &SecretKey,
+    curve: [u8; 32],
+    one_time: [u8; 32],
+) -> anyhow::Result<(PublicKey, [u8; 32], [u8; 32])> {
+    let mut exporter = [0u8; 32];
+    conn.export_keying_material(&mut exporter, b"whatsmine-auth", b"")
+        .map_err(|e| anyhow::anyhow!("no keying material: {e:?}"))?;
+    let sig = person
+        .sign(&auth_bytes(&exporter, &curve, &one_time))
+        .to_bytes()
+        .to_vec();
+    protocol::write_frame(
+        send,
+        &Frame::Auth {
+            person: *person.public().as_bytes(),
+            curve,
+            one_time,
+            sig,
+        },
+    )
+    .await?;
+    let Ok(frame) = protocol::read_frame(recv).await? else {
+        anyhow::bail!("an unreadable first frame");
+    };
+    let Frame::Auth {
+        person: them,
+        curve,
+        one_time,
+        sig,
+    } = frame
+    else {
+        anyhow::bail!("the first frame must say who it is");
+    };
+    let peer = PublicKey::from_bytes(&them)?;
+    let sig: [u8; 64] = sig
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("a signature is 64 bytes"))?;
+    peer.verify(
+        &auth_bytes(&exporter, &curve, &one_time),
+        &Signature::from_bytes(&sig),
+    )?;
+    Ok((peer, curve, one_time))
 }
 
 /// Online means someone can reach us: an address that goes somewhere, or a relay. A phone in a

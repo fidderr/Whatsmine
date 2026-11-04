@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 /// The generation of what is kept on disk. A new one means the old data cannot be used any more
 /// (another way of being someone, another protocol): it goes, once.
-pub const DATA_GENERATION: u32 = 2;
+pub const DATA_GENERATION: u32 = 3;
 const GENERATION_FILE: &str = "generation";
 
 /// Before anything opens what is in `dir`: removes the data of an earlier generation. Returns
@@ -22,6 +22,7 @@ pub fn clean_start(dir: &Path) -> anyhow::Result<bool> {
     let db = dir.join(crate::DB_FILE);
     let had_data = key.exists() || db.exists();
     if had_data {
+        let _ = std::fs::remove_file(dir.join("vault.key"));
         for name in ["-wal", "-shm", "-journal"] {
             let _ = std::fs::remove_file(dir.join(format!("{}{name}", crate::DB_FILE)));
         }

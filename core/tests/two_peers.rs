@@ -3,8 +3,8 @@
 
 use std::time::Duration;
 
-use iroh::address_lookup::MemoryLookup;
 use tokio::sync::broadcast::Receiver;
+use whatsmine_core::records::LocalRecords as MemoryLookup;
 use whatsmine_core::{ContactState, Core, CoreEvent, MessageStatus, NetMode, Settings};
 
 const WAIT: Duration = Duration::from_secs(40);
@@ -50,7 +50,7 @@ fn status_of(core: &Core, contact: &str, message_id: &str) -> MessageStatus {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn full_lifecycle() {
-    let lookup = MemoryLookup::new();
+    let lookup = MemoryLookup::default();
     let dir_a = tempfile::tempdir().unwrap();
     let dir_b = tempfile::tempdir().unwrap();
     let a = start(dir_a.path(), &lookup, "Alice");
@@ -60,7 +60,7 @@ async fn full_lifecycle() {
     let mut rb = b.subscribe();
 
     // Request -> accept.
-    a.add_contact(&kb, Some("bobby")).unwrap();
+    a.add_contact(&b.invite_link(), Some("bobby")).unwrap();
     wait_for(&mut rb, "request", |e| {
         matches!(e, CoreEvent::RequestReceived { contact_id, name } if *contact_id == ka && name == "Alice")
     })
@@ -179,7 +179,7 @@ async fn full_lifecycle() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn mutual_add_is_consent_and_strangers_cannot_message() {
-    let lookup = MemoryLookup::new();
+    let lookup = MemoryLookup::default();
     let (d1, d2, d3) = (
         tempfile::tempdir().unwrap(),
         tempfile::tempdir().unwrap(),
@@ -192,8 +192,8 @@ async fn mutual_add_is_consent_and_strangers_cannot_message() {
     let mut rb = b.subscribe();
 
     // Both add each other: accepted without anyone pressing accept.
-    a.add_contact(&b.my_key(), None).unwrap();
-    b.add_contact(&a.my_key(), None).unwrap();
+    a.add_contact(&b.invite_link(), None).unwrap();
+    b.add_contact(&a.invite_link(), None).unwrap();
     wait_for(&mut ra, "a accepted", |e| {
         matches!(e, CoreEvent::Accepted { .. })
     })
@@ -204,7 +204,7 @@ async fn mutual_add_is_consent_and_strangers_cannot_message() {
     .await;
 
     // A stranger can send a request, but messages are refused until accepted.
-    stranger.add_contact(&a.my_key(), None).unwrap();
+    stranger.add_contact(&a.invite_link(), None).unwrap();
     wait_for(&mut ra, "stranger request", |e| {
         matches!(e, CoreEvent::RequestReceived { .. })
     })
@@ -230,14 +230,14 @@ async fn mutual_add_is_consent_and_strangers_cannot_message() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn deleting_a_chat_keeps_the_contact_and_a_new_message_brings_it_back() {
-    let lookup = MemoryLookup::new();
+    let lookup = MemoryLookup::default();
     let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let a = start(dir_a.path(), &lookup, "Alice");
     let b = start(dir_b.path(), &lookup, "Bob");
     let (ka, kb) = (a.my_key(), b.my_key());
     let (mut ra, mut rb) = (a.subscribe(), b.subscribe());
-    a.add_contact(&kb, None).unwrap();
-    b.add_contact(&ka, None).unwrap();
+    a.add_contact(&b.invite_link(), None).unwrap();
+    b.add_contact(&a.invite_link(), None).unwrap();
     wait_for(
         &mut ra,
         "bob online",

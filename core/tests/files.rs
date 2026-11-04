@@ -2,8 +2,8 @@
 
 use std::time::Duration;
 
-use iroh::address_lookup::MemoryLookup;
 use tokio::sync::broadcast::Receiver;
+use whatsmine_core::records::LocalRecords as MemoryLookup;
 use whatsmine_core::{Core, CoreEvent, MessageStatus, NetMode, Settings, TransferState, files};
 
 const WAIT: Duration = Duration::from_secs(60);
@@ -47,7 +47,7 @@ async fn pair(
     let a = start(dirs[0], "Alice", Box::new(|_| {}));
     let b = start(dirs[1], "Bob", Box::new(bob_settings));
     let (mut ra, mut rb) = (a.subscribe(), b.subscribe());
-    a.add_contact(&b.my_key(), None).unwrap();
+    a.add_contact(&b.invite_link(), None).unwrap();
     wait_for(&mut rb, "request", |e| {
         matches!(e, CoreEvent::RequestReceived { .. })
     })
@@ -67,7 +67,7 @@ fn write_pattern(path: &std::path::Path, len: usize) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn file_arrives_complete_and_verified() {
-    let lookup = MemoryLookup::new();
+    let lookup = MemoryLookup::default();
     let (da, db_, src) = (
         tempfile::tempdir().unwrap(),
         tempfile::tempdir().unwrap(),
@@ -131,7 +131,7 @@ async fn file_arrives_complete_and_verified() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn offers_over_the_receivers_limit_are_declined() {
-    let lookup = MemoryLookup::new();
+    let lookup = MemoryLookup::default();
     let (da, db_, src) = (
         tempfile::tempdir().unwrap(),
         tempfile::tempdir().unwrap(),
@@ -172,7 +172,7 @@ async fn offers_over_the_receivers_limit_are_declined() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_queued_file_is_sent_when_the_peer_comes_back() {
-    let lookup = MemoryLookup::new();
+    let lookup = MemoryLookup::default();
     let (da, db_, src) = (
         tempfile::tempdir().unwrap(),
         tempfile::tempdir().unwrap(),
@@ -211,7 +211,7 @@ async fn a_queued_file_is_sent_when_the_peer_comes_back() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn profile_pictures_reach_contacts_and_can_be_removed() {
-    let lookup = MemoryLookup::new();
+    let lookup = MemoryLookup::default();
     let (da, db_, src) = (
         tempfile::tempdir().unwrap(),
         tempfile::tempdir().unwrap(),
@@ -258,7 +258,7 @@ async fn profile_pictures_reach_contacts_and_can_be_removed() {
 /// him back: a correct partial resumes, a corrupt one is detected by the
 /// hash and the file is fetched again. Either way the result is verified.
 async fn offline_partial_scenario(corrupt: bool) {
-    let lookup = MemoryLookup::new();
+    let lookup = MemoryLookup::default();
     let (da, db_, src) = (
         tempfile::tempdir().unwrap(),
         tempfile::tempdir().unwrap(),
@@ -324,7 +324,7 @@ async fn a_corrupt_partial_is_detected_and_refetched() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_stranger_cannot_push_a_picture_before_being_accepted() {
-    let lookup = MemoryLookup::new();
+    let lookup = MemoryLookup::default();
     let (da, ds, src) = (
         tempfile::tempdir().unwrap(),
         tempfile::tempdir().unwrap(),
@@ -349,7 +349,7 @@ async fn a_stranger_cannot_push_a_picture_before_being_accepted() {
         .save(&pic)
         .unwrap();
     stranger.set_avatar(&pic).unwrap();
-    stranger.add_contact(&a.my_key(), None).unwrap();
+    stranger.add_contact(&a.invite_link(), None).unwrap();
     wait_for(&mut ra, "request", |e| {
         matches!(e, CoreEvent::RequestReceived { .. })
     })
@@ -396,7 +396,7 @@ fn sideways_jpeg(w: u32, h: u32) -> Vec<u8> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn camera_photos_arrive_upright_and_without_metadata() {
-    let lookup = MemoryLookup::new();
+    let lookup = MemoryLookup::default();
     let (da, db_, src) = (
         tempfile::tempdir().unwrap(),
         tempfile::tempdir().unwrap(),

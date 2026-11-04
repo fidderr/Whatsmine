@@ -353,6 +353,54 @@ pub enum CoreEvent {
     },
 }
 
+/// How far someone is trusted to be who they say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Trust {
+    /// Came through a link or a code.
+    #[default]
+    Link,
+    /// A code was scanned face to face.
+    MetInPerson,
+    /// The safety words were compared.
+    SafetyWords,
+}
+
+/// What we know to reach a contact by, and how they got here.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ContactKeys {
+    /// Finds their sealed address.
+    pub location: Option<[u8; 32]>,
+    /// Their address when we last knew it, for the same Wi-Fi with no internet.
+    pub network: Option<[u8; 32]>,
+    /// The invite we used to ask them, until they answer.
+    pub invite: Option<crate::identity::Invite>,
+    /// What they wrote when asking, until answered.
+    pub greeting: String,
+    /// Which of our invites they came through.
+    pub via: String,
+    pub trust: Trust,
+    /// They have our current location. False until they are told.
+    pub told: bool,
+}
+
+/// One way for strangers to ask to be added.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MyInvite {
+    pub id: String,
+    pub label: String,
+    pub drop_secret: [u8; 32],
+    pub box_secret: [u8; 32],
+    pub expires_at: Option<Millis>,
+    pub max_uses: Option<u32>,
+    pub uses: u32,
+    pub created_at: Millis,
+    pub revoked: bool,
+    /// The one the name code and the plain link stand for.
+    pub main: bool,
+    /// Whoever comes with this was scanned in person: added both ways without asking.
+    pub met_token: Option<[u8; 16]>,
+}
+
 /// How one connection runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerPath {

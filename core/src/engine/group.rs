@@ -5,6 +5,8 @@
 
 use iroh::PublicKey;
 
+use tokio::time::Instant;
+
 use super::{Engine, clean_name, emit};
 use crate::groups;
 use crate::identity::{key_to_string, parse_key};
@@ -49,7 +51,23 @@ impl Engine {
             return;
         };
         let names = self.group_names(&state);
-        self.send(peer, Frame::GroupUpdate { state, sig, names });
+        let Some(secret) = self.group_secret(&state.id) else {
+            return;
+        };
+        self.send(
+            peer,
+            Frame::GroupUpdate {
+                state,
+                sig,
+                names,
+                secret,
+            },
+        );
+    }
+
+    /// What the members of this group find each other with.
+    pub(super) fn group_secret(&self, gid: &str) -> Option<[u8; 32]> {
+        self.db.secret(&groups::secret_name(gid))?.try_into().ok()
     }
 
     /// Sends the current state of a group to its members that are connected,
@@ -108,6 +126,7 @@ impl Engine {
         state: GroupState,
         sig: Vec<u8>,
         names: Vec<(String, String)>,
+        secret: [u8; 32],
     ) {
         let sender = key_to_string(&peer);
         let me = self.me_id();
@@ -160,6 +179,8 @@ impl Engine {
         if !state.members.contains(&me) {
             self.db.set_group_left(&state.id, false);
         }
+        let _ = self.db.set_secret(&groups::secret_name(&state.id), &secret);
+        self.published = None;
         self.db.prune_group_peers();
         self.refresh_group_messages(&state.id);
         // Group members talk to each other directly: meet the ones we have no connection to.
@@ -168,7 +189,9 @@ impl Engine {
                 if let Some(key) = crate::identity::parse_key(member)
                     && !self.sessions.contains_key(&key)
                 {
-                    self.look_around.push_back(key);
+                    // Worth a few tries: they may not have heard of the group yet either.
+                    self.blips.insert(key, Instant::now());
+                    self.wanted_dirty = true;
                 }
             }
         }
