@@ -49,7 +49,7 @@ pub enum Frame {
         ids: Vec<[u8; 16]>,
     },
     Typing,
-    /// Heartbeat. A peer that stays silent longer than [`PEER_TIMEOUT`] is
+    /// Not sent any more: QUIC has its own heartbeat. A peer that stays silent longer than a time-out was
     /// treated as gone, so "online" stops showing within seconds when an app
     /// is killed without closing its connection.
     Ping,
@@ -169,12 +169,6 @@ pub const MAX_AVATAR: usize = 128 * 1024;
 /// First bytes of every file-data stream, before the 16-byte id and the
 /// 8-byte big-endian offset.
 pub const FILE_STREAM_MAGIC: &[u8; 4] = b"WMF1";
-
-/// How often an idle connection sends a [`Frame::Ping`].
-pub const PING_EVERY: std::time::Duration = std::time::Duration::from_secs(4);
-
-/// Silence after which the peer counts as offline.
-pub const PEER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReceiptKind {

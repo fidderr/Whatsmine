@@ -24,7 +24,7 @@ base64 = "0.22"
 tokio = { version = "1", features = ["time", "sync", "rt"] }
 uuid = { version = "1", features = ["v4"] }
 log = "0.4"
-mobile-sentinel = { version = "0.3.0", path = "../../../mobile-sentinel", features = ["media_picker", "camera", "recorder", "share", "webview_media", "background_service", "battery", "permissions", "display", "scanner"] }
+mobile-sentinel = { version = "0.3.0", path = "../../../mobile-sentinel", features = ["media_picker", "camera", "recorder", "share", "webview_media", "background_service", "battery", "permissions", "display", "scanner", "network"] }
 
 [features]
 default = []

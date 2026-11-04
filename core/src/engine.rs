@@ -6,8 +6,13 @@
 //! outgoing message stays "undelivered" until the peer's `Delivered` receipt
 //! arrives, and every new session re-sends what is undelivered. Receivers
 //! dedupe by message id, so re-sending is always safe.
+//!
+//! How much network is kept up follows [`crate::power`]. Nobody is dialled without a reason:
+//! something to send, a chat that is open, or a look around (at the start, on opening the app,
+//! after a network change, and on each planned check).
 
-use std::collections::{HashMap, HashSet};
+use std::cell::Cell;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -27,10 +32,12 @@ use crate::model::{
     Attachment, ContactState, CoreEvent, Message, MessageStatus, NetStatus, Settings,
     TransferState, now_ms,
 };
+use crate::power::{self, Conditions, Device, Plan};
 use crate::protocol::{
     self, ALPN, Frame, GroupState, MAX_TEXT, PROTO_VERSION, ReceiptKind, VIDEO_STREAM_MAGIC,
     id_from_bytes, id_to_bytes,
 };
+use crate::retry;
 
 mod call;
 mod group;
@@ -38,15 +45,40 @@ mod group;
 use call::{CallState, GroupCalls};
 
 const DIAL_TIMEOUT: Duration = Duration::from_secs(30);
-const BACKOFF_MIN: Duration = Duration::from_secs(3);
-const BACKOFF_MAX: Duration = Duration::from_secs(120);
+/// A connection that broke by itself is tried again this soon: most are network blips.
+const BLIP_RETRY: Duration = Duration::from_secs(3);
+/// Keep trying someone whose connection just broke for this long.
+const BLIP_LASTS: Duration = Duration::from_secs(5 * 60);
 const TYPING_THROTTLE: Duration = Duration::from_secs(3);
-const TICK: Duration = Duration::from_secs(2);
+/// While a call rings, its time-out is looked at this often.
+const CALL_TICK: Duration = Duration::from_secs(2);
+/// Another app using the radio is a cheap moment to look around, but not all the time.
+const RADIO_LOOK_EVERY: Duration = Duration::from_secs(60);
+/// How long a wake-up keeps the endpoint up, for what it finds to get through.
+const AWAKE_FOR: Duration = Duration::from_secs(30);
+/// Looking around dials this many people at a time.
+const LOOK_AROUND_DIALS: usize = 8;
+/// A wake-up scheduled with the system only changes for a difference of this much.
+const WAKE_SLACK: Duration = Duration::from_secs(5);
 
 /// Requests from the `Core` handle.
 pub(crate) enum Cmd {
     /// Connect to this contact now if not connected.
     Dial(PublicKey),
+    /// The device's state changed.
+    Device(Device),
+    /// The network may be another one now, also if it is the same kind.
+    NetworkChanged,
+    /// The app came on screen or went off it.
+    InFront(bool),
+    /// This chat is open on screen, or none is.
+    ChatOpen(Option<PublicKey>),
+    /// The system woke us, as asked with [`CoreEvent::WakeIn`].
+    Wake,
+    /// The radio went active for some app: a cheap moment to look around.
+    RadioActive,
+    /// How the connection stands, for the screen that shows it.
+    Report(tokio::sync::oneshot::Sender<crate::model::ConnectionReport>),
     /// Send this stored message if the contact is connected.
     SendOne {
         contact: PublicKey,
@@ -122,6 +154,7 @@ enum Internal {
         outgoing: bool,
     },
     DialFailed(PublicKey),
+    Bound(anyhow::Result<Endpoint>),
     Frame {
         peer: PublicKey,
         frame: Frame,
@@ -129,6 +162,8 @@ enum Internal {
     Closed {
         peer: PublicKey,
         sid: u64,
+        /// It broke by itself, as opposed to either side closing it.
+        broken: bool,
     },
     Net(NetStatus),
     Progress {
@@ -153,6 +188,8 @@ struct Session {
     conn: Connection,
     /// Who opened this connection. Used to pick one when both dialed at once.
     initiator: PublicKey,
+    /// When a frame last went either way.
+    last_frame: Cell<Instant>,
 }
 
 /// State shared with the `Core` handle for cheap synchronous reads.
@@ -173,9 +210,33 @@ pub(crate) struct Engine {
     events: broadcast::Sender<CoreEvent>,
     shared: Shared,
     mode: NetMode,
+    /// Down when there is no reason to hold anything.
+    ep: Option<Endpoint>,
+    binding: bool,
+    /// The relays this endpoint was bound with on or off, to rebind when the setting changes.
+    bound_with_relays: bool,
+    device: Device,
+    in_front: bool,
+    /// When a message last went either way.
+    last_activity: Option<Instant>,
+    /// Up until then, whatever the plan says.
+    awake_until: Option<Instant>,
+    last_wake: Option<Instant>,
+    next_check: Option<Instant>,
+    /// Who we have a reason to reach, kept up to date when `wanted_dirty`.
+    wanted: HashSet<PublicKey>,
+    wanted_dirty: bool,
+    chat_open: Option<PublicKey>,
+    /// Whose connection broke by itself, and when.
+    blips: HashMap<PublicKey, Instant>,
+    /// Who to look up once, a few at a time.
+    look_around: VecDeque<PublicKey>,
+    /// The wake-up last asked of the system.
+    asked_wake: Option<Instant>,
     sessions: HashMap<PublicKey, Session>,
     dialing: HashSet<PublicKey>,
-    backoff: HashMap<PublicKey, (Instant, Duration)>,
+    /// Not before then, and how many tries failed in a row.
+    backoff: HashMap<PublicKey, (Instant, u32)>,
     /// Peers that asked us not to show their last seen.
     hides_last_seen: HashSet<PublicKey>,
     typing_sent: HashMap<PublicKey, Instant>,
@@ -231,6 +292,21 @@ impl Engine {
             events,
             shared,
             mode,
+            ep: None,
+            binding: false,
+            bound_with_relays: false,
+            device: Device::default(),
+            in_front: false,
+            last_activity: None,
+            awake_until: None,
+            last_wake: None,
+            next_check: None,
+            wanted: HashSet::new(),
+            wanted_dirty: true,
+            chat_open: None,
+            blips: HashMap::new(),
+            look_around: VecDeque::new(),
+            asked_wake: None,
             sessions: HashMap::new(),
             dialing: HashSet::new(),
             backoff: HashMap::new(),
@@ -240,93 +316,339 @@ impl Engine {
             tx,
         };
 
-        let ep = loop {
-            engine.set_net(NetStatus::Connecting);
-            match engine.bind().await {
-                Ok(ep) => break ep,
-                Err(e) => {
-                    tracing::warn!("bind failed: {e:#}");
-                    engine.set_net(NetStatus::Offline);
-                    // Still honour shutdown while we cannot bind.
-                    tokio::select! {
-                        _ = tokio::time::sleep(Duration::from_secs(5)) => {}
-                        cmd = cmds.recv() => match cmd {
-                            Some(Cmd::Shutdown(done)) => {
-                                let _ = done.send(());
-                                return;
-                            }
-                            None => return,
-                            // The database already holds the state; the
-                            // first sessions after binding catch up.
-                            Some(_) => {}
-                        }
-                    }
-                }
-            }
-        };
-
-        spawn_accept_loop(ep.clone(), engine.tx.clone());
-        spawn_online_watch(ep.clone(), engine.tx.clone());
-
-        let mut tick = tokio::time::interval(TICK);
+        // The first look around, once there is an endpoint.
+        engine.look_around_all();
         loop {
+            engine.reconcile();
+            let sleep = tokio::time::sleep_until(engine.next_deadline());
             tokio::select! {
                 cmd = cmds.recv() => match cmd {
                     Some(Cmd::Shutdown(done)) => {
                         for (_, s) in engine.sessions.drain() {
                             s.conn.close(0u32.into(), b"bye");
                         }
-                        let _ = tokio::time::timeout(Duration::from_secs(2), ep.close()).await;
+                        if let Some(ep) = engine.ep.take() {
+                            let _ = tokio::time::timeout(Duration::from_secs(2), ep.close()).await;
+                        }
                         let _ = done.send(());
                         return;
                     }
-                    Some(cmd) => engine.handle_cmd(&ep, cmd),
+                    Some(cmd) => engine.handle_cmd(cmd),
                     None => {
-                        ep.close().await;
+                        if let Some(ep) = engine.ep.take() {
+                            ep.close().await;
+                        }
                         return;
                     }
                 },
                 Some(ev) = rx.recv() => engine.handle_internal(ev),
-                _ = tick.tick() => {
-                    engine.dial_due(&ep);
-                    engine.call_tick();
-                }
+                () = sleep => engine.call_tick(),
             }
         }
     }
 
-    async fn bind(&self) -> anyhow::Result<Endpoint> {
-        match &self.mode {
-            NetMode::Internet => {
-                let ep = Endpoint::builder(presets::N0)
-                    .secret_key(self.key.clone())
-                    .alpns(vec![ALPN.to_vec()])
-                    // Publish/resolve on the BitTorrent Mainline DHT too, so
-                    // finding a peer does not depend on any one company.
-                    .address_lookup(iroh_mainline_address_lookup::DhtAddressLookup::builder())
-                    // Find peers on the same Wi-Fi without the internet.
-                    .address_lookup(iroh_mdns_address_lookup::MdnsAddressLookup::builder())
-                    .bind()
-                    .await?;
-                Ok(ep)
-            }
-            NetMode::Local(lookup) => {
-                let ep = Endpoint::builder(presets::Minimal)
-                    .secret_key(self.key.clone())
-                    .alpns(vec![ALPN.to_vec()])
-                    .relay_mode(iroh::RelayMode::Disabled)
-                    .clear_ip_transports()
-                    .bind_addr("127.0.0.1:0")?
-                    .address_lookup(lookup.clone())
-                    .bind()
-                    .await?;
-                let mut addr = iroh::EndpointAddr::new(ep.id());
-                for sock in ep.bound_sockets() {
-                    addr = addr.with_ip_addr(sock);
+    // ---- how much to keep up ----
+
+    fn conditions(&self) -> Conditions {
+        Conditions {
+            device: self.device,
+            mode: self.settings().speed_mode,
+            in_front: self.in_front,
+            busy: self.call.is_some()
+                || !self.uploads.is_empty()
+                || !self
+                    .downloads
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .is_empty(),
+            since_activity: self.last_activity.map(|at| at.elapsed()),
+        }
+    }
+
+    fn plan(&self) -> Plan {
+        power::plan(&self.conditions())
+    }
+
+    /// Makes what is so match what should be so. Runs after everything that happens.
+    fn reconcile(&mut self) {
+        let now = Instant::now();
+        if self.wanted_dirty {
+            self.refresh_wanted();
+        }
+        let plan = self.plan();
+        self.blips
+            .retain(|_, at| now.duration_since(*at) < BLIP_LASTS);
+
+        // A planned check: up for a moment, and a look around.
+        match plan.check_every {
+            Some(every) => {
+                let due = *self.next_check.get_or_insert(now + every);
+                if due <= now {
+                    self.next_check = Some(now + every);
+                    self.wake_up(now);
                 }
-                lookup.set_endpoint_info(addr);
-                Ok(ep)
             }
+            None => self.next_check = None,
+        }
+
+        let awake = self.awake_until.is_some_and(|until| until > now);
+        let relays_changed = self.ep.is_some()
+            && matches!(self.mode, NetMode::Internet)
+            && self.settings().use_relays != self.bound_with_relays;
+        if relays_changed {
+            self.take_down();
+        }
+        if plan.endpoint_up || awake {
+            if self.ep.is_none() && !self.binding {
+                self.start_binding();
+            }
+        } else if self.ep.is_some()
+            && self.sessions.is_empty()
+            && self.dialing.is_empty()
+            && !plan_keeps_busy(&self.conditions())
+        {
+            self.take_down();
+        }
+
+        self.close_idle(&plan, now);
+        self.dial_due(now);
+        self.ask_for_wake(&plan, now);
+    }
+
+    fn wake_up(&mut self, now: Instant) {
+        self.awake_until = Some(now + AWAKE_FOR);
+        self.last_wake = Some(now);
+        self.look_around_all();
+    }
+
+    fn start_binding(&mut self) {
+        self.binding = true;
+        self.set_net(NetStatus::Connecting);
+        let (key, mode, tx) = (self.key.clone(), self.mode.clone(), self.tx.clone());
+        let settings = self.settings();
+        self.bound_with_relays = settings.use_relays;
+        tokio::spawn(async move {
+            let _ = tx.send(Internal::Bound(bind(key, mode, settings).await));
+        });
+    }
+
+    fn on_bound(&mut self, result: anyhow::Result<Endpoint>) {
+        self.binding = false;
+        match result {
+            Ok(ep) => {
+                spawn_accept_loop(ep.clone(), self.tx.clone());
+                spawn_online_watch(
+                    ep.clone(),
+                    self.tx.clone(),
+                    matches!(self.mode, NetMode::Local(_)),
+                );
+                self.ep = Some(ep);
+            }
+            Err(e) => {
+                tracing::warn!("bind failed: {e:#}");
+                self.set_net(NetStatus::Offline);
+                // Not in a tight loop: until something else happens, or this.
+                self.awake_until = None;
+                let tx = self.tx.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    let _ = tx.send(Internal::Net(NetStatus::Offline));
+                });
+            }
+        }
+    }
+
+    /// Nothing held: the radio can rest.
+    fn take_down(&mut self) {
+        let Some(ep) = self.ep.take() else { return };
+        let peers: Vec<PublicKey> = self.sessions.keys().copied().collect();
+        for peer in peers {
+            self.close_session(peer);
+        }
+        self.dialing.clear();
+        if self.device.network != power::Network::None {
+            // Resting is not being offline: nothing to worry anyone with.
+            self.set_net(NetStatus::Online);
+        }
+        tokio::spawn(async move {
+            let _ = tokio::time::timeout(Duration::from_secs(2), ep.close()).await;
+        });
+    }
+
+    fn close_session(&mut self, peer: PublicKey) {
+        if let Some(s) = self.sessions.get(&peer) {
+            let sid = s.sid;
+            s.conn.close(0u32.into(), REASON_IDLE);
+            self.on_closed(peer, sid);
+        }
+    }
+
+    /// Connections without traffic go, unless something is going on there.
+    fn close_idle(&mut self, plan: &Plan, now: Instant) {
+        let Some(limit) = plan.idle_close else { return };
+        let idle: Vec<PublicKey> = self
+            .sessions
+            .iter()
+            .filter(|(peer, s)| {
+                Some(**peer) != self.chat_open
+                    && !self.wanted.contains(*peer)
+                    && now.duration_since(s.last_frame.get()) >= limit
+            })
+            .map(|(peer, _)| *peer)
+            .collect();
+        for peer in idle {
+            self.close_session(peer);
+        }
+    }
+
+    /// Who we have a reason to reach.
+    fn refresh_wanted(&mut self) {
+        self.wanted_dirty = false;
+        let mut wanted: HashSet<PublicKey> = self
+            .db
+            .peers_owed()
+            .iter()
+            .filter_map(|id| crate::identity::parse_key(id))
+            .collect();
+        wanted.extend(self.chat_open);
+        wanted.extend(self.blips.keys());
+        if let Some(c) = &self.call
+            && c.connected.is_none()
+            && c.outgoing
+        {
+            wanted.extend(c.members.iter().copied());
+        }
+        wanted.remove(&self.me);
+        self.wanted = wanted;
+    }
+
+    /// Everyone we could talk to, once: they may have something for us.
+    fn look_around_all(&mut self) {
+        let in_groups: HashSet<String> = self.db.group_peer_ids().into_iter().collect();
+        self.look_around.clear();
+        for c in self.db.contacts_in(&[
+            ContactState::Accepted,
+            ContactState::PendingOut,
+            ContactState::GroupPeer,
+        ]) {
+            if c.state == ContactState::GroupPeer && !in_groups.contains(&c.id) {
+                continue;
+            }
+            if let Some(peer) = crate::identity::parse_key(&c.id) {
+                self.look_around.push_back(peer);
+            }
+        }
+    }
+
+    /// When there is something to do next, whatever else happens first.
+    fn next_deadline(&self) -> Instant {
+        let now = Instant::now();
+        let plan = self.plan();
+        let mut next = now + Duration::from_secs(3600);
+        let mut sooner = |at: Instant| {
+            if at < next {
+                next = at;
+            }
+        };
+        if self.call.is_some() {
+            sooner(now + CALL_TICK);
+        }
+        if let Some(at) = self.next_check {
+            sooner(at);
+        }
+        if let Some(at) = self.awake_until.filter(|at| *at > now) {
+            sooner(at);
+        }
+        // A recent chat turns into a resting one.
+        if let Some(at) = self.last_activity {
+            let ends = at + power::RECENT_ACTIVITY;
+            if ends > now {
+                sooner(ends);
+            }
+        }
+        if let Some(limit) = plan.idle_close {
+            for s in self.sessions.values() {
+                sooner(s.last_frame.get() + limit);
+            }
+        }
+        for at in self.blips.values() {
+            sooner(*at + BLIP_LASTS);
+        }
+        if self.ep.is_some() {
+            for peer in &self.wanted {
+                if !self.sessions.contains_key(peer) && !self.dialing.contains(peer) {
+                    sooner(self.backoff.get(peer).map_or(now, |(at, _)| *at));
+                }
+            }
+        }
+        next
+    }
+
+    /// Timers stop while the system sleeps. With nothing held the system wakes us for the next
+    /// thing to do: a check, or trying someone we have something for.
+    fn ask_for_wake(&mut self, plan: &Plan, now: Instant) {
+        if plan.endpoint_up {
+            self.asked_wake = None;
+            return;
+        }
+        let mut next = self.next_check;
+        if self.device.network != power::Network::None {
+            for peer in &self.wanted {
+                if let Some((at, _)) = self.backoff.get(peer) {
+                    next = Some(next.map_or(*at, |n| n.min(*at)));
+                }
+            }
+        }
+        let Some(next) = next else { return };
+        let moved = self
+            .asked_wake
+            .is_none_or(|asked| asked.max(next).duration_since(asked.min(next)) > WAKE_SLACK);
+        if moved {
+            self.asked_wake = Some(next);
+            let ms = next.saturating_duration_since(now).as_millis() as u64;
+            emit(&self.events, CoreEvent::WakeIn { ms });
+        }
+    }
+
+    /// What the connection screen shows.
+    fn report(&self) -> crate::model::ConnectionReport {
+        use crate::model::{ConnectionReport, PeerPath};
+        let plan = self.plan();
+        let net = self.ep.as_ref().and_then(|ep| {
+            use iroh::Watcher as _;
+            ep.net_report().get()
+        });
+        let addr = self.ep.as_ref().map(Endpoint::addr);
+        let peers = self
+            .sessions
+            .iter()
+            .map(|(peer, s)| {
+                let selected = s
+                    .conn
+                    .paths()
+                    .iter()
+                    .find(|path| path.is_selected())
+                    .map(|path| (path.is_ip(), path.rtt().as_millis() as u64));
+                PeerPath {
+                    contact_id: key_to_string(peer),
+                    direct: selected.is_some_and(|(ip, _)| ip),
+                    rtt_ms: selected.map(|(_, rtt)| rtt),
+                }
+            })
+            .collect();
+        ConnectionReport {
+            network: self.device.network,
+            level: plan.level,
+            endpoint_up: self.ep.is_some(),
+            reachable_direct: addr
+                .as_ref()
+                .is_some_and(|a| a.ip_addrs().any(|ip| !is_private(ip.ip()))),
+            on_relay: addr
+                .as_ref()
+                .is_some_and(|a| a.relay_urls().next().is_some()),
+            ipv6: net.as_ref().is_some_and(|n| n.udp_v6),
+            hard_nat: net.as_ref().and_then(|n| n.mapping_varies_by_dest_ipv4),
+            peers,
         }
     }
 
@@ -344,18 +666,58 @@ impl Engine {
 
     // ---- commands ----
 
-    fn handle_cmd(&mut self, ep: &Endpoint, cmd: Cmd) {
+    fn handle_cmd(&mut self, cmd: Cmd) {
         match cmd {
             Cmd::Dial(peer) => {
+                self.note_activity();
                 self.backoff.remove(&peer);
                 if !self.sessions.contains_key(&peer) {
-                    self.dial(ep, peer);
+                    self.look_around.push_front(peer);
                 }
+                self.wanted_dirty = true;
+            }
+            Cmd::Device(device) => {
+                let changed = device.network != self.device.network;
+                self.device = device;
+                if changed {
+                    self.on_network_change();
+                }
+            }
+            Cmd::NetworkChanged => self.on_network_change(),
+            Cmd::InFront(in_front) => {
+                if in_front && !self.in_front {
+                    self.backoff.clear();
+                    self.look_around_all();
+                }
+                self.in_front = in_front;
+            }
+            Cmd::ChatOpen(peer) => {
+                self.chat_open = peer;
+                if let Some(peer) = peer {
+                    self.backoff.remove(&peer);
+                }
+                self.wanted_dirty = true;
+            }
+            Cmd::Wake => self.wake_up(Instant::now()),
+            Cmd::RadioActive => {
+                let now = Instant::now();
+                let rested = self
+                    .last_wake
+                    .is_none_or(|at| now.duration_since(at) >= RADIO_LOOK_EVERY);
+                if !self.plan().endpoint_up && rested {
+                    self.wake_up(now);
+                }
+            }
+            Cmd::Report(answer) => {
+                let _ = answer.send(self.report());
             }
             Cmd::SendOne {
                 contact,
                 message_id,
             } => {
+                self.note_activity();
+                self.backoff.remove(&contact);
+                self.wanted_dirty = true;
                 if self.sessions.contains_key(&contact)
                     && let Some(m) = self.db.message(&message_id)
                 {
@@ -363,13 +725,14 @@ impl Engine {
                 }
             }
             Cmd::Accepted(peer) => {
+                self.note_activity();
                 if self.sessions.contains_key(&peer) {
                     let name = self.settings().display_name;
                     self.send(peer, Frame::Accept { name });
                     self.on_accepted_session(peer);
                 } else {
                     self.backoff.remove(&peer);
-                    self.dial(ep, peer);
+                    self.look_around.push_front(peer);
                 }
             }
             Cmd::ReadReceipts(peer) => self.send_read_receipts(peer),
@@ -392,6 +755,9 @@ impl Engine {
                 if let Some(s) = self.sessions.remove(&peer) {
                     s.conn.close(0u32.into(), b"bye");
                 }
+                self.look_around.retain(|p| *p != peer);
+                self.blips.remove(&peer);
+                self.wanted_dirty = true;
                 self.set_online(peer, false, None);
             }
             Cmd::SettingsChanged => {
@@ -419,7 +785,11 @@ impl Engine {
                 target,
                 call,
                 video,
-            } => self.call_invite(target, call, video),
+            } => {
+                self.note_activity();
+                self.call_invite(target, call, video);
+                self.wanted_dirty = true;
+            }
             Cmd::CallJoin { group } => self.call_join(group),
             Cmd::CallAnswer { accept } => self.call_answer(accept),
             Cmd::CallEnd => self.call_hangup(),
@@ -445,7 +815,11 @@ impl Engine {
                 }
             }
             Cmd::CallVideoOn(on) => self.call_video_on(on),
-            Cmd::SendGroup { group, message_id } => self.send_group_message(&group, &message_id),
+            Cmd::SendGroup { group, message_id } => {
+                self.note_activity();
+                self.wanted_dirty = true;
+                self.send_group_message(&group, &message_id);
+            }
             Cmd::GroupPublish {
                 state,
                 sig,
@@ -453,6 +827,11 @@ impl Engine {
                 to,
             } => {
                 self.refresh_group_messages(&state.id);
+                for p in &to {
+                    if !self.sessions.contains_key(p) {
+                        self.look_around.push_back(*p);
+                    }
+                }
                 for p in to {
                     self.send(
                         p,
@@ -465,6 +844,7 @@ impl Engine {
                 }
             }
             Cmd::GroupLeave { group, admin } => {
+                self.wanted_dirty = true;
                 self.send(admin, Frame::GroupLeave { group });
             }
             Cmd::Shutdown(_) => unreachable!("handled in run loop"),
@@ -473,30 +853,51 @@ impl Engine {
 
     // ---- dialing ----
 
-    /// Dials every contact we want to talk to that is not connected and
-    /// whose backoff has expired.
-    fn dial_due(&mut self, ep: &Endpoint) {
-        let now = Instant::now();
-        let wanted = self.db.contacts_in(&[
-            ContactState::Accepted,
-            ContactState::PendingOut,
-            ContactState::GroupPeer,
-        ]);
-        let in_groups: HashSet<String> = self.db.group_peer_ids().into_iter().collect();
-        for c in wanted {
-            let Some(peer) = crate::identity::parse_key(&c.id) else {
-                continue;
+    fn note_activity(&mut self) {
+        self.last_activity = Some(Instant::now());
+    }
+
+    fn on_network_change(&mut self) {
+        if let Some(ep) = self.ep.clone() {
+            // Android tells nobody but us: without this, connections hang until they time out.
+            tokio::spawn(async move { ep.network_change().await });
+        }
+        // Everything may work again now.
+        self.backoff.clear();
+        if self.device.network == power::Network::None {
+            self.set_net(NetStatus::Offline);
+        } else {
+            self.look_around_all();
+        }
+    }
+
+    /// Dials whoever we have a reason to reach and may try again by now, and a few from the look
+    /// around.
+    fn dial_due(&mut self, now: Instant) {
+        let Some(ep) = self.ep.clone() else { return };
+        if self.device.network == power::Network::None {
+            return;
+        }
+        let due: Vec<PublicKey> = self
+            .wanted
+            .iter()
+            .filter(|peer| {
+                !self.sessions.contains_key(*peer)
+                    && !self.dialing.contains(*peer)
+                    && self.backoff.get(*peer).is_none_or(|(at, _)| *at <= now)
+            })
+            .copied()
+            .collect();
+        for peer in due {
+            self.dial(&ep, peer);
+        }
+        while self.dialing.len() < LOOK_AROUND_DIALS {
+            let Some(peer) = self.look_around.pop_front() else {
+                break;
             };
-            if c.state == ContactState::GroupPeer && !in_groups.contains(&c.id) {
-                continue;
+            if !self.sessions.contains_key(&peer) {
+                self.dial(&ep, peer);
             }
-            if self.sessions.contains_key(&peer) || self.dialing.contains(&peer) {
-                continue;
-            }
-            if self.backoff.get(&peer).is_some_and(|(at, _)| *at > now) {
-                continue;
-            }
-            self.dial(ep, peer);
         }
     }
 
@@ -530,12 +931,14 @@ impl Engine {
     }
 
     fn bump_backoff(&mut self, peer: PublicKey) {
-        let delay = self
-            .backoff
-            .get(&peer)
-            .map(|(_, d)| (*d * 2).min(BACKOFF_MAX))
-            .unwrap_or(BACKOFF_MIN);
-        self.backoff.insert(peer, (Instant::now() + delay, delay));
+        let failures = self.backoff.get(&peer).map_or(1, |(_, n)| n + 1);
+        let delay = if self.plan().level == power::Level::InUse {
+            retry::delay_in_use(failures)
+        } else {
+            retry::delay_after(failures)
+        };
+        self.backoff
+            .insert(peer, (Instant::now() + delay, failures));
     }
 
     // ---- internal events ----
@@ -552,8 +955,27 @@ impl Engine {
                 self.dialing.remove(&peer);
                 self.bump_backoff(peer);
             }
-            Internal::Frame { peer, frame } => self.on_frame(peer, frame),
-            Internal::Closed { peer, sid } => self.on_closed(peer, sid),
+            Internal::Bound(result) => self.on_bound(result),
+            Internal::Frame { peer, frame } => {
+                if let Some(s) = self.sessions.get(&peer) {
+                    s.last_frame.set(Instant::now());
+                }
+                match &frame {
+                    Frame::Msg { .. } | Frame::FileOffer { .. } => self.note_activity(),
+                    Frame::Receipt { .. } | Frame::Accept { .. } | Frame::GroupUpdate { .. } => {
+                        self.wanted_dirty = true;
+                    }
+                    _ => {}
+                }
+                self.on_frame(peer, frame);
+            }
+            Internal::Closed { peer, sid, broken } => {
+                let current = self.sessions.get(&peer).map(|s| s.sid) == Some(sid);
+                self.on_closed(peer, sid);
+                if broken && current {
+                    self.on_broken(peer);
+                }
+            }
             Internal::Net(status) => self.set_net(status),
             Internal::Progress {
                 contact_id,
@@ -571,6 +993,7 @@ impl Engine {
             ),
             Internal::UploadEnded { key } => {
                 self.uploads.remove(&key);
+                self.note_activity();
             }
             Internal::Download {
                 peer,
@@ -680,8 +1103,11 @@ impl Engine {
         let peer = conn.remote_id();
         if outgoing {
             self.dialing.remove(&peer);
-            self.backoff.remove(&peer);
         }
+        // Seen: whatever was wrong, it works now.
+        self.backoff.remove(&peer);
+        self.blips.remove(&peer);
+        self.wanted_dirty = true;
         let id = key_to_string(&peer);
         if self
             .db
@@ -732,6 +1158,7 @@ impl Engine {
                 out: out_tx,
                 conn,
                 initiator,
+                last_frame: Cell::new(Instant::now()),
             },
         );
         self.on_session_start(peer);
@@ -761,6 +1188,7 @@ impl Engine {
             _ => {}
         }
         self.on_group_session(peer);
+        self.call_on_session(peer);
     }
 
     /// The peer is connected and both sides have accepted: show them online
@@ -798,9 +1226,15 @@ impl Engine {
             Some(ContactState::GroupPeer) => self.set_online(peer, false, None),
             _ => {}
         }
-        // Try again soon: most disconnects are network blips.
-        self.backoff
-            .insert(peer, (Instant::now() + BACKOFF_MIN, BACKOFF_MIN));
+        self.wanted_dirty = true;
+    }
+
+    /// A connection broke by itself: we did not close it, and neither did they.
+    fn on_broken(&mut self, peer: PublicKey) {
+        let now = Instant::now();
+        self.blips.insert(peer, now);
+        self.backoff.insert(peer, (now + BLIP_RETRY, 0));
+        self.wanted_dirty = true;
     }
 
     fn on_frame(&mut self, peer: PublicKey, frame: Frame) {
@@ -1143,9 +1577,10 @@ impl Engine {
     // ---- sending ----
 
     fn send(&self, peer: PublicKey, frame: Frame) -> bool {
-        self.sessions
-            .get(&peer)
-            .is_some_and(|s| s.out.send(frame).is_ok())
+        self.sessions.get(&peer).is_some_and(|s| {
+            s.last_frame.set(Instant::now());
+            s.out.send(frame).is_ok()
+        })
     }
 
     fn send_hello(&self, peer: PublicKey) {
@@ -1274,6 +1709,87 @@ impl Engine {
     }
 }
 
+/// How a connection closes when both sides simply have nothing to say.
+const REASON_IDLE: &[u8] = b"idle";
+
+/// With a file moving or a call on, the endpoint stays, whatever the sessions say.
+fn plan_keeps_busy(c: &Conditions) -> bool {
+    c.busy
+}
+
+/// Not reachable from elsewhere, as far as an address can tell.
+fn is_private(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_private() || v4.is_loopback() || v4.is_link_local() || v4.is_unspecified()
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_unique_local()
+                || v6.is_unicast_link_local()
+        }
+    }
+}
+
+/// The relays to use: n0's public ones plus any set by hand, or none at all.
+fn relay_mode(settings: &Settings) -> iroh::RelayMode {
+    use iroh::{RelayMap, RelayMode};
+    if !settings.use_relays {
+        return RelayMode::Disabled;
+    }
+    if settings.extra_relays.is_empty() {
+        return RelayMode::Default;
+    }
+    let map = RelayMode::Default.relay_map();
+    match RelayMap::try_from_iter(settings.extra_relays.iter().map(String::as_str)) {
+        Ok(extra) => {
+            map.extend(&extra);
+            RelayMode::Custom(map)
+        }
+        Err(e) => {
+            tracing::warn!("ignoring the extra relays: {e:#}");
+            RelayMode::Default
+        }
+    }
+}
+
+async fn bind(key: SecretKey, mode: NetMode, settings: Settings) -> anyhow::Result<Endpoint> {
+    match mode {
+        NetMode::Internet => {
+            let ep = Endpoint::builder(presets::Minimal)
+                .secret_key(key)
+                .alpns(vec![ALPN.to_vec()])
+                .relay_mode(relay_mode(&settings))
+                // Publish and resolve on the BitTorrent Mainline DHT, so finding a peer does not
+                // depend on any one company.
+                .address_lookup(iroh_mainline_address_lookup::DhtAddressLookup::builder())
+                // Find peers on the same Wi-Fi without the internet.
+                .address_lookup(iroh_mdns_address_lookup::MdnsAddressLookup::builder())
+                .bind()
+                .await?;
+            Ok(ep)
+        }
+        NetMode::Local(lookup) => {
+            let ep = Endpoint::builder(presets::Minimal)
+                .secret_key(key)
+                .alpns(vec![ALPN.to_vec()])
+                .relay_mode(iroh::RelayMode::Disabled)
+                .clear_ip_transports()
+                .bind_addr("127.0.0.1:0")?
+                .address_lookup(lookup.clone())
+                .bind()
+                .await?;
+            let mut addr = iroh::EndpointAddr::new(ep.id());
+            for sock in ep.bound_sockets() {
+                addr = addr.with_ip_addr(sock);
+            }
+            lookup.set_endpoint_info(addr);
+            Ok(ep)
+        }
+    }
+}
+
 /// Names are display-only; keep them short and single-line.
 pub(crate) fn clean_name(name: &str) -> String {
     name.chars()
@@ -1311,33 +1827,38 @@ fn spawn_accept_loop(ep: Endpoint, tx: mpsc::UnboundedSender<Internal>) {
     });
 }
 
-fn spawn_online_watch(ep: Endpoint, tx: mpsc::UnboundedSender<Internal>) {
+/// Online means someone can reach us: an address that goes somewhere, or a relay. A phone in a
+/// tunnel has neither. Ends with the endpoint.
+fn spawn_online_watch(ep: Endpoint, tx: mpsc::UnboundedSender<Internal>, loopback_counts: bool) {
+    use iroh::Watcher as _;
     tokio::spawn(async move {
-        let online = ep.online();
-        tokio::pin!(online);
-        tokio::select! {
-            _ = &mut online => {}
-            _ = tokio::time::sleep(Duration::from_secs(15)) => {
+        let mut addrs = ep.watch_addr();
+        let started = Instant::now();
+        loop {
+            let addr = addrs.get();
+            let online = addr.relay_urls().next().is_some()
+                || addr
+                    .ip_addrs()
+                    .any(|ip| loopback_counts || !ip.ip().is_loopback());
+            if online {
+                let _ = tx.send(Internal::Net(NetStatus::Online));
+            } else if started.elapsed() > Duration::from_secs(15) {
                 let _ = tx.send(Internal::Net(NetStatus::Offline));
-                online.await;
+            }
+            // Also now and then, for the time-out above.
+            match tokio::time::timeout(Duration::from_secs(16), addrs.updated()).await {
+                Ok(Err(_)) => return,
+                Ok(Ok(_)) => {}
+                Err(_) if ep.is_closed() => return,
+                Err(_) => {}
             }
         }
-        let _ = tx.send(Internal::Net(NetStatus::Online));
     });
 }
 
 fn spawn_writer(mut send: SendStream, mut rx: mpsc::UnboundedReceiver<Frame>, conn: Connection) {
     tokio::spawn(async move {
-        let mut ping = tokio::time::interval(protocol::PING_EVERY);
-        ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            let frame = tokio::select! {
-                frame = rx.recv() => match frame {
-                    Some(f) => f,
-                    None => break,
-                },
-                _ = ping.tick() => Frame::Ping,
-            };
+        while let Some(frame) = rx.recv().await {
             if let Err(e) = protocol::write_frame(&mut send, &frame).await {
                 tracing::debug!("write failed: {e:#}");
                 conn.close(2u32.into(), b"write error");
@@ -1404,11 +1925,8 @@ fn spawn_reader(
 ) {
     tokio::spawn(async move {
         loop {
-            let read =
-                tokio::time::timeout(protocol::PEER_TIMEOUT, protocol::read_frame(&mut recv))
-                    .await
-                    .unwrap_or_else(|_| Err(anyhow::anyhow!("peer silent too long")));
-            match read {
+            // QUIC's own heartbeat and idle time-out notice a peer that is gone.
+            match protocol::read_frame(&mut recv).await {
                 Ok(Ok(frame)) => {
                     if tx.send(Internal::Frame { peer, frame }).is_err() {
                         return;
@@ -1417,13 +1935,23 @@ fn spawn_reader(
                 Ok(Err(e)) => tracing::debug!("skipping unreadable frame: {e:#}"),
                 Err(e) => {
                     tracing::debug!("session {sid} with {} ended: {e:#}", peer.fmt_short());
+                    let broken = !closed_on_purpose(&conn);
                     conn.close(0u32.into(), b"closed");
-                    let _ = tx.send(Internal::Closed { peer, sid });
+                    let _ = tx.send(Internal::Closed { peer, sid, broken });
                     return;
                 }
             }
         }
     });
+}
+
+/// One of the two sides closed it, as opposed to the connection breaking.
+fn closed_on_purpose(conn: &Connection) -> bool {
+    use iroh::endpoint::ConnectionError;
+    matches!(
+        conn.close_reason(),
+        Some(ConnectionError::ApplicationClosed(_) | ConnectionError::LocallyClosed)
+    )
 }
 
 #[cfg(test)]

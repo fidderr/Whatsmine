@@ -442,6 +442,29 @@ impl Database {
 
     /// Moves an outgoing message's status forward (never backward).
     /// Returns true if it changed.
+    /// Everyone something still has to reach: a message of ours, a request, a group message, a
+    /// goodbye to a group's admin. Who is blocked or deleted is owed nothing.
+    pub fn peers_owed(&self) -> Vec<String> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT m.contact_id FROM messages m JOIN contacts c ON c.id = m.contact_id
+                 WHERE m.outgoing = 1 AND m.status < 2 AND c.kind = 'person'
+                   AND c.state = 'accepted'
+                   AND (m.attachment IS NULL OR m.attachment NOT LIKE '%\"state\":\"Declined\"%')
+                 UNION
+                 SELECT id FROM contacts WHERE state = 'pending_out'
+                 UNION
+                 SELECT a.member_id FROM group_acks a WHERE a.status < 2
+                 UNION
+                 SELECT g.admin FROM groups g WHERE g.left = 1",
+            )
+            .expect("valid SQL");
+        stmt.query_map([], |row| row.get(0))
+            .map(|rows| rows.filter_map(Result::ok).collect())
+            .unwrap_or_default()
+    }
+
     pub fn advance_status(&self, contact_id: &str, id: &str, status: MessageStatus) -> bool {
         self.lock()
             .execute(

@@ -162,6 +162,16 @@ impl Engine {
         }
         self.db.prune_group_peers();
         self.refresh_group_messages(&state.id);
+        // Group members talk to each other directly: meet the ones we have no connection to.
+        if still_in {
+            for member in state.members.iter().filter(|m| **m != me) {
+                if let Some(key) = crate::identity::parse_key(member)
+                    && !self.sessions.contains_key(&key)
+                {
+                    self.look_around.push_back(key);
+                }
+            }
+        }
         emit(&self.events, CoreEvent::ContactsChanged);
     }
 

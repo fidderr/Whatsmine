@@ -27,6 +27,75 @@ pub fn init_once() {
     });
 }
 
+/// Keeps the core told of what only Android knows: the network, the battery, and when to wake.
+/// Android's own callbacks run on its threads, and each only passes the news on.
+pub fn watch_device(core: whatsmine_core::Core) {
+    use mobile_sentinel::battery;
+    use mobile_sentinel::network::{self, ConnectionType};
+    use std::sync::Arc;
+    use whatsmine_core::power::{Device, Network};
+
+    let network_of = |kind: ConnectionType| match kind {
+        ConnectionType::Wifi => Network::Wifi,
+        ConnectionType::Cellular => Network::Mobile,
+        ConnectionType::Other => Network::Wired,
+        ConnectionType::None => Network::None,
+    };
+    let power = battery::power_state();
+    let device = Arc::new(Mutex::new(Device {
+        network: network_of(network::connection_type()),
+        charging: power.charging,
+        power_save: power.power_save,
+        low_battery: power.low,
+    }));
+    core.set_device(*device.lock().unwrap_or_else(|p| p.into_inner()));
+
+    {
+        let (core, device) = (core.clone(), device.clone());
+        network::on_change(move |state| {
+            let mut d = device.lock().unwrap_or_else(|p| p.into_inner());
+            d.network = network_of(state.kind);
+            core.set_device(*d);
+            core.network_changed();
+        });
+    }
+    {
+        let core = core.clone();
+        network::on_radio_active(move || core.radio_active());
+    }
+    {
+        let core = core.clone();
+        battery::on_power_change(move |state| {
+            let mut d = device.lock().unwrap_or_else(|p| p.into_inner());
+            d.charging = state.charging;
+            d.power_save = state.power_save;
+            d.low_battery = state.low;
+            core.set_device(*d);
+        });
+    }
+    {
+        let core = core.clone();
+        bg::on_wake(move || core.wake());
+    }
+    // What the core asks for goes to the system's alarm: its own timers stop in Doze.
+    let mut events = core.subscribe();
+    std::thread::Builder::new()
+        .name("whatsmine-wake".into())
+        .spawn(move || {
+            use tokio::sync::broadcast::error::RecvError;
+            loop {
+                match events.blocking_recv() {
+                    Ok(whatsmine_core::CoreEvent::WakeIn { ms }) => {
+                        bg::wake_in(ms);
+                    }
+                    Ok(_) | Err(RecvError::Lagged(_)) => {}
+                    Err(RecvError::Closed) => return,
+                }
+            }
+        })
+        .ok();
+}
+
 /// What to open when a notification is tapped: `chat:<id>` or `requests`.
 fn open_string(n: &Notice) -> String {
     match (&n.chat, n.kind) {

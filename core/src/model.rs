@@ -277,6 +277,10 @@ pub struct Settings {
     pub background: bool,
     /// Windows: start with the PC (hidden, in the tray).
     pub start_with_system: bool,
+    /// How fast against how much battery.
+    pub speed_mode: crate::power::SpeedMode,
+    /// Use public relays when a direct connection is impossible.
+    pub use_relays: bool,
 }
 
 /// Default for [`Settings::max_file_mb`].
@@ -299,6 +303,8 @@ impl Default for Settings {
             notification_previews: true,
             background: true,
             start_with_system: false,
+            speed_mode: crate::power::SpeedMode::default(),
+            use_relays: true,
         }
     }
 }
@@ -334,6 +340,10 @@ pub enum CoreEvent {
     MessageUpdated(Message),
     /// Something happened to a voice/video call.
     Call(crate::calls::CallEvent),
+    /// Nothing is held right now, and timers stop while the system sleeps: wake us in this long.
+    WakeIn {
+        ms: u64,
+    },
     /// Bytes moved for a file, either direction. Throttled.
     Transfer {
         contact_id: String,
@@ -341,6 +351,31 @@ pub enum CoreEvent {
         done: u64,
         total: u64,
     },
+}
+
+/// How one connection runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerPath {
+    pub contact_id: String,
+    /// Directly, as opposed to through a relay.
+    pub direct: bool,
+    pub rtt_ms: Option<u64>,
+}
+
+/// How the connection stands, in facts, for the screen that explains it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectionReport {
+    pub network: crate::power::Network,
+    pub level: crate::power::Level,
+    /// False while resting: nothing is held.
+    pub endpoint_up: bool,
+    /// One of our addresses is reachable from elsewhere.
+    pub reachable_direct: bool,
+    pub on_relay: bool,
+    pub ipv6: bool,
+    /// The router gives another address per destination. `None`: not known.
+    pub hard_nat: Option<bool>,
+    pub peers: Vec<PeerPath>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

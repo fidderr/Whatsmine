@@ -381,7 +381,8 @@ fn Main(core: AppCore) -> Element {
     #[cfg(feature = "test-hooks")]
     {
         let dir = core.0.data_dir().to_path_buf();
-        use_hook(move || crate::debug_hooks::start(dir));
+        let hook_core = core.0.clone();
+        use_hook(move || crate::debug_hooks::start(dir, hook_core));
         use_future(crate::debug_hooks::script_loop);
     }
 

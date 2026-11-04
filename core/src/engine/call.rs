@@ -213,7 +213,13 @@ impl Engine {
             .copied()
             .filter(|m| self.sessions.contains_key(m))
             .collect();
-        if invited.is_empty() {
+        // Whoever is not connected gets dialled, and rung as soon as they are there.
+        for m in &members {
+            if !invited.contains(m) {
+                self.backoff.remove(m);
+            }
+        }
+        if members.is_empty() {
             return ended(self, CallEndReason::Lost);
         }
         if let Some(g) = &group {
@@ -619,6 +625,24 @@ impl Engine {
     }
 
     /// A connection dropped: drop the person from calls too.
+    /// Someone we are ringing but could not reach before is there now.
+    pub(super) fn call_on_session(&mut self, peer: PublicKey) {
+        let Some(c) = self.call.as_mut() else { return };
+        if !c.outgoing
+            || c.connected.is_some()
+            || !c.members.contains(&peer)
+            || !c.invited.insert(peer)
+        {
+            return;
+        }
+        let frame = Frame::CallInvite {
+            call: c.id,
+            video: c.video,
+            group: c.group.clone(),
+        };
+        self.send(peer, frame);
+    }
+
     pub(super) fn call_session_closed(&mut self, peer: PublicKey) {
         let groups: Vec<(String, [u8; 16])> = self
             .group_calls

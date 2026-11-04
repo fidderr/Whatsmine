@@ -66,6 +66,13 @@ async fn send_and_report(
 
 #[component]
 fn ChatView(id: String) -> Element {
+    // While it is open, whoever it is with stays worth trying.
+    {
+        let (core, open) = (use_core(), id.clone());
+        use_hook(move || core.set_chat_open(Some(&open)));
+        let core = use_core();
+        use_drop(move || core.set_chat_open(None));
+    }
     let tr = use_tr();
     let core = use_core();
     let rev = use_context::<Rev>().0;

@@ -20,7 +20,9 @@ pub mod groups;
 pub mod identity;
 pub mod model;
 pub mod paths;
+pub mod power;
 pub mod protocol;
+pub mod retry;
 #[cfg(feature = "test-hooks")]
 mod seed;
 
@@ -298,6 +300,45 @@ impl Core {
 
     pub fn subscribe(&self) -> broadcast::Receiver<CoreEvent> {
         self.inner.events.subscribe()
+    }
+
+    /// What the device says about itself (Android: network, charger, battery saver).
+    pub fn set_device(&self, device: power::Device) {
+        self.cmd(Cmd::Device(device));
+    }
+
+    /// The network may be another one now, also if it is the same kind. Android does not tell
+    /// the network library by itself.
+    pub fn network_changed(&self) {
+        self.cmd(Cmd::NetworkChanged);
+    }
+
+    /// The app came on screen or went off it.
+    pub fn set_in_front(&self, in_front: bool) {
+        self.cmd(Cmd::InFront(in_front));
+    }
+
+    /// This chat is open on screen (keep trying them), or none is.
+    pub fn set_chat_open(&self, contact_id: Option<&str>) {
+        let peer = contact_id.and_then(identity::parse_key);
+        self.cmd(Cmd::ChatOpen(peer));
+    }
+
+    /// The system woke us, as asked with [`CoreEvent::WakeIn`].
+    pub fn wake(&self) {
+        self.cmd(Cmd::Wake);
+    }
+
+    /// The radio went active for some app: a cheap moment to look around.
+    pub fn radio_active(&self) {
+        self.cmd(Cmd::RadioActive);
+    }
+
+    /// How the connection stands, for the screen that explains it.
+    pub async fn connection_report(&self) -> Option<ConnectionReport> {
+        let (answer, report) = tokio::sync::oneshot::channel();
+        self.cmd(Cmd::Report(answer));
+        report.await.ok()
     }
 
     pub fn net_status(&self) -> NetStatus {

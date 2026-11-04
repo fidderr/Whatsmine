@@ -18,22 +18,27 @@ pub fn Shell() -> Element {
     let invite = use_context::<InviteSig>();
     let _ = (&settings, invite);
 
-    // Is the app in front of the user? Then the system stays quiet.
-    use_future(move || async move {
-        let mut eval = document::eval(
-            "const android = /Android/.test(navigator.userAgent);\n\
+    // Is the app in front of the user? Then the system stays quiet, and the connections open.
+    let front_core = core.clone();
+    use_future(move || {
+        let core = front_core.clone();
+        async move {
+            let mut eval = document::eval(
+                "const android = /Android/.test(navigator.userAgent);\n\
              const report = () => dioxus.send(document.visibilityState === 'visible' && (android || document.hasFocus()));\n\
              document.addEventListener('visibilitychange', report);\n\
              window.addEventListener('focus', report);\n\
              window.addEventListener('blur', report);\n\
              report();\n\
              await new Promise(() => {});",
-        );
-        while let Ok(active) = eval.recv::<bool>().await {
-            notify::set_ui_active(active);
-            #[cfg(target_os = "android")]
-            if active {
-                open_requested(nav, invite);
+            );
+            while let Ok(active) = eval.recv::<bool>().await {
+                notify::set_ui_active(active);
+                core.set_in_front(active);
+                #[cfg(target_os = "android")]
+                if active {
+                    open_requested(nav, invite);
+                }
             }
         }
     });

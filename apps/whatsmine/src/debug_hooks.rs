@@ -5,6 +5,7 @@
 //!
 //!   `js:<script>`: run in the page, the result is left in `debug_script_result.txt`.
 //!     It is how the scenarios press buttons and read the screen, on any screen size.
+//!   `report`: how the connection stands, in `debug_report.txt`.
 //!
 //! `<data dir>/debug_<name>.txt` holds a number to use instead of a wait that takes too long for
 //! a test, see [`crate::platform::shortened`].
@@ -23,27 +24,62 @@ static DIR: OnceLock<PathBuf> = OnceLock::new();
 pub const TEST_WINDOW: &str = "WHATSMINE_TEST_WINDOW";
 
 /// Watch for what the harness writes.
-pub fn start(dir: PathBuf) {
+pub fn start(dir: PathBuf, core: whatsmine_core::Core) {
     if DIR.set(dir.clone()).is_err() {
         return;
     }
     std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build();
         loop {
             std::thread::sleep(Duration::from_millis(30));
-            take_action(&dir);
+            if take_action(&dir)
+                && let Ok(runtime) = &runtime
+            {
+                let report = runtime.block_on(core.connection_report());
+                write_report(&dir, report);
+            }
         }
     });
 }
 
-fn take_action(dir: &Path) {
+/// Returns whether the harness asked for a report.
+fn take_action(dir: &Path) -> bool {
     let path = dir.join("debug_action.txt");
     let Ok(contents) = std::fs::read_to_string(&path) else {
-        return;
+        return false;
     };
-    if let Some(script) = contents.trim().strip_prefix("js:") {
+    let contents = contents.trim();
+    if let Some(script) = contents.strip_prefix("js:") {
         *SCRIPT.lock().unwrap_or_else(PoisonError::into_inner) = Some(script.to_owned());
     }
     let _ = std::fs::remove_file(&path);
+    contents == "report"
+}
+
+/// In one go: the harness reads it as soon as it is there.
+fn write_report(dir: &Path, report: Option<whatsmine_core::ConnectionReport>) {
+    let text = report.map_or_else(
+        || "no report".to_owned(),
+        |r| {
+            format!(
+                "level={:?} up={} network={:?} reachable_direct={} on_relay={} ipv6={} hard_nat={:?} peers={}",
+                r.level,
+                r.endpoint_up,
+                r.network,
+                r.reachable_direct,
+                r.on_relay,
+                r.ipv6,
+                r.hard_nat,
+                r.peers.len()
+            )
+        },
+    );
+    let unfinished = dir.join("debug_report.tmp");
+    if std::fs::write(&unfinished, text).is_ok() {
+        let _ = std::fs::rename(unfinished, dir.join("debug_report.txt"));
+    }
 }
 
 /// What the harness left for this start, in words: `demo` for a device that has been in use for

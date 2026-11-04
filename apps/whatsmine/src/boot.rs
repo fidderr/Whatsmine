@@ -18,6 +18,8 @@ fn start(dir: Result<std::path::PathBuf, String>) -> Result<Core, String> {
     #[cfg(feature = "test-hooks")]
     crate::debug_hooks::seed_if_asked(&core);
     crate::notify::start(core.clone());
+    #[cfg(target_os = "android")]
+    crate::android::watch_device(core.clone());
     Ok(core)
 }
 
