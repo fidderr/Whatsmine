@@ -1,1 +1,6 @@
 target/
+devtest-out/
+release/
+*.jks
+*.keystore
+keystore.properties
