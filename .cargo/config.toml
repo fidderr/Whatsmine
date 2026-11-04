@@ -1,0 +1,7 @@
+# Android 15+ phones can have 16 KB memory pages, and Play requires apps to run on them.
+[target.aarch64-linux-android]
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
+
+# Emulators.
+[target.x86_64-linux-android]
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]

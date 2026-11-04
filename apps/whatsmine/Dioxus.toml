@@ -4,11 +4,11 @@ default_platform = "desktop"
 asset_dir = "assets"
 
 [application.android]
-min_sdk_version = 26
+min_sdk_version = 31
 target_sdk_version = 36
 
 [android]
-min_sdk = 26
+min_sdk = 31
 target_sdk = 36
 compile_sdk = 36
 
