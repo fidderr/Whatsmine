@@ -14,7 +14,7 @@
 # Gradle project, then mobile-sentinel's `build_sentinel` wires in the Kotlin
 # for exactly the capabilities the app enables (apps/whatsmine/Cargo.toml),
 # copies the icon, and runs Gradle. It uses the sibling ../mobile-sentinel
-# checkout until mobile-sentinel 0.2.2 is published.
+# checkout, pinned to the published version.
 #
 # Android needs ANDROID_HOME, ANDROID_NDK_HOME and JAVA_HOME. If they are not
 # set, the defaults below (this machine's Android Studio layout) are used.
