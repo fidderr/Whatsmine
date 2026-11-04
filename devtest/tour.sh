@@ -58,27 +58,32 @@ fi
 
 # Edge to edge, a keyboard changes nothing the page can see: the app has to make room itself.
 scenario keyboard
+room_made() {
+    [ "$(ask_page "var root = document.querySelector('.app-root'); return parseFloat(getComputedStyle(root).getPropertyValue('--safe-bottom')) > 100 ? 'y' : 'n';")" = y ]
+}
 if keyboard_can_show; then
     touch_on 'textarea, input[type=text]'
-    if wait_for 5 keyboard_up; then
+    # A keyboard that was not running yet takes a while on an emulator.
+    if wait_for 20 room_made; then
         sleep 0.5
         picture chat_keyboard
         bottom=$(ask_page "var r = document.querySelector('.send-btn').getBoundingClientRect(), root = document.querySelector('.app-root'); return Math.round(r.bottom) + ' ' + Math.round(innerHeight - parseFloat(getComputedStyle(root).getPropertyValue('--safe-bottom')));")
         read -r button free <<< "$bottom"
-        if [ "${button:-99999}" -le "${free:-0}" ] && [ "${free:-99999}" -lt "$(ask_page "return innerHeight - 100")" ]; then
+        if [ "${button:-99999}" -le "${free:-0}" ]; then
             pass "the send button ends at $button, the keyboard starts at $free"
         else
             fail "the send button ends at $button with the keyboard at $free"
         fi
-        keyboard_down
     else
-        fail "no keyboard came up"
+        picture chat_keyboard_missing
+        fail "no room was made for a keyboard: up=$(keyboard_up && echo yes || echo no)"
     fi
+    keyboard_down
 else
     skip "no keyboard on screen here"
 fi
 go_back
-on_screen .bottom-nav 6
+on_screen .bottom-nav 6 || fail "not back on the chat list"
 
 scenario tabs
 for tab in 1 2 3; do

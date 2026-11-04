@@ -13,6 +13,7 @@ WEB_DATA="$(cygpath -u "$LOCALAPPDATA")/fidderr/WhatsMine/devtest-webview-$PROFI
 APP_PID=""
 
 device_ok() { true; }
+before_scenario() { :; }
 
 app_env() {
     # shellcheck disable=SC2034

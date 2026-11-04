@@ -65,17 +65,26 @@ read_text() { ask_page "var e = document.querySelector('$1'); return e ? e.textC
 click() {
     local said
     said=$(js "var e = document.querySelectorAll('$1')[${2:-0}]; if (!e) return 'nothing like $1'; e.click(); return 'ok'")
-    [ "$said" = ok ] || note "click $1: $said"
     sleep "${3:-0.2}"
-    [ "$said" = ok ]
+    # A click whose answer got lost still happened: what comes next says whether it worked.
+    case "$said" in
+        "nothing like"*)
+            note "click $1: $said"
+            return 1
+            ;;
+    esac
 }
 # By what a person reads on it: a button or link with this text.
 click_text() {
     local said
     said=$(js "var want = '$1'.toLowerCase(); var e = [...document.querySelectorAll('button, a, [role=button], .sheet-option')].find(b => b.textContent.trim().toLowerCase() === want); if (!e) return 'no button says $1'; e.click(); return 'ok'")
-    [ "$said" = ok ] || note "click_text $1: $said"
     sleep "${2:-0.2}"
-    [ "$said" = ok ]
+    case "$said" in
+        "no button says"*)
+            note "click_text $1: $said"
+            return 1
+            ;;
+    esac
 }
 # What a person types goes through the page's own handlers.
 type_in() { # selector text
@@ -158,6 +167,7 @@ scenario() {
         echo "STOP  $CURRENT  the device does not respond" | tee -a "$RESULTS"
         exit 2
     }
+    before_scenario
 }
 took() { echo "$((SECONDS - SCENARIO_START))s"; }
 pass() { echo "PASS  $CURRENT  [$(took)] $1" | tee -a "$RESULTS"; }

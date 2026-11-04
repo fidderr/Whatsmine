@@ -24,8 +24,10 @@ use n0_mainline::{Dht, MutableItem, SigningKey};
 use serde_json::{Value, json};
 
 const ALPN: &[u8] = b"whatsmine-netlab/1";
-/// A sealed location record is at most this: what BEP44 allows for a value.
-const RECORD_SIZE: usize = 1000;
+/// What a sealed location record can be. BEP44 allows 1000 bytes for a value, but nodes count its
+/// encoded form: measured on the real DHT, 980 bytes always goes and 1000 never does.
+const RECORD_SIZE: usize = 900;
+const MAX_VALUE: usize = 1000;
 const WAIT: Duration = Duration::from_secs(30);
 
 fn line(value: Value) {
@@ -204,10 +206,7 @@ async fn read_first(dht: &Dht, key: &[u8; 32]) -> Option<Vec<u8>> {
 }
 
 async fn dht(rounds: usize, size: usize) -> Result<()> {
-    anyhow::ensure!(
-        size <= RECORD_SIZE,
-        "a record is at most {RECORD_SIZE} bytes"
-    );
+    anyhow::ensure!(size <= MAX_VALUE, "a value is at most {MAX_VALUE} bytes");
     let writer = client("writer").await?;
     let reader = client("reader").await?;
     let (mut puts, mut gets, mut put_ok, mut get_ok) = (Vec::new(), Vec::new(), 0, 0);

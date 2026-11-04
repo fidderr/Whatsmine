@@ -26,7 +26,29 @@ emulator_stop() {
     powershell.exe -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { \$_.Name -match 'emulator|qemu' -and \$_.CommandLine -match '-port ${SERIAL#emulator-}' } | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force -ErrorAction SilentlyContinue }"
     sleep 1
 }
-# Up and past its lock screen. A phone is only checked: it is someone's, and stays as it is.
+# Awake, Asleep or Dozing. A picture of an asleep screen is black and says nothing, and touches
+# go nowhere.
+wakefulness() { adb_ shell "dumpsys power | grep -m1 mWakefulness=" 2> /dev/null | tr -d '\r' | sed 's/.*=//'; }
+no_keyguard() {
+    adb_ shell "dumpsys window displays | grep -q 'isKeyguardShowing=false'" > /dev/null 2>&1 && return 0
+    adb_ shell wm dismiss-keyguard > /dev/null 2>&1
+    return 1
+}
+# An emulator can put its setting back after booting, and go dark soon after: so this comes before
+# every scenario. A phone is left as it is: it is someone's, with a PIN no script knows.
+before_scenario() {
+    on_emulator || return 0
+    if [ "$(adb_ shell settings get system screen_off_timeout | tr -d '\r')" != 86400000 ]; then
+        adb_ shell settings put system screen_off_timeout 86400000
+    fi
+    if [ "$(wakefulness)" != Awake ]; then
+        note "the screen was dark: woken"
+        adb_ shell input keyevent KEYCODE_WAKEUP
+    fi
+    wait_for 5 no_keyguard || note "the lock screen stays"
+}
+
+# Up, and past its lock screen.
 device_ready() {
     if device_ok; then
         :
@@ -39,13 +61,7 @@ device_ready() {
     fi
     timeout 240 "$ADB" -s "$SERIAL" shell 'while [ -z "$(getprop sys.boot_completed)" ]; do sleep 0.5; done' || return 1
     open_shells
-    if on_emulator; then
-        # A tap from the page is no activity to Android: left to itself the screen goes dark
-        # mid-run, and every picture after that is black.
-        dev settings put system screen_off_timeout 86400000
-        dev input keyevent KEYCODE_WAKEUP
-        dev wm dismiss-keyguard
-    fi
+    before_scenario
 }
 
 # Two shells on the device that stay open, one as adb and one as the app. Starting adb for every
@@ -180,10 +196,13 @@ keyboard_can_show() {
     return 0
 }
 keyboard_up() { dev "dumpsys input_method | grep -q 'mInputShown=true'" > /dev/null; }
+keyboard_gone() { ! keyboard_up; }
+# Only when it is there: otherwise Back leaves the screen.
 keyboard_down() {
     keyboard_up || return 0
     dev input keyevent KEYCODE_BACK
-    sleep 0.3
+    wait_for 3 keyboard_gone
+    sleep 0.2
 }
 press_back() {
     dev input keyevent KEYCODE_BACK
@@ -193,7 +212,7 @@ go_back() { press_back; }
 # By touch: the same as a person's finger, with a moment for it to come to rest.
 scroll_screen() {
     local top height x
-    read -r top height x <<< "$(ask_page "$SCROLLER if (!s) return '0 0 0'; var r = s.getBoundingClientRect(), f = devicePixelRatio; return Math.round(r.top * f) + ' ' + Math.round(r.height * f) + ' ' + Math.round((r.left + r.width / 2) * f);")"
+    read -r top height x <<< "$(ask_page "$SCROLLER if (!s) return '0 0 0'; var r = s.getBoundingClientRect(), f = devicePixelRatio, t = Math.max(r.top, 0), b = Math.min(r.bottom, innerHeight); return Math.round(t * f) + ' ' + Math.round((b - t) * f) + ' ' + Math.round((r.left + r.width / 2) * f);")"
     dev input swipe "$x" "$((top + height * 80 / 100))" "$x" "$((top + height * 25 / 100))" 300
     sleep 0.4
 }
