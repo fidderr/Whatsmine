@@ -18,6 +18,7 @@ mod engine;
 pub mod files;
 pub mod groups;
 pub mod identity;
+pub mod knocks;
 pub mod location;
 pub mod model;
 pub mod paths;
@@ -127,6 +128,7 @@ impl Core {
             net: Arc::new(Mutex::new(NetStatus::Connecting)),
             group_calls: Arc::new(Mutex::new(std::collections::HashMap::new())),
             call: Arc::new(Mutex::new(None)),
+            tries: Arc::new(Mutex::new(std::collections::HashMap::new())),
         };
         runtime.spawn(Engine::run(
             db.clone(),
@@ -342,6 +344,55 @@ impl Core {
     /// The system woke us, as asked with [`CoreEvent::WakeIn`].
     pub fn wake(&self) {
         self.cmd(Cmd::Wake);
+    }
+
+    /// Where a message of ours is: when the next try is, and why it is not there yet.
+    pub fn delivery_info(&self, message_id: &str) -> Option<DeliveryInfo> {
+        let m = self.inner.db.message(message_id)?;
+        let trying = matches!(m.status, MessageStatus::Queued | MessageStatus::Sent);
+        let tries = self
+            .inner
+            .shared
+            .tries
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&m.contact_id)
+            .copied();
+        let connected = self.is_online(&m.contact_id);
+        Some(DeliveryInfo {
+            status: m.status,
+            connected,
+            next_try_in_ms: tries
+                .filter(|_| trying && !connected)
+                .map(|t| t.next_at.saturating_sub(now_ms()) as u64),
+            failures: tries.map_or(0, |t| t.failures),
+            knocked: tries.is_some_and(|t| t.knocked),
+        })
+    }
+
+    /// Tries a message again that we stopped trying.
+    pub fn retry_message(&self, message_id: &str) {
+        if self.inner.db.retry_message(message_id)
+            && let Some(m) = self.inner.db.message(message_id)
+        {
+            self.emit(CoreEvent::MessageStatus {
+                contact_id: m.contact_id.clone(),
+                message_id: m.id.clone(),
+                status: MessageStatus::Queued,
+            });
+            let peer = identity::parse_key(&m.contact_id);
+            self.dispatch(&m.contact_id, peer, &m);
+        }
+    }
+
+    /// What the keep-trying time would do once it runs out, right now. For tests.
+    pub fn give_up_now(&self) {
+        self.cmd(Cmd::GiveUpBefore(now_ms() + 1));
+    }
+
+    /// A file that waited for the network rules: fetch it now.
+    pub fn fetch_file(&self, message_id: &str) {
+        self.retry_file(message_id);
     }
 
     /// The radio went active for some app: a cheap moment to look around.

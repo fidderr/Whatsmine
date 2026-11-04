@@ -164,6 +164,7 @@
   "file.waiting": "Wachten tot ze online zijn…",
   "file.declined": "Niet geaccepteerd: het is groter dan hun limiet.",
   "file.over_limit": "Groter dan jouw limiet. Verhoog die in Instellingen en vraag om het opnieuw te sturen.",
+  "file.waiting": "Tik om te downloaden",
   "file.failed": "Downloaden mislukt.",
   "file.retry": "Opnieuw proberen",
   "settings.photo_choose": "Foto kiezen",

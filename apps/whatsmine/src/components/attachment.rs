@@ -74,6 +74,7 @@ pub fn AttachmentView(message: Message, on_view: EventHandler<String>) -> Elemen
         (TransferState::Declined, true) => Some(t(&tr, "file.declined")),
         (TransferState::Declined, false) => Some(t(&tr, "file.over_limit")),
         (TransferState::Failed, _) => Some(t(&tr, "file.failed")),
+        (TransferState::Waiting, _) => Some(t(&tr, "file.waiting")),
         (TransferState::Transferring, outgoing) => {
             let (done, total) = progress.unwrap_or((0, att.size));
             let key = if outgoing {

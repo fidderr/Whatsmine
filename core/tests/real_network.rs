@@ -56,7 +56,9 @@ async fn add_and_talk_over_the_real_dht() {
 
     let m = a.send(&b.my_key(), "hello over the internet").unwrap();
     until("the first message arrives", 60, || {
-        b.messages(&a.my_key(), None, 10).iter().any(|x| x.id == m.id)
+        b.messages(&a.my_key(), None, 10)
+            .iter()
+            .any(|x| x.id == m.id)
     })
     .await;
     until("Alice sees it delivered", 60, || {
@@ -77,7 +79,10 @@ async fn add_and_talk_over_the_real_dht() {
             .any(|x| x.id == again.id)
     })
     .await;
-    println!("reset to delivered: {:.1} s", started.elapsed().as_secs_f32());
+    println!(
+        "reset to delivered: {:.1} s",
+        started.elapsed().as_secs_f32()
+    );
     a.shutdown();
     b.shutdown();
 }

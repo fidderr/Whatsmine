@@ -363,6 +363,7 @@ fn print_message(core: &Core, m: &whatsmine_core::Message) {
 
 fn ticks(s: MessageStatus) -> &'static str {
     match s {
+        MessageStatus::NotDelivered => "(not delivered)",
         MessageStatus::Queued => "(queued)",
         MessageStatus::Sent => "✓",
         MessageStatus::Delivered => "✓✓",

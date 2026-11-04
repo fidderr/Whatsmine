@@ -164,6 +164,7 @@
   "file.waiting": "Warten, bis die Person online ist…",
   "file.declined": "Nicht angenommen: größer als das Limit der Person.",
   "file.over_limit": "Größer als dein Limit. Erhöhe es in den Einstellungen und bitte um erneutes Senden.",
+  "file.waiting": "Zum Herunterladen tippen",
   "file.failed": "Download fehlgeschlagen.",
   "file.retry": "Erneut versuchen",
   "settings.photo_choose": "Foto wählen",

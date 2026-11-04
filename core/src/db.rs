@@ -470,7 +470,7 @@ impl Database {
         let mut stmt = conn
             .prepare(&format!(
                 "SELECT {MSG_COLS} FROM messages
-                 WHERE contact_id = ?1 AND outgoing = 1 AND status < 2
+                 WHERE contact_id = ?1 AND outgoing = 1 AND status IN (0, 1)
                  ORDER BY sent_at ASC, id ASC"
             ))
             .expect("valid SQL");
@@ -489,7 +489,7 @@ impl Database {
         if let Ok(mut stmt) = conn.prepare(
             "SELECT m.contact_id, m.attachment FROM messages m
              JOIN contacts c ON c.id = m.contact_id
-             WHERE m.outgoing = 1 AND m.status < 2 AND c.kind = 'person' AND c.state = 'accepted'",
+             WHERE m.outgoing = 1 AND m.status IN (0, 1) AND c.kind = 'person' AND c.state = 'accepted'",
         ) && let Ok(rows) = stmt.query_map([], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, Option<Vec<u8>>>(1)?))
         }) {
@@ -504,7 +504,8 @@ impl Database {
             }
         }
         if let Ok(mut stmt) = conn.prepare(
-            "SELECT a.member_id FROM group_acks a WHERE a.status < 2
+            "SELECT a.member_id FROM group_acks a JOIN messages m ON m.id = a.message_id
+             WHERE a.status < 2 AND m.status >= 0
              UNION SELECT g.admin FROM groups g WHERE g.left = 1",
         ) && let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0))
         {
@@ -630,6 +631,39 @@ impl Database {
 
     pub fn delete_invites(&self) {
         let _ = self.lock().execute("DELETE FROM invites", []);
+    }
+
+    /// Messages sent before `before` stop being tried. Returns which, for the screens.
+    pub fn give_up_before(&self, before: Millis) -> Vec<(String, String)> {
+        let conn = self.lock();
+        let found: Vec<(String, String)> = conn
+            .prepare(
+                "SELECT contact_id, id FROM messages
+                 WHERE outgoing = 1 AND status IN (0, 1) AND sent_at < ?1",
+            )
+            .and_then(|mut stmt| {
+                stmt.query_map(params![before], |r| Ok((r.get(0)?, r.get(1)?)))
+                    .map(|rows| rows.filter_map(Result::ok).collect())
+            })
+            .unwrap_or_default();
+        let _ = conn.execute(
+            "UPDATE messages SET status = -1
+             WHERE outgoing = 1 AND status IN (0, 1) AND sent_at < ?1",
+            params![before],
+        );
+        found
+    }
+
+    /// Back in the queue, with a new chance of the time set.
+    pub fn retry_message(&self, id: &str) -> bool {
+        self.lock()
+            .execute(
+                "UPDATE messages SET status = 0, sent_at = ?2
+                 WHERE id = ?1 AND outgoing = 1 AND status = -1",
+                params![id, now_ms()],
+            )
+            .map(|n| n > 0)
+            .unwrap_or(false)
     }
 
     pub fn advance_status(&self, contact_id: &str, id: &str, status: MessageStatus) -> bool {
@@ -988,7 +1022,7 @@ impl Database {
             .prepare(&format!(
                 "SELECT {MSG_COLS} FROM messages
                  WHERE outgoing = 1 AND id IN
-                    (SELECT message_id FROM group_acks WHERE member_id = ?1 AND status < 2)
+                    (SELECT message_id FROM group_acks WHERE member_id = ?1 AND status < 2) AND status >= 0
                  ORDER BY sent_at ASC, id ASC"
             ))
             .expect("valid SQL");
@@ -1012,7 +1046,7 @@ impl Database {
         let mut stmt = conn
             .prepare(&format!(
                 "SELECT {MSG_COLS} FROM messages
-                 WHERE contact_id = ?1 AND outgoing = 1 AND status < 2
+                 WHERE contact_id = ?1 AND outgoing = 1 AND status IN (0, 1)
                  ORDER BY sent_at ASC, id ASC"
             ))
             .expect("valid SQL");

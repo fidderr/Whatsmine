@@ -164,6 +164,7 @@
   "file.waiting": "En attente de leur connexion…",
   "file.declined": "Non accepté : dépasse leur limite.",
   "file.over_limit": "Dépasse ta limite. Augmente-la dans Réglages et demande un nouvel envoi.",
+  "file.waiting": "Touche pour télécharger",
   "file.failed": "Échec du téléchargement.",
   "file.retry": "Réessayer",
   "settings.photo_choose": "Choisir une photo",

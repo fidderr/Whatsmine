@@ -28,6 +28,7 @@ use crate::db::Database;
 use crate::files::{self, ReceiveCtx, Received};
 use crate::groups;
 use crate::identity::{Identity, key_to_string};
+use crate::knocks::{self, Knock, KnockText};
 use crate::location::{self, LocationRecord};
 use crate::model::{
     Attachment, ContactState, CoreEvent, Message, MessageStatus, MyInvite, NetStatus, Settings,
@@ -80,6 +81,8 @@ const REQUEST_AGAIN: [Duration; 4] = [
     Duration::from_secs(10 * 60),
     Duration::from_secs(60 * 60),
 ];
+/// How often to see whether a message has been tried for long enough.
+const GIVE_UP_CHECK: Duration = Duration::from_secs(3600);
 /// A wake-up scheduled with the system only changes for a difference of this much.
 const WAKE_SLACK: Duration = Duration::from_secs(5);
 
@@ -89,6 +92,8 @@ pub(crate) enum Cmd {
     Dial(PublicKey),
     /// Leave this contact our request.
     SendRequest(PublicKey),
+    /// Stop trying what was sent before this moment.
+    GiveUpBefore(crate::model::Millis),
     /// A new location, and a new network address if asked: whoever knew the old ones cannot
     /// follow. Contacts are told.
     Rotate {
@@ -198,6 +203,8 @@ enum Internal {
     Published(Option<EndpointAddr>),
     /// Notes found in the DHT: the invite they were left for, and what they say.
     RequestsFound(Vec<(String, Vec<u8>)>),
+    /// Knocks found in the DHT: the secret they open with, and what they say.
+    KnocksFound(Vec<([u8; 32], Vec<u8>)>),
     Bound(anyhow::Result<Endpoint>),
     Frame {
         peer: PublicKey,
@@ -243,9 +250,19 @@ struct Session {
     asked_new_session: Cell<bool>,
 }
 
+/// How trying to reach someone is going.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Tries {
+    pub next_at: crate::model::Millis,
+    pub failures: u32,
+    pub knocked: bool,
+}
+
 /// State shared with the `Core` handle for cheap synchronous reads.
 #[derive(Clone)]
 pub(crate) struct Shared {
+    /// How trying to reach someone is going, by contact id.
+    pub tries: Arc<Mutex<HashMap<String, Tries>>>,
     pub online: Arc<Mutex<HashSet<String>>>,
     pub net: Arc<Mutex<NetStatus>>,
     /// Group calls that can be joined: group id -> video.
@@ -271,6 +288,9 @@ pub(crate) struct Engine {
     requests_out: HashMap<PublicKey, (Instant, usize)>,
     /// Contacts that do not have our current location yet.
     owe_accept: HashSet<PublicKey>,
+    /// Who we left a knock for, and how many. Forgotten on seeing them.
+    knocked: HashMap<PublicKey, u32>,
+    next_give_up_check: Instant,
     seen_notes: HashSet<[u8; 32]>,
     events: broadcast::Sender<CoreEvent>,
     shared: Shared,
@@ -360,6 +380,8 @@ impl Engine {
             polling_requests: false,
             requests_out: HashMap::new(),
             owe_accept: HashSet::new(),
+            knocked: HashMap::new(),
+            next_give_up_check: Instant::now(),
             seen_notes: HashSet::new(),
             media,
             uploads: HashSet::new(),
@@ -464,6 +486,7 @@ impl Engine {
         if self.wanted_dirty {
             self.refresh_wanted();
         }
+        self.publish_tries();
         let plan = self.plan();
         self.blips
             .retain(|_, at| now.duration_since(*at) < BLIP_LASTS);
@@ -499,6 +522,13 @@ impl Engine {
             self.take_down();
         }
 
+        if self.next_give_up_check <= now {
+            self.next_give_up_check = now + GIVE_UP_CHECK;
+            let days = self.settings().keep_trying_days;
+            if days > 0 {
+                self.give_up_before(now_ms() - i64::from(days) * 24 * 3600 * 1000);
+            }
+        }
         self.close_idle(&plan, now);
         self.dial_due(now);
         self.publish_due(now);
@@ -813,6 +843,191 @@ impl Engine {
         });
     }
 
+    /// Messages tried for long enough say so, and nobody is dialled for them any more.
+    fn give_up_before(&mut self, before: crate::model::Millis) {
+        for (contact_id, message_id) in self.db.give_up_before(before) {
+            emit(
+                &self.events,
+                CoreEvent::MessageStatus {
+                    contact_id,
+                    message_id,
+                    status: MessageStatus::NotDelivered,
+                },
+            );
+        }
+        self.wanted_dirty = true;
+    }
+
+    /// A dial failed for someone we have something for: leave a knock, once per step of the
+    /// ladder. With a short text in it if we can, so it gets through while both phones sleep.
+    fn leave_knock(&mut self, peer: PublicKey) {
+        let id = key_to_string(&peer);
+        let Some(records) = self.records.clone() else {
+            return;
+        };
+        let Some(location) = self.db.contact_keys(&id).and_then(|k| k.location) else {
+            return;
+        };
+        let owed = self.db.undelivered(&id);
+        if owed.is_empty() {
+            return;
+        }
+        let attempt = self.knocked.entry(peer).or_insert(0);
+        *attempt += 1;
+        let attempt = *attempt;
+        // The oldest text that fits. Files wait for a connection.
+        let text = owed
+            .iter()
+            .filter(|m| m.attachment.is_none() && m.body.len() <= knocks::MAX_SEALED_TEXT / 2)
+            .find_map(|m| {
+                let mid = protocol::id_to_bytes(&m.id)?;
+                let (kind, sealed) = self.sealing.seal(&id, m.body.as_bytes())?;
+                Some(KnockText {
+                    id: mid,
+                    sent_at: m.sent_at,
+                    kind,
+                    sealed,
+                })
+            });
+        self.write_knock(records, peer, location, text, Vec::new(), attempt);
+    }
+
+    fn write_knock(
+        &self,
+        records: Records,
+        peer: PublicKey,
+        location: [u8; 32],
+        text: Option<KnockText>,
+        delivered: Vec<[u8; 16]>,
+        attempt: u32,
+    ) {
+        let now = now_ms();
+        let knock = Knock {
+            from: *self.me.as_bytes(),
+            text,
+            delivered,
+            at: now,
+        };
+        let Some(sealed) = knocks::seal(&location, knock, &self.key) else {
+            return;
+        };
+        let seed = knocks::slot_seed(
+            &location,
+            records::day_of(now),
+            knocks::slot_for(&self.me, attempt),
+        );
+        let _ = peer;
+        tokio::spawn(async move {
+            records.put(&seed, &sealed).await;
+        });
+    }
+
+    fn on_knocks_found(&mut self, found: Vec<([u8; 32], Vec<u8>)>) {
+        for (secret, note) in found {
+            if !self.seen_notes.insert(*blake3::hash(&note).as_bytes()) {
+                continue;
+            }
+            if let Some(knock) = knocks::open(&secret, &note) {
+                self.on_knock(knock);
+            }
+        }
+    }
+
+    /// Someone we know left a note: what they sent, what of ours arrived, and go and find them.
+    fn on_knock(&mut self, knock: Knock) {
+        let Ok(peer) = PublicKey::from_bytes(&knock.from) else {
+            return;
+        };
+        let id = key_to_string(&peer);
+        if self.db.contact(&id).map(|c| c.state) != Some(ContactState::Accepted) {
+            return;
+        }
+        for mid in &knock.delivered {
+            let message_id = id_from_bytes(mid);
+            if self
+                .db
+                .advance_status(&id, &message_id, MessageStatus::Delivered)
+            {
+                emit(
+                    &self.events,
+                    CoreEvent::MessageStatus {
+                        contact_id: id.clone(),
+                        message_id,
+                        status: MessageStatus::Delivered,
+                    },
+                );
+            }
+        }
+        if let Some(text) = knock.text {
+            self.on_knock_text(peer, &id, text);
+        }
+        // Whatever else they have comes over a connection, if there can be one now.
+        if !self.sessions.contains_key(&peer) {
+            self.backoff.remove(&peer);
+            self.look_around.push_back(peer);
+        }
+    }
+
+    fn on_knock_text(&mut self, peer: PublicKey, id: &str, text: KnockText) {
+        let keys = self.db.contact_keys(id).unwrap_or_default();
+        // Known from the handshake, which is what makes a first sealed message readable. A knock
+        // only ever comes after sessions exist, so without one there is nothing to read it with.
+        let curve = keys.curve.unwrap_or_default();
+        let Ok(plain) = self.sealing.open(id, &curve, text.kind, &text.sealed) else {
+            return;
+        };
+        let Ok(body) = String::from_utf8(plain) else {
+            return;
+        };
+        let now = now_ms();
+        let message = Message {
+            id: id_from_bytes(&text.id),
+            contact_id: id.to_owned(),
+            outgoing: false,
+            body,
+            sent_at: text.sent_at.min(now),
+            received_at: now,
+            status: MessageStatus::Delivered,
+            read: false,
+            attachment: None,
+            sender: None,
+        };
+        if self.db.insert_message(&message).unwrap_or(false) {
+            emit(&self.events, CoreEvent::MessageAdded(message));
+            emit(&self.events, CoreEvent::ContactsChanged);
+        }
+        // They may be asleep too: say it arrived the same way.
+        if let (Some(records), Some(location)) = (self.records.clone(), keys.location) {
+            let attempt = self.knocked.entry(peer).or_insert(0);
+            *attempt += 1;
+            let attempt = *attempt;
+            self.write_knock(records, peer, location, None, vec![text.id], attempt);
+        }
+    }
+
+    /// What the screen asking "where is my message" reads.
+    fn publish_tries(&self) {
+        let wall = now_ms();
+        let now = Instant::now();
+        let mut tries = self.shared.tries.lock().unwrap_or_else(|p| p.into_inner());
+        tries.clear();
+        for peer in &self.wanted {
+            let (at, failures) = self
+                .backoff
+                .get(peer)
+                .map_or((now, 0), |(at, failures)| (*at, *failures));
+            tries.insert(
+                key_to_string(peer),
+                Tries {
+                    next_at: wall
+                        + at.saturating_duration_since(now).as_millis() as crate::model::Millis,
+                    failures,
+                    knocked: self.knocked.contains_key(peer),
+                },
+            );
+        }
+    }
+
     fn poll_requests_due(&mut self, plan: &Plan, now: Instant) {
         if self.polling_requests || self.next_request_poll.is_none_or(|at| at > now) {
             return;
@@ -837,8 +1052,36 @@ impl Engine {
             .collect();
         self.polling_requests = true;
         let tx = self.tx.clone();
+        // Knocks: under our location, and under old ones for contacts who were away.
+        self.identity
+            .old_locations
+            .retain(|(_, until)| *until > wall);
+        let mut secrets = vec![self.identity.location];
+        secrets.extend(
+            self.identity
+                .old_locations
+                .iter()
+                .map(|(secret, _)| *secret),
+        );
         tokio::spawn(async move {
             let today = records::day_of(wall);
+            let mut knocks_found = tokio::task::JoinSet::new();
+            for secret in secrets {
+                for day in [today, today.saturating_sub(1)] {
+                    for slot in 0..knocks::SLOTS {
+                        let records = records.clone();
+                        let seed = knocks::slot_seed(&secret, day, slot);
+                        knocks_found.spawn(async move { (secret, records.get(&seed).await) });
+                    }
+                }
+            }
+            let mut notes = Vec::new();
+            while let Some(read) = knocks_found.join_next().await {
+                if let Ok((secret, Some(note))) = read {
+                    notes.push((secret, note));
+                }
+            }
+            let _ = tx.send(Internal::KnocksFound(notes));
             let mut reads = tokio::task::JoinSet::new();
             for invite in invites {
                 for day in [today, today.saturating_sub(1)] {
@@ -1126,6 +1369,7 @@ impl Engine {
                 self.requests_out.insert(peer, (Instant::now(), 0));
             }
             Cmd::Rotate { network } => self.rotate(network),
+            Cmd::GiveUpBefore(before) => self.give_up_before(before),
             Cmd::Device(device) => {
                 let changed = device.network != self.device.network;
                 self.device = device;
@@ -1502,9 +1746,11 @@ impl Engine {
                 }
             }
             Internal::RequestsFound(found) => self.on_requests_found(found),
+            Internal::KnocksFound(found) => self.on_knocks_found(found),
             Internal::DialFailed(peer) => {
                 self.dialing.remove(&peer);
                 self.bump_backoff(peer);
+                self.leave_knock(peer);
                 // What we looked up may be from before they came back: worth a few more tries,
                 // once per look around.
                 if self.tried_again.insert(peer) {
@@ -1754,14 +2000,16 @@ impl Engine {
         }
         // Seen: whatever was wrong, it works now.
         self.backoff.remove(&peer);
+        self.knocked.remove(&peer);
         self.blips.remove(&peer);
         self.wanted_dirty = true;
         let id = key_to_string(&peer);
         // For the same Wi-Fi without internet next time.
         let mut keys = self.db.contact_keys(&id).unwrap_or_default();
         let network = *conn.remote_id().as_bytes();
-        if keys.network != Some(network) {
+        if keys.network != Some(network) || keys.curve != Some(curve) {
             keys.network = Some(network);
+            keys.curve = Some(curve);
             self.db.set_contact_keys(&id, &keys);
         }
 
@@ -1940,7 +2188,8 @@ impl Engine {
                     contact_id: id,
                     outgoing: false,
                     body: text,
-                    sent_at,
+                    // A clock that is wrong on their side must not put it in the future.
+                    sent_at: sent_at.min(now_ms()),
                     received_at: now_ms(),
                     status: MessageStatus::Delivered,
                     read: false,
@@ -2176,14 +2425,25 @@ impl Engine {
             TransferState::Declined => {
                 self.send(peer, Frame::FileDecline { id: raw });
             }
-            TransferState::Failed => {}
+            TransferState::Failed | TransferState::Waiting => {}
             TransferState::Transferring => {
-                let limit_mb = self.settings().max_file_mb;
+                let settings = self.settings();
+                let limit_mb = settings.max_file_mb;
+                let auto_mb = if self.device.network == power::Network::Mobile {
+                    settings.auto_download_mobile_mb
+                } else {
+                    settings.auto_download_wifi_mb
+                };
                 if limit_mb > 0 && att.size > limit_mb.saturating_mul(1024 * 1024) {
                     if let Some(m) = self.db.set_transfer(&mid, TransferState::Declined, None) {
                         emit(&self.events, CoreEvent::MessageUpdated(m));
                     }
                     self.send(peer, Frame::FileDecline { id: raw });
+                } else if att.size > auto_mb.saturating_mul(1024 * 1024) {
+                    // Offered, not fetched: it costs more than it should by itself here.
+                    if let Some(m) = self.db.set_transfer(&mid, TransferState::Waiting, None) {
+                        emit(&self.events, CoreEvent::MessageUpdated(m));
+                    }
                 } else {
                     self.want_file(peer, &mid);
                 }

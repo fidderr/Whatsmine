@@ -120,6 +120,8 @@ pub fn short_id(id: &str) -> String {
 /// Delivery state of a message we sent. Ordered: a status only moves forward.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum MessageStatus {
+    /// We stopped trying. It can be tried again, and a late receipt still counts.
+    NotDelivered = -1,
     /// Saved locally, waiting for the contact to be reachable.
     Queued = 0,
     /// Written to a live connection, not yet acknowledged.
@@ -133,6 +135,7 @@ pub enum MessageStatus {
 impl MessageStatus {
     pub fn from_i64(v: i64) -> Self {
         match v {
+            -1 => Self::NotDelivered,
             1 => Self::Sent,
             2 => Self::Delivered,
             3 => Self::Read,
@@ -174,6 +177,8 @@ pub enum TransferState {
     Declined,
     /// Could not be completed (for example the data was corrupt twice).
     Failed,
+    /// Over what downloads by itself on this network: fetched when asked for.
+    Waiting,
 }
 
 /// What kind of viewer an attachment gets.
@@ -281,6 +286,12 @@ pub struct Settings {
     pub speed_mode: crate::power::SpeedMode,
     /// Use public relays when a direct connection is impossible.
     pub use_relays: bool,
+    /// How long to keep trying to deliver a message. 0 means forever.
+    pub keep_trying_days: u32,
+    /// Files up to this size download by themselves on Wi-Fi. 0 means none.
+    pub auto_download_wifi_mb: u64,
+    /// The same on mobile data.
+    pub auto_download_mobile_mb: u64,
 }
 
 /// Default for [`Settings::max_file_mb`].
@@ -305,6 +316,9 @@ impl Default for Settings {
             start_with_system: false,
             speed_mode: crate::power::SpeedMode::default(),
             use_relays: true,
+            keep_trying_days: 7,
+            auto_download_wifi_mb: 2048,
+            auto_download_mobile_mb: 16,
         }
     }
 }
@@ -372,6 +386,8 @@ pub struct ContactKeys {
     pub location: Option<[u8; 32]>,
     /// Their address when we last knew it, for the same Wi-Fi with no internet.
     pub network: Option<[u8; 32]>,
+    /// Their encryption key from the last handshake, for what comes without a connection.
+    pub curve: Option<[u8; 32]>,
     /// The invite we used to ask them, until they answer.
     pub invite: Option<crate::identity::Invite>,
     /// What they wrote when asking, until answered.
@@ -399,6 +415,20 @@ pub struct MyInvite {
     pub main: bool,
     /// Whoever comes with this was scanned in person: added both ways without asking.
     pub met_token: Option<[u8; 16]>,
+}
+
+/// Where a message of ours is, for whoever asks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeliveryInfo {
+    pub status: MessageStatus,
+    /// There is a connection to them right now.
+    pub connected: bool,
+    /// When the next try is. `None`: a connection is there, or we stopped trying.
+    pub next_try_in_ms: Option<u64>,
+    /// Tries in a row that failed.
+    pub failures: u32,
+    /// A note was left in the DHT for them.
+    pub knocked: bool,
 }
 
 /// How one connection runs.

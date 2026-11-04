@@ -164,6 +164,7 @@
   "file.waiting": "Waiting for them to be online…",
   "file.declined": "Not accepted: it's larger than their limit.",
   "file.over_limit": "Larger than your limit. Raise it in Settings and ask them to send it again.",
+  "file.waiting": "Tap to download",
   "file.failed": "Download failed.",
   "file.retry": "Try again",
   "settings.photo_choose": "Choose photo",

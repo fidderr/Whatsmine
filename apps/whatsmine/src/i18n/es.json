@@ -164,6 +164,7 @@
   "file.waiting": "Esperando a que estén en línea…",
   "file.declined": "No aceptado: supera su límite.",
   "file.over_limit": "Supera tu límite. Súbelo en Ajustes y pide que lo envíen de nuevo.",
+  "file.waiting": "Toca para descargar",
   "file.failed": "La descarga falló.",
   "file.retry": "Reintentar",
   "settings.photo_choose": "Elegir foto",
