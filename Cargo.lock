@@ -4343,6 +4343,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "netlab"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures-lite",
+ "iroh",
+ "n0-mainline",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "netlink-packet-core"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
