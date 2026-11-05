@@ -29,6 +29,49 @@ async fn call_event(
         .unwrap_or_else(|_| panic!("timed out waiting for {what}"))
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_photo_seen_once_is_used_up_even_if_the_app_dies_while_it_is_open() {
+    let lookup = MemoryLookup::default();
+    let (a, b, _ka, _kb, _da, db) = online_pair(&lookup).await;
+    let photo = _da.path().join("once.png");
+    image::RgbImage::from_pixel(20, 20, image::Rgb([9, 9, 9]))
+        .save(&photo)
+        .unwrap();
+    let sent = a
+        .send_view_once(&b.my_key(), &photo, "once.png", "image/png")
+        .unwrap();
+    until("it arrives", || {
+        b.message(&sent.id)
+            .and_then(|m| m.attachment)
+            .is_some_and(|f| f.path.is_some())
+    })
+    .await;
+    let path = b
+        .message(&sent.id)
+        .unwrap()
+        .attachment
+        .unwrap()
+        .path
+        .unwrap();
+    assert!(std::path::Path::new(&path).exists());
+    // It is opened, and the app goes down with it on screen.
+    b.view_once_opening(&sent.id);
+    b.shutdown();
+    let b = start(db.path(), &lookup, "Bob");
+    let m = b.message(&sent.id).unwrap();
+    assert!(m.extra.viewed, "that was the one time");
+    assert!(m.attachment.unwrap().path.is_none());
+    assert!(
+        !std::path::Path::new(&path).exists(),
+        "and the file is gone"
+    );
+    // In your own notes it could never be opened again, so it is not offered.
+    assert!(
+        b.send_view_once(&b.my_key(), &photo, "once.png", "image/png")
+            .is_err()
+    );
+}
+
 fn start(dir: &std::path::Path, lookup: &MemoryLookup, name: &str) -> Core {
     let core = Core::start(dir, NetMode::Local(lookup.clone())).unwrap();
     core.save_settings(&Settings {

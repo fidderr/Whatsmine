@@ -1000,5 +1000,7 @@
   "channel.follow_address": "They can see your internet address on that connection, not your name, and not who else follows.",
   "channel.not_now": "Not now",
   "channel.follow": "Follow",
-  "channel.follow_failed": "That did not work"
+  "channel.follow_failed": "That did not work",
+  "chat.once_get": "A photo that can be seen once. Tap to get it",
+  "chat.err.own_chat": "That cannot be opened again in your own notes"
 }

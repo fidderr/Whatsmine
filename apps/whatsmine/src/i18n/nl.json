@@ -1000,5 +1000,7 @@
   "channel.follow_address": "Zij kunnen op die verbinding je internetadres zien, niet je naam en niet wie er nog meer volgt.",
   "channel.not_now": "Niet nu",
   "channel.follow": "Volgen",
-  "channel.follow_failed": "Dat lukte niet"
+  "channel.follow_failed": "Dat lukte niet",
+  "chat.once_get": "Een foto die één keer te zien is. Tik om op te halen",
+  "chat.err.own_chat": "Dat kan in je eigen notities niet meer geopend worden"
 }

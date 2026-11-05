@@ -32,7 +32,7 @@ pub async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static)
 
 /// Files the OS or camera handed us in a scratch folder: ours to delete
 /// once the core has its own copy.
-fn is_scratch(path: &Path) -> bool {
+pub(crate) fn is_scratch(path: &Path) -> bool {
     path.parent()
         .and_then(|p| p.file_name())
         .and_then(|n| n.to_str())

@@ -236,6 +236,16 @@ pub fn ImageViewer(ids: Vec<String>, start: String, on_close: EventHandler<()>) 
     let mut zoomed = use_signal(|| false);
     let mut touch_x = use_signal(|| None::<f64>);
     use_hook(|| crate::js::focus("viewer"));
+    // Seen once is once, however this ends: closing it, going elsewhere, or the app being killed.
+    let once_core = core.clone();
+    let first = start.clone();
+    use_hook(move || {
+        if once_core.message(&first).is_some_and(|m| m.extra.view_once) {
+            once_core.view_once_opening(&first);
+        }
+    });
+    let done_core = core.clone();
+    use_drop(move || done_core.finish_view_once());
 
     let total = ids.len();
     let at = index().min(total.saturating_sub(1));
@@ -299,14 +309,16 @@ pub fn ImageViewer(ids: Vec<String>, start: String, on_close: EventHandler<()>) 
                 if total > 1 {
                     span { class: "viewer-count", "{at + 1} / {total}" }
                 }
-                button {
-                    class: "header-icon-btn",
-                    title: "{t(&tr, \"file.save\")}",
-                    onclick: {
-                        let message = message.clone();
-                        move |_| save_file(tr, toast_sig, &message)
-                    },
-                    Icon { name: IconName::Download }
+                if !message.extra.view_once {
+                    button {
+                        class: "header-icon-btn",
+                        title: "{t(&tr, \"file.save\")}",
+                        onclick: {
+                            let message = message.clone();
+                            move |_| save_file(tr, toast_sig, &message)
+                        },
+                        Icon { name: IconName::Download }
+                    }
                 }
             }
             div { class: if zoomed() { "viewer-body zoomed" } else { "viewer-body" },

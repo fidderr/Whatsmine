@@ -104,6 +104,9 @@ pub enum NetMode {
     Local(records::LocalRecords),
 }
 
+/// Which photos that can be seen once are on screen right now.
+const VIEW_ONCE_OPEN: &str = "view_once_open";
+
 #[derive(Clone)]
 pub struct Core {
     inner: Arc<Inner>,
@@ -222,7 +225,7 @@ impl Core {
             cmd_rx,
         ));
 
-        Ok(Core {
+        let core = Core {
             inner: Arc::new(Inner {
                 dir: dir.to_path_buf(),
                 db,
@@ -237,7 +240,10 @@ impl Core {
                 media_sink,
                 control_sink,
             }),
-        })
+        };
+        // Opened when the app last went down: that was the one time.
+        core.finish_view_once();
+        Ok(core)
     }
 
     fn cmd(&self, cmd: Cmd) {
@@ -2177,7 +2183,45 @@ impl Core {
         name: &str,
         mime: &str,
     ) -> anyhow::Result<Message> {
+        // In your own notes it could never be opened again.
+        ensure!(contact_id != self.my_key(), "own_chat");
         self.send_file_inner(contact_id, src, name, mime, "", None, false, true, None)
+    }
+
+    /// It is on screen now. Whatever happens next, this was the one time: see
+    /// [`Self::finish_view_once`].
+    pub fn view_once_opening(&self, message_id: &str) {
+        let mut open = self.view_once_open();
+        if !open.iter().any(|id| id == message_id) {
+            open.push(message_id.to_owned());
+        }
+        self.save_view_once_open(&open);
+    }
+
+    fn view_once_open(&self) -> Vec<String> {
+        self.inner
+            .db
+            .secret(VIEW_ONCE_OPEN)
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+
+    fn save_view_once_open(&self, open: &[String]) {
+        if let Ok(json) = serde_json::to_vec(open) {
+            let _ = self.inner.db.set_secret(VIEW_ONCE_OPEN, &json);
+        }
+    }
+
+    /// Whatever was opened is used up: when the viewer goes, and at the start after a crash.
+    pub fn finish_view_once(&self) {
+        let open = self.view_once_open();
+        if open.is_empty() {
+            return;
+        }
+        for id in &open {
+            self.viewed_once(id);
+        }
+        self.save_view_once_open(&[]);
     }
 
     /// It was opened: nothing of the file stays here.
@@ -2241,6 +2285,8 @@ impl Core {
     ) -> anyhow::Result<Message> {
         let caption = caption.trim();
         ensure!(caption.len() <= protocol::MAX_TEXT, "too_long");
+        // Who may write when: for files as for text.
+        self.may_write_in(contact_id)?;
         let peer = self.recipient(contact_id)?;
         let id = uuid::Uuid::now_v7().to_string();
         let name = files::clean_file_name(name);

@@ -1000,5 +1000,7 @@
   "channel.follow_address": "En esa conexión pueden ver tu dirección de internet, no tu nombre ni quién más sigue.",
   "channel.not_now": "Ahora no",
   "channel.follow": "Seguir",
-  "channel.follow_failed": "No ha funcionado"
+  "channel.follow_failed": "No ha funcionado",
+  "chat.once_get": "Una foto que se puede ver una vez. Toca para obtenerla",
+  "chat.err.own_chat": "Eso no se podría volver a abrir en tus notas"
 }

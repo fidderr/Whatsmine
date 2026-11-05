@@ -173,8 +173,11 @@ fn ChatView(id: String) -> Element {
     let mut away_from_newest = use_signal(|| false);
     use_future(move || async move {
         let mut eval = document::eval(
-            "const m = document.getElementById('msgs');\n\
-             if (m) m.addEventListener('scroll', () => dioxus.send(m.scrollHeight - m.scrollTop - m.clientHeight > 400));\n\
+            "(function attach (n) {\n\
+              const m = document.getElementById('msgs');\n\
+              if (m) m.addEventListener('scroll', () => dioxus.send(m.scrollHeight - m.scrollTop - m.clientHeight > 400)));\n\
+              else if (n < 300) requestAnimationFrame(() => attach(n + 1));\n\
+             })(0);\n\
              await new Promise(() => {});",
         );
         while let Ok(away) = eval.recv::<bool>().await {
@@ -911,7 +914,7 @@ fn ChatView(id: String) -> Element {
                             let mut a = attach_file;
                             move |_| a(Attach::File)
                         } }
-                        AttachTile { label: t(&tr, "attach.once"), icon: IconName::Lock, tag: "new-once", on_tap: {
+                        if id != core.my_key() { AttachTile { label: t(&tr, "attach.once"), icon: IconName::Lock, tag: "new-once", on_tap: {
                             let (core, id) = (core.clone(), id.clone());
                             move |_| {
                                 sheet.set(false);
@@ -925,9 +928,14 @@ fn ChatView(id: String) -> Element {
                                     }
                                     let file = files.remove(0);
                                     let done = media::blocking(move || {
-                                        core.send_view_once(&id, &file.path, &file.name, &file.mime)
+                                        let sent = core.send_view_once(&id, &file.path, &file.name, &file.mime)
                                             .map(|_| ())
-                                            .map_err(|e| e.to_string())
+                                            .map_err(|e| e.to_string());
+                                        // No copy of a private photo left behind.
+                                        if media::is_scratch(&file.path) {
+                                            let _ = std::fs::remove_file(&file.path);
+                                        }
+                                        sent
                                     })
                                     .await;
                                     if let Some(Err(e)) = done {
@@ -936,7 +944,7 @@ fn ChatView(id: String) -> Element {
                                     }
                                 });
                             }
-                        } }
+                        } } }
                         AttachTile { label: t(&tr, "rich.poll"), icon: IconName::Poll, tag: "new-poll", on_tap: move |_| {
                             sheet.set(false);
                             compose.set(Some(ComposeKind::Poll));
@@ -1369,7 +1377,7 @@ fn Bubble(
                 } else if let Some(rich) = e.rich.clone() {
                     RichView { message_id: message.id.clone(), rich }
                 } else if e.view_once {
-                    OnceCard { message: message.clone(), on_view }
+                    OnceCard { message: message.clone(), on_view, choosing: selected.is_some() }
                 } else if has_media {
                     AttachmentView { message: message.clone(), on_view }
                     if !message.body.is_empty() {
@@ -1449,20 +1457,35 @@ fn Bubble(
 
 /// A photo that can be opened once: nothing shows until then, and nothing stays after.
 #[component]
-fn OnceCard(message: Message, on_view: EventHandler<String>) -> Element {
+fn OnceCard(message: Message, on_view: EventHandler<String>, choosing: bool) -> Element {
     let tr = use_tr();
+    let core = use_core();
     let can_open = !message.outgoing
         && !message.extra.viewed
         && message
             .attachment
             .as_ref()
             .is_some_and(|a| a.path.is_some());
+    // It did not come by itself: too big on mobile data, failed, or on the other device.
+    let can_get = !message.outgoing
+        && !message.extra.viewed
+        && message.attachment.as_ref().is_some_and(|a| {
+            a.path.is_none()
+                && matches!(
+                    a.state,
+                    whatsmine_core::TransferState::Waiting
+                        | whatsmine_core::TransferState::Failed
+                        | whatsmine_core::TransferState::Declined
+                )
+        });
     let key = if message.outgoing {
         "chat.once_sent"
     } else if message.extra.viewed {
         "chat.once_seen"
     } else if can_open {
         "chat.once_open"
+    } else if can_get {
+        "chat.once_get"
     } else {
         "chat.once_coming"
     };
@@ -1471,8 +1494,18 @@ fn OnceCard(message: Message, on_view: EventHandler<String>) -> Element {
         button {
             class: "place-card",
             "data-t": "once",
-            disabled: !can_open,
-            onclick: move |_| on_view.call(id.clone()),
+            disabled: !can_open && !can_get && !choosing,
+            onclick: move |_| {
+                // Choosing it to delete is not looking at it.
+                if choosing {
+                    return;
+                }
+                if can_open {
+                    on_view.call(id.clone());
+                } else if can_get {
+                    core.retry_file(&id);
+                }
+            },
             span { class: "place-pin", Icon { name: IconName::Image, size: 24 } }
             span { class: "row-t", "{t(&tr, key)}" }
         }

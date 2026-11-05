@@ -1000,5 +1000,7 @@
   "channel.follow_address": "Auf dieser Verbindung sehen sie deine Internetadresse, nicht deinen Namen und nicht, wer sonst noch folgt.",
   "channel.not_now": "Nicht jetzt",
   "channel.follow": "Folgen",
-  "channel.follow_failed": "Das hat nicht geklappt"
+  "channel.follow_failed": "Das hat nicht geklappt",
+  "chat.once_get": "Ein Foto, das einmal sichtbar ist. Zum Laden tippen",
+  "chat.err.own_chat": "Das ließe sich in deinen Notizen nicht mehr öffnen"
 }

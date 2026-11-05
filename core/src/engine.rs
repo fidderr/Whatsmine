@@ -1225,6 +1225,14 @@ impl Engine {
                 if m.attachment.is_none() {
                     next.attachment = None;
                 }
+                // Seen on the other device: that was the one time, for this copy too.
+                if next.extra.view_once && next.extra.viewed {
+                    self.remove_message_files(&here);
+                    if let Some(a) = &mut next.attachment {
+                        a.path = None;
+                        a.state = TransferState::Done;
+                    }
+                }
                 if next != here {
                     self.db.update_message(&next);
                     self.echoes.expect(&SyncEvent::Message(Box::new(

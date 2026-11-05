@@ -201,11 +201,25 @@ pub fn serve_media(core: &Core, path: &str, range: Option<&str>) -> Served {
     let Some(id) = clean_id(last_segment(path)) else {
         return Served::empty(400);
     };
-    let Some(att) = core.message(id).and_then(|m| m.attachment) else {
+    let Some(message) = core.message(id) else {
+        return Served::empty(404);
+    };
+    let once = message.extra.view_once;
+    let Some(att) = message.attachment else {
         return Served::empty(404);
     };
     match att.path {
-        Some(p) => serve_file(Path::new(&p), &att.mime, range),
+        Some(p) => {
+            let mut served = serve_file(Path::new(&p), &att.mime, range);
+            // Nothing of it stays behind in the browser engine's cache either.
+            if once {
+                served.headers.retain(|(k, _)| *k != "Cache-Control");
+                served
+                    .headers
+                    .push(("Cache-Control", "no-store".to_string()));
+            }
+            served
+        }
         None => Served::empty(404),
     }
 }
