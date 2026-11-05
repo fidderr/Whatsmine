@@ -270,7 +270,7 @@ pub struct Settings {
     pub share_last_seen: bool,
     /// Send typing indicators (and show the contact's).
     pub typing_indicators: bool,
-    /// UI theme: "system", "dark" or "light".
+    /// UI theme: "system", "dark", "light", "black", "colorblind" or "colorblind-light".
     pub theme: String,
     /// UI language code, for example "en".
     pub locale: String,
@@ -299,6 +299,36 @@ pub struct Settings {
     pub auto_download_wifi_mb: u64,
     /// The same on mobile data.
     pub auto_download_mobile_mb: u64,
+    /// Big buttons and favourite people, nothing else in the way.
+    pub simple_mode: bool,
+    /// "" for the theme's own, or "teal", "violet", "pink", "amber", "white".
+    pub accent: String,
+    /// "small", "normal", "large" or "huge".
+    pub text_size: String,
+    /// "roomy", "normal", "compact" or "big" for the chat list.
+    pub density: String,
+    /// Requests wait without an alert.
+    pub quiet_requests: bool,
+    /// Requests with one of these words go straight to the bin.
+    pub request_filter: Vec<String>,
+    /// Ask for the fingerprint or screen lock when the app opens.
+    pub app_lock: bool,
+    /// No screenshots, and a blank picture in the list of recent apps.
+    pub block_screenshots: bool,
+    /// Asks the keyboard not to learn from what is typed.
+    pub incognito_keyboard: bool,
+    /// What a new chat starts with. 0 means off.
+    pub disappear_default_ms: i64,
+    /// How all chats look, unless one has its own look.
+    pub wallpaper: String,
+    pub wallpaper_dim: u8,
+    pub bubble_color: String,
+    pub bubble_square: bool,
+    pub flat_layout: bool,
+    /// The reactions offered first.
+    pub reactions: Vec<String>,
+    /// Texts to send with one tap.
+    pub quick_replies: Vec<String>,
 }
 
 /// Default for [`Settings::max_file_mb`].
@@ -326,6 +356,25 @@ impl Default for Settings {
             keep_trying_days: 7,
             auto_download_wifi_mb: 2048,
             auto_download_mobile_mb: 16,
+            simple_mode: false,
+            accent: String::new(),
+            text_size: "normal".into(),
+            density: "normal".into(),
+            quiet_requests: false,
+            request_filter: Vec::new(),
+            app_lock: false,
+            block_screenshots: false,
+            incognito_keyboard: false,
+            disappear_default_ms: 0,
+            wallpaper: String::new(),
+            wallpaper_dim: 0,
+            bubble_color: String::new(),
+            bubble_square: false,
+            flat_layout: false,
+            reactions: ["👍", "❤️", "😂", "😮", "😢", "🙏"]
+                .map(str::to_owned)
+                .to_vec(),
+            quick_replies: Vec::new(),
         }
     }
 }
@@ -413,6 +462,9 @@ pub struct ContactKeys {
     pub trust: Trust,
     /// They have our current location. False until they are told.
     pub told: bool,
+    /// What they gave for passing them on.
+    #[serde(default)]
+    pub card: Option<String>,
 }
 
 /// One way for strangers to ask to be added.
@@ -431,6 +483,15 @@ pub struct MyInvite {
     pub main: bool,
     /// Whoever comes with this was scanned in person: added both ways without asking.
     pub met_token: Option<[u8; 16]>,
+}
+
+/// What the files on this device take.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct StorageReport {
+    pub media: u64,
+    pub files: u64,
+    pub voice: u64,
+    pub chats: Vec<(String, u64)>,
 }
 
 /// Where a message of ours is, for whoever asks.

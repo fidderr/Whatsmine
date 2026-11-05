@@ -3,26 +3,27 @@ mod avatar;
 mod bottom_nav;
 mod camera;
 mod confirm;
-mod dropdown;
 mod forward;
 mod icon;
 mod net_banner;
 mod qr;
 pub mod scan;
 mod toast;
-mod toggle;
+mod ui;
 mod voice;
 
 pub use attachment::{AttachmentView, ImageViewer, open_file, save_file};
 pub use avatar::Avatar;
-pub use bottom_nav::{BottomNav, Tab};
+pub use bottom_nav::{BottomNav, Tab, Tabs};
 pub use camera::{CameraMode, CameraOverlay};
 pub use confirm::ConfirmDialog;
-pub use dropdown::Dropdown;
 pub use forward::ForwardSheet;
 pub use icon::{Icon, IconName};
 pub use net_banner::NetBanner;
 pub use qr::QrCode;
 pub use toast::{Toast, ToastLevel, ToastMessage};
-pub use toggle::ToggleRow;
+pub use ui::{
+    BackButton, Chips, Header, Notice, Row, Sheet, SheetItem, Swatches, SwitchRow, Title, change,
+    use_settings,
+};
 pub use voice::VoiceBar;

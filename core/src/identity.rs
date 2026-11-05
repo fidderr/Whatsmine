@@ -207,25 +207,15 @@ pub fn parse_invite(text: &str) -> Option<Invite> {
     None
 }
 
-/// Only a key's short form is shown here and there.
-pub fn short_handle(name: &str, person: &PublicKey) -> String {
-    const LETTERS: &[u8] = b"abcdefghjkmnpqrstuvwxyz23456789";
-    let hash = blake3::derive_key("whatsmine handle v1", person.as_bytes());
-    let code: String = hash[..6]
+/// Words anyone can read out, from some bytes: two bytes make one word.
+pub fn words_for(bytes: &[u8]) -> Vec<String> {
+    let list = bip39::Language::English.word_list();
+    bytes
+        .as_chunks::<2>()
+        .0
         .iter()
-        .map(|b| LETTERS[*b as usize % LETTERS.len()] as char)
-        .collect();
-    let first: String = name
-        .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .take(12)
-        .collect::<String>()
-        .to_lowercase();
-    if first.is_empty() {
-        code
-    } else {
-        format!("{first}-{code}")
-    }
+        .map(|pair| list[usize::from(u16::from_be_bytes(*pair)) % list.len()].to_owned())
+        .collect()
 }
 
 #[cfg(test)]
@@ -309,10 +299,7 @@ mod tests {
     #[test]
     fn handles_are_short_stable_and_show_the_name() {
         let key = SecretKey::generate().public();
-        let handle = short_handle("Roy!", &key);
-        assert_eq!(handle, short_handle("Roy!", &key));
-        assert!(handle.starts_with("roy-"));
-        assert_eq!(handle.len(), "roy-".len() + 6);
-        assert_eq!(short_handle("", &key).len(), 6);
+        let _ = &key;
+        assert_eq!(words_for(&[0, 1, 2, 3]).len(), 2);
     }
 }

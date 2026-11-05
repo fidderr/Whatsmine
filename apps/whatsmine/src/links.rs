@@ -74,7 +74,7 @@ pub fn InviteDialog() -> Element {
     let open_key = key.clone();
     let (add_name, add_core) = (invite.name.clone(), core.clone());
     rsx! {
-        div { class: "confirm-dialog-overlay", onclick: move |_| sig.set(None),
+        div { class: "scrim center", onclick: move |_| sig.set(None),
             BackLayer { on_back: move |_| sig.set(None) }
             div { class: "confirm-dialog invite-dialog", onclick: move |e| e.stop_propagation(),
                 div { class: "invite-avatar",
@@ -85,13 +85,13 @@ pub fn InviteDialog() -> Element {
                     p { "{body}" }
                 }
                 div { class: "key-box small", "{fmt::grouped_key(&key)}" }
-                div { class: "confirm-actions",
-                    button { class: "btn-cancel", onclick: move |_| sig.set(None),
+                div { class: "btns",
+                    button { class: "btn", onclick: move |_| sig.set(None),
                         "{t(&tr, \"common.cancel\")}"
                     }
                     if known.is_some() {
                         button {
-                            class: "btn-confirm",
+                            class: "btn main",
                             onclick: move |_| {
                                 sig.set(None);
                                 nav.push(Route::Chat { id: open_key.clone() });
@@ -100,7 +100,7 @@ pub fn InviteDialog() -> Element {
                         }
                     } else if !me && !blocked {
                         button {
-                            class: "btn-confirm",
+                            class: "btn main",
                             onclick: move |_| {
                                 sig.set(None);
                                 match add_core.add_contact(&invite_text, (!add_name.is_empty()).then_some(add_name.as_str())) {

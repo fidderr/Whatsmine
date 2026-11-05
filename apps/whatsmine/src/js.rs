@@ -45,3 +45,18 @@ pub fn scroll_if_near_bottom(id: &str) {
         "requestAnimationFrame(() => {{ const el = document.getElementById({arg}); if (el && el.scrollHeight - el.scrollTop - el.clientHeight < 400) el.scrollTop = el.scrollHeight; }});"
     ));
 }
+
+/// Brings a message into view, once it is on the page.
+pub fn scroll_to_element(id: &str) {
+    document::eval(&format!(
+        "setTimeout(() => {{ const el = document.getElementById({id:?}); if (el) el.scrollIntoView({{ block: 'center' }}); }}, 80);"
+    ));
+}
+
+/// Reads a text aloud, where the system offers a voice.
+pub fn speak(text: &str) {
+    let text = serde_json::to_string(text).unwrap_or_default();
+    document::eval(&format!(
+        "if (window.speechSynthesis) {{ speechSynthesis.cancel(); speechSynthesis.speak(new SpeechSynthesisUtterance({text})); }}"
+    ));
+}

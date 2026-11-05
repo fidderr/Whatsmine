@@ -6,20 +6,38 @@ use crate::components::{Icon, IconName};
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Tab {
     Chats,
-    Contacts,
-    Requests,
+    Calls,
+    People,
     Settings,
 }
 
-/// The one shared bottom navigation bar.
+/// The tabs: at the bottom on a phone, at the side on a wide window.
 #[component]
 pub fn BottomNav(active: Tab) -> Element {
+    rsx! {
+        nav { class: "bottom-nav", Tabs { active } }
+    }
+}
+
+#[component]
+pub fn Tabs(active: Tab) -> Element {
     let tr = use_tr();
     let core = use_core();
     let rev = use_context::<Rev>().0;
     let _ = rev();
-    let unread: u32 = core.chats().iter().map(|c| c.unread).sum();
+    let unread: u32 = core
+        .chats()
+        .iter()
+        .filter(|c| !c.contact.muted && !c.prefs.archived)
+        .map(|c| c.unread)
+        .sum();
     let requests = core.requests().len();
+    let missed = core
+        .call_records()
+        .iter()
+        .take_while(|c| c.at > crate::screens::calls_seen_at())
+        .filter(|c| c.missed && !c.outgoing)
+        .count();
 
     let class = |tab: Tab| {
         if tab == active {
@@ -30,29 +48,30 @@ pub fn BottomNav(active: Tab) -> Element {
     };
 
     rsx! {
-        nav { class: "bottom-nav",
-            Link { to: Route::Chats {}, class: class(Tab::Chats),
-                Icon { name: IconName::Chat, size: 22 }
-                "{t(&tr, \"nav.chats\")}"
-                if unread > 0 {
-                    span { class: "nav-badge", "{unread}" }
-                }
+        Link { to: Route::Chats {}, class: class(Tab::Chats), "data-t": "tab-chats",
+            Icon { name: IconName::Chat, size: 24 }
+            "{t(&tr, \"nav.chats\")}"
+            if unread > 0 {
+                span { class: "nav-badge", "{unread}" }
             }
-            Link { to: Route::ContactsScreen {}, class: class(Tab::Contacts),
-                Icon { name: IconName::Book, size: 22 }
-                "{t(&tr, \"nav.contacts\")}"
+        }
+        Link { to: Route::Calls {}, class: class(Tab::Calls), "data-t": "tab-calls",
+            Icon { name: IconName::Phone, size: 24 }
+            "{t(&tr, \"nav.calls\")}"
+            if missed > 0 {
+                span { class: "nav-badge", "{missed}" }
             }
-            Link { to: Route::Requests {}, class: class(Tab::Requests),
-                Icon { name: IconName::UserPlus, size: 22 }
-                "{t(&tr, \"nav.requests\")}"
-                if requests > 0 {
-                    span { class: "nav-badge", "{requests}" }
-                }
+        }
+        Link { to: Route::People {}, class: class(Tab::People), "data-t": "tab-people",
+            Icon { name: IconName::People, size: 24 }
+            "{t(&tr, \"nav.people\")}"
+            if requests > 0 {
+                span { class: "nav-badge", "{requests}" }
             }
-            Link { to: Route::SettingsScreen {}, class: class(Tab::Settings),
-                Icon { name: IconName::Gear, size: 22 }
-                "{t(&tr, \"nav.settings\")}"
-            }
+        }
+        Link { to: Route::SettingsScreen {}, class: class(Tab::Settings), "data-t": "tab-settings",
+            Icon { name: IconName::Sliders, size: 24 }
+            "{t(&tr, \"nav.settings\")}"
         }
     }
 }

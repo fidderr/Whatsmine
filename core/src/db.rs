@@ -659,6 +659,18 @@ impl Database {
         chat_prefs_in(&self.lock(), &self.vault, contact_id)
     }
 
+    /// A new chat starts the way the person asked for new chats to start.
+    pub fn start_with_default_timer(&self, contact_id: &str, ms: i64) {
+        if ms <= 0 {
+            return;
+        }
+        let mut prefs = self.chat_prefs(contact_id);
+        if prefs.disappear_ms.is_none() {
+            prefs.disappear_ms = Some(ms);
+            self.set_chat_prefs(contact_id, &prefs);
+        }
+    }
+
     pub fn set_chat_prefs(&self, contact_id: &str, prefs: &ChatPrefs) {
         let _ = self.lock().execute(
             "INSERT INTO chat_prefs (contact_id, sealed) VALUES (?1, ?2)
@@ -811,6 +823,14 @@ impl Database {
             )
             .ok()
             .flatten()
+    }
+
+    /// For test data: folders, as the app would have saved them.
+    #[cfg(feature = "test-hooks")]
+    pub fn save_folder_seed(&self, folders: &[crate::rich::Folder]) {
+        if let Ok(json) = serde_json::to_vec(folders) {
+            let _ = self.set_secret("folders", &json);
+        }
     }
 
     pub fn add_call_record(&self, c: &CallRecord) {

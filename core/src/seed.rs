@@ -3,7 +3,10 @@
 
 use iroh::SecretKey;
 
-use crate::model::{Attachment, ContactState, Message, MessageStatus, TransferState, now_ms};
+use crate::model::{
+    Attachment, ContactKeys, ContactState, Message, MessageStatus, TransferState, Trust, now_ms,
+};
+use crate::rich::{CallRecord, ChatPrefs, ChecklistItem, Folder, MessageExtra, PlanAnswer, Rich};
 use crate::{Core, groups, identity, protocol};
 
 const MINUTE: i64 = 60_000;
@@ -55,8 +58,40 @@ impl Core {
         let mum = person("Mum", ContactState::Accepted)?;
         let bas = person("Bas", ContactState::Accepted)?;
         person("Anna", ContactState::Accepted)?;
-        person("Yara", ContactState::PendingIn)?;
-        person("Tom", ContactState::PendingIn)?;
+        let yara = person("Yara", ContactState::PendingIn)?;
+        let tom = person("Tom", ContactState::PendingIn)?;
+        db.set_contact_keys(
+            &yara,
+            &ContactKeys {
+                greeting: "Hi, I'm Yara from the Thursday group.".into(),
+                ..ContactKeys::default()
+            },
+        );
+        db.set_contact_keys(
+            &tom,
+            &ContactKeys {
+                greeting: "Hello, we met at Anna's party last week.".into(),
+                ..ContactKeys::default()
+            },
+        );
+        for (who, trust) in [
+            (&noor, Trust::MetInPerson),
+            (&mum, Trust::MetInPerson),
+            (&bas, Trust::SafetyWords),
+        ] {
+            let mut keys = db.contact_keys(who).unwrap_or_default();
+            keys.trust = trust;
+            db.set_contact_keys(who, &keys);
+        }
+        for who in [&noor, &mum, &sam, &lieke] {
+            db.set_chat_prefs(
+                who,
+                &ChatPrefs {
+                    favourite: true,
+                    ..ChatPrefs::default()
+                },
+            );
+        }
         person("Pushy Pete", ContactState::Blocked)?;
 
         let add = |m: Message| db.insert_message(&m);
@@ -74,13 +109,28 @@ impl Core {
             "Yes! Two for Saturday, row 12",
             Read,
         ))?;
-        add(message(
+        let tickets = message(
+            &noor,
+            true,
+            14 * MINUTE,
+            "The doors open at *half past six*",
+            Read,
+        );
+        let tickets_id = tickets.id.clone();
+        add(tickets)?;
+        let mut answer = message(
             &noor,
             false,
             13 * MINUTE,
             "Perfect. I'll bring the charger for your camera",
             Read,
-        ))?;
+        );
+        answer.extra = MessageExtra {
+            reply_to: Some(tickets_id),
+            reactions: vec![(me.clone(), "❤️".to_owned())],
+            ..MessageExtra::default()
+        };
+        add(answer)?;
         let mut photo = message(&noor, true, 11 * MINUTE, "The place we talked about", Read);
         photo.attachment = Some(self.seed_picture()?);
         add(photo)?;
@@ -165,12 +215,93 @@ impl Core {
             "I'll bake it tonight",
             Delivered,
         ))?;
+        let mut poll = from(&sam, 9 * MINUTE, "Which evening works best?", true);
+        poll.extra.rich = Some(Rich::Poll {
+            question: "Which evening works best?".into(),
+            options: vec!["Thursday".into(), "Friday".into(), "Saturday".into()],
+            votes: vec![
+                (mum.clone(), 0),
+                (noor.clone(), 0),
+                (me.clone(), 1),
+                (sam.clone(), 0),
+            ],
+            multiple: false,
+        });
+        add(poll)?;
+        let mut plan = from(&noor, 8 * MINUTE, "Bouldering night", true);
+        plan.extra.rich = Some(Rich::Plan {
+            title: "Bouldering night".into(),
+            at: now_ms() + 2 * DAY,
+            place: "Sterk hall".into(),
+            answers: vec![
+                (noor.clone(), PlanAnswer::Going),
+                (sam.clone(), PlanAnswer::Going),
+                (mum.clone(), PlanAnswer::Maybe),
+            ],
+        });
+        add(plan)?;
+        let mut list = message(&state.id, true, 7 * MINUTE, "To bring", Delivered);
+        list.extra.rich = Some(Rich::Checklist {
+            title: "To bring".into(),
+            items: vec![
+                ChecklistItem {
+                    text: "Chalk".into(),
+                    done: true,
+                },
+                ChecklistItem {
+                    text: "Spare shoes".into(),
+                    done: false,
+                },
+                ChecklistItem {
+                    text: "Water".into(),
+                    done: false,
+                },
+            ],
+        });
+        add(list)?;
+        let mut place = from(&mum, 5 * MINUTE, "Sterk hall", true);
+        place.extra.rich = Some(Rich::Place {
+            lat: 52.0116,
+            lon: 4.7105,
+            label: "Sterk hall".into(),
+            live_until: None,
+        });
+        add(place)?;
+        let mut unsent = from(&sam, 4 * MINUTE, "", true);
+        unsent.extra.unsent = true;
+        add(unsent)?;
         add(from(
             &mum,
             2 * MINUTE,
             "Lovely. See you all on Sunday!",
             false,
         ))?;
+
+        db.save_folder_seed(&[Folder {
+            name: "Family".into(),
+            groups: true,
+            ..Folder::default()
+        }]);
+        for (i, (who, outgoing, video, ago, duration, missed)) in [
+            (&lieke, false, false, 40 * MINUTE, 0, true),
+            (&noor, false, false, 3 * HOUR, 12 * 60_000, false),
+            (&state.id, false, true, 20 * HOUR, 25 * 60_000, false),
+            (&sam, true, true, DAY + 3 * HOUR, 4 * 60_000, false),
+            (&mum, true, false, 3 * DAY, 0, true),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            db.add_call_record(&CallRecord {
+                id: format!("seed-{i}"),
+                contact_id: who.clone(),
+                outgoing,
+                video,
+                at: now_ms() - ago,
+                duration_ms: duration,
+                missed,
+            });
+        }
         Ok(())
     }
 

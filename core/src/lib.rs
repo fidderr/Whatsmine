@@ -13,6 +13,7 @@
 //! straight from UI event handlers. Updates arrive through [`Core::subscribe`].
 
 pub mod calls;
+pub mod codes;
 pub mod db;
 mod engine;
 pub mod files;
@@ -78,6 +79,10 @@ fn ensure_main_invite(db: &Database) {
 }
 
 pub const DB_FILE: &str = "whatsmine.db";
+
+/// How often to look again when the network is still coming up, and how long apart.
+const NET_TRIES: u32 = 10;
+const NET_WAIT: Duration = Duration::from_millis(500);
 
 /// How the core reaches the network.
 #[derive(Clone, Debug, Default)]
@@ -567,7 +572,68 @@ impl Core {
 
     /// Our name code, like `roy-7kq4x2`.
     pub fn handle(&self) -> String {
-        identity::short_handle(&self.settings().display_name, &self.inner.me)
+        codes::name_code_text(&self.main_invite())
+    }
+
+    /// The link of one of our invites, if it still works.
+    pub fn invite_link_for(&self, id: &str) -> Option<String> {
+        let mine = self
+            .inner
+            .db
+            .invites()
+            .into_iter()
+            .find(|i| i.id == id && !i.revoked)?;
+        Some(
+            mine.to_invite(&self.inner.me, &self.settings().display_name)
+                .link(),
+        )
+    }
+
+    /// A code to read out on the phone: it works once, for a few minutes.
+    pub async fn read_out_code(&self) -> String {
+        let code = codes::new_read_out();
+        let mut mine = MyInvite::new(&code, Some(now_ms() + codes::READ_OUT_MS), Some(1), false);
+        mine.label = code.clone();
+        self.inner.db.save_invite(&mine);
+        let invite = mine.to_invite(&self.inner.me, &self.settings().display_name);
+        // There may be no way out yet: the network takes a moment to come up.
+        for _ in 0..NET_TRIES {
+            let (done, answer) = tokio::sync::oneshot::channel();
+            self.cmd(Cmd::PublishCode {
+                code: code.clone(),
+                invite: invite.clone(),
+                done,
+            });
+            let sent = tokio::time::timeout(Duration::from_secs(15), answer).await;
+            if matches!(sent, Ok(Ok(true))) {
+                break;
+            }
+            tokio::time::sleep(NET_WAIT).await;
+        }
+        code
+    }
+
+    /// Whatever someone gave you: a link, a message with one, a name code or a code read out.
+    pub async fn add_by_text(&self, text: &str, greeting: &str) -> anyhow::Result<Contact> {
+        if identity::parse_invite(text).is_some() {
+            return self.add_contact_with_greeting(text, None, greeting);
+        }
+        ensure!(codes::looks_like_code(text), "invalid_key");
+        for _ in 0..NET_TRIES {
+            let (reply, answer) = tokio::sync::oneshot::channel();
+            self.cmd(Cmd::LookUpCode {
+                code: text.to_owned(),
+                reply,
+            });
+            match tokio::time::timeout(Duration::from_secs(20), answer).await {
+                Ok(Ok(Ok(Some(invite)))) => {
+                    return self.add_contact_with_greeting(&invite.link(), None, greeting);
+                }
+                Ok(Ok(Ok(None))) => bail!("code_not_found"),
+                _ => tokio::time::sleep(NET_WAIT).await,
+            }
+        }
+        bail!("code_not_found")
     }
 
     pub fn invites(&self) -> Vec<MyInvite> {
@@ -623,6 +689,9 @@ impl Core {
         self.inner
             .db
             .upsert_contact(id, ContactState::Accepted, None, None)?;
+        self.inner
+            .db
+            .start_with_default_timer(id, self.settings().disappear_default_ms);
         self.emit(CoreEvent::Accepted {
             contact_id: id.to_string(),
         });
@@ -1085,6 +1154,75 @@ impl Core {
 
     // ---- calls that were ----
 
+    /// Who of a group has it: how many, of how many.
+    pub fn group_acks(&self, message_id: &str) -> (u32, u32) {
+        self.inner.db.group_ack_counts(message_id)
+    }
+
+    // ---- how much is kept ----
+
+    /// What the files take, by kind and by chat: the largest chat first.
+    pub fn storage_report(&self) -> StorageReport {
+        let mut report = StorageReport::default();
+        let mut chats: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        for m in self.inner.db.searchable(None) {
+            let Some(a) = &m.attachment else { continue };
+            if a.path.is_none() {
+                continue;
+            }
+            match a.kind() {
+                MediaKind::Image | MediaKind::Video => report.media += a.size,
+                MediaKind::Audio => report.voice += a.size,
+                MediaKind::File => report.files += a.size,
+            }
+            *chats.entry(m.contact_id).or_default() += a.size;
+        }
+        report.chats = chats.into_iter().collect();
+        report
+            .chats
+            .sort_by_key(|(_, size)| std::cmp::Reverse(*size));
+        report
+    }
+
+    // ---- being sure who someone is ----
+
+    /// Six words for this contact and you, the same on both sides whatever else happens. Reading
+    /// them to each other proves there is nobody in between.
+    pub fn safety_words(&self, contact_id: &str) -> Vec<String> {
+        let me = self.my_key();
+        let (first, second) = if me.as_str() < contact_id {
+            (me.as_str(), contact_id)
+        } else {
+            (contact_id, me.as_str())
+        };
+        let mut hasher = blake3::Hasher::new_derive_key("whatsmine safety words v1");
+        hasher.update(first.as_bytes());
+        hasher.update(second.as_bytes());
+        let hash = hasher.finalize();
+        identity::words_for(&hash.as_bytes()[..12])
+            .into_iter()
+            .take(6)
+            .collect()
+    }
+
+    pub fn mark_safety_words(&self, contact_id: &str) {
+        let mut keys = self.inner.db.contact_keys(contact_id).unwrap_or_default();
+        keys.trust = Trust::SafetyWords;
+        self.inner.db.set_contact_keys(contact_id, &keys);
+        self.emit(CoreEvent::ContactsChanged);
+    }
+
+    /// What this contact gave to pass them on with, if they did.
+    pub fn contact_card(&self, contact_id: &str) -> Option<String> {
+        self.inner
+            .db
+            .contact_keys(contact_id)
+            .and_then(|k| k.card)
+            .filter(|c| !c.is_empty())
+    }
+
+    // ---- calls that were ----
+
     /// Newest first.
     pub fn call_records(&self) -> Vec<CallRecord> {
         self.inner.db.call_records()
@@ -1402,6 +1540,9 @@ impl Core {
         };
         let sig = groups::sign(&self.inner.key, &state);
         self.inner.db.save_group(&state, &sig, true, &[], &me)?;
+        self.inner
+            .db
+            .start_with_default_timer(&state.id, self.settings().disappear_default_ms);
         self.inner
             .db
             .set_secret(&groups::secret_name(&state.id), &vault::random::<32>())?;

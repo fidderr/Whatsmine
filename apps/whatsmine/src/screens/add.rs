@@ -2,14 +2,13 @@ use dioxus::prelude::*;
 use whatsmine_core::ContactState;
 use whatsmine_core::identity::{key_to_string, parse_invite};
 
-use crate::app::{Route, SettingsSig, ToastSig, t, toast, use_core, use_tr};
+use crate::app::{Route, SettingsSig, ToastSig, Translations, t, toast, use_core, use_tr};
 use crate::components::scan::{self, ScanOverlay};
-use crate::components::{Icon, IconName, QrCode, ToastLevel};
-use crate::fmt;
+use crate::components::{Avatar, Header, Icon, IconName, QrCode, Row, ToastLevel};
 use crate::js;
 use crate::links::{self, InviteSig};
 
-fn clipboard_label(tr: &crate::app::Translations, name: &str) -> String {
+fn clipboard_label(tr: &Translations, name: &str) -> String {
     if name.is_empty() {
         t(tr, "add.clipboard")
     } else {
@@ -17,23 +16,63 @@ fn clipboard_label(tr: &crate::app::Translations, name: &str) -> String {
     }
 }
 
-/// Show your invitation; add someone by theirs.
+/// Hands text to the system's share sheet, or copies it where there is none.
+pub fn share_or_copy(tr: Translations, mut toast_sig: ToastSig, text: String, title: String) {
+    #[cfg(target_os = "android")]
+    {
+        let _ = (tr, &mut toast_sig);
+        std::thread::spawn(move || {
+            let _ = mobile_sentinel::share::text(&text, Some(&title));
+        });
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = title;
+        js::copy_text(&text);
+        toast(&mut toast_sig, t(&tr, "add.link_copied"), ToastLevel::Info);
+    }
+}
+
+/// Starts the scanner, and offers what it found.
+pub fn use_scan(invite: InviteSig) -> (Signal<bool>, Callback<()>) {
+    let tr = use_tr();
+    let mut toast_sig = use_context::<ToastSig>();
+    let mut scanning = use_signal(|| false);
+    let start = use_callback(move |()| {
+        if scan::NATIVE_SCANNER {
+            spawn(async move {
+                if let Some(code) = scan::scan_native().await
+                    && !links::offer(invite, &code)
+                {
+                    toast(
+                        &mut toast_sig,
+                        t(&tr, "add.scan_not_ours"),
+                        ToastLevel::Warning,
+                    );
+                }
+            });
+        } else {
+            scanning.set(true);
+        }
+    });
+    (scanning, start)
+}
+
+/// Your code for whoever is next to you, and every other way of adding someone.
 #[component]
 pub fn AddContact() -> Element {
     let tr = use_tr();
     crate::js::use_scroll_top();
     let core = use_core();
-    let nav = use_navigator();
     let settings = use_context::<SettingsSig>().0;
     let invite = use_context::<InviteSig>();
     let mut toast_sig = use_context::<ToastSig>();
-    let mut their_key = use_signal(String::new);
-    let mut nickname = use_signal(String::new);
-    let mut error = use_signal(|| None::<String>);
-    let mut scanning = use_signal(|| false);
     let my_key = core.my_key();
-    let _ = settings.read();
+    let name = settings.read().display_name.clone();
+    let photo = settings.read().avatar.clone();
     let link = core.invite_link();
+    let handle = core.handle();
+    let (mut scanning, start_scan) = use_scan(invite);
     // Scanned right here, in person: both are added without asking.
     let in_person = use_signal({
         let core = core.clone();
@@ -67,137 +106,165 @@ pub fn AddContact() -> Element {
         });
     }
 
-    let submit = {
-        let core = core.clone();
-        move |_| {
-            let typed = their_key.peek().clone();
-            // A pasted link or message.
-            match core.add_contact(&typed, Some(nickname.peek().as_str())) {
-                Ok(c) => {
-                    nav.replace(Route::Chat { id: c.id });
-                }
-                Err(e) => error.set(Some(t(&tr, &format!("add.err.{e}")))),
-            }
-        }
-    };
-
-    let start_scan = move |_| {
-        if scan::NATIVE_SCANNER {
-            spawn(async move {
-                if let Some(code) = scan::scan_native().await
-                    && !links::offer(invite, &code)
-                {
-                    toast(
-                        &mut toast_sig,
-                        t(&tr, "add.scan_not_ours"),
-                        ToastLevel::Warning,
-                    );
-                }
-            });
-        } else {
-            scanning.set(true);
-        }
-    };
-
-    let (copy_link, copy_key) = (link.clone(), my_key.clone());
-    #[cfg(target_os = "android")]
+    let copy_handle = handle.clone();
     let share_text = t(&tr, "add.share_text").replace("{link}", &link);
 
     rsx! {
         div { class: "screen no-nav",
-            div { class: "config-header",
-                button { class: "back-btn", onclick: move |_| nav.go_back(),
-                    Icon { name: IconName::ArrowLeft }
-                }
-                span { class: "config-title", "{t(&tr, \"add.title\")}" }
-            }
-
-            if let Some((text, name)) = on_clipboard() {
-                div { class: "banner clipboard-invite",
-                    span { "{clipboard_label(&tr, &name)}" }
-                    button {
-                        class: "secondary-btn",
-                        onclick: move |_| {
-                            on_clipboard.set(None);
-                            links::offer(invite, &text);
-                        },
-                        "{t(&tr, \"add.clipboard_use\")}"
-                    }
-                }
-            }
-
-            div { class: "settings-section",
-                label { class: "section-label", "{t(&tr, \"add.your_key\")}" }
-                p { class: "setting-hint", "{t(&tr, \"add.your_key_hint\")}" }
-                QrCode { data: in_person() }
-                div { class: "button-row",
-                    button {
-                        class: "secondary-btn grow",
-                        onclick: move |_| {
-                            js::copy_text(&copy_link);
-                            toast(&mut toast_sig, t(&tr, "add.link_copied"), ToastLevel::Info);
-                        },
-                        Icon { name: IconName::Link, size: 18 }
-                        "{t(&tr, \"add.copy_link\")}"
-                    }
-                    if cfg!(target_os = "android") {
+            Header { title: t(&tr, "add.title") }
+            div { class: "body g12",
+                if let Some((text, found)) = on_clipboard() {
+                    div { class: "notice still",
+                        Icon { name: IconName::Clipboard }
+                        span { class: "stack b", "{clipboard_label(&tr, &found)}" }
                         button {
-                            class: "secondary-btn grow",
+                            class: "btn small-btn",
                             onclick: move |_| {
-                                #[cfg(target_os = "android")]
-                                {
-                                    let text = share_text.clone();
-                                    let title = t(&tr, "add.share");
-                                    std::thread::spawn(move || {
-                                        let _ = mobile_sentinel::share::text(&text, Some(&title));
-                                    });
-                                }
+                                on_clipboard.set(None);
+                                links::offer(invite, &text);
                             },
-                            Icon { name: IconName::Share, size: 18 }
-                            "{t(&tr, \"add.share\")}"
+                            "{t(&tr, \"add.clipboard_use\")}"
                         }
                     }
                 }
-                div { class: "key-box", "{fmt::grouped_key(&my_key)}" }
-                button {
-                    class: "secondary-btn grow",
-                    style: "width: 100%;",
-                    onclick: move |_| {
-                        js::copy_text(&copy_key);
-                        toast(&mut toast_sig, t(&tr, "common.copied"), ToastLevel::Info);
-                    },
-                    Icon { name: IconName::Copy, size: 18 }
-                    "{t(&tr, \"add.copy_key\")}"
+                section { class: "panel center", style: "gap:4px",
+                    QrCode { data: in_person() }
+                    span { class: "mark", style: "padding-top:8px",
+                        Avatar { id: "me".to_string(), name: name.clone(), size: "tiny", image: photo }
+                        span { style: "font-size:1.25rem;font-weight:500", "{name}" }
+                    }
+                    button {
+                        class: "row sm",
+                        style: "justify-content:center;width:auto",
+                        "data-t": "copy-handle",
+                        aria_label: "{t(&tr, \"add.copy_handle\")}",
+                        onclick: move |_| {
+                            js::copy_text(&copy_handle);
+                            toast(&mut toast_sig, t(&tr, "common.copied"), ToastLevel::Info);
+                        },
+                        span { class: "dim", "{handle}" }
+                        Icon { name: IconName::Copy, size: 18 }
+                    }
+                }
+                p { class: "note", "{t(&tr, \"add.your_key_hint\")}" }
+                div { class: "btns",
+                    button {
+                        class: "btn main",
+                        "data-t": "scan",
+                        onclick: move |_| start_scan.call(()),
+                        Icon { name: IconName::Camera, size: 20 }
+                        "{t(&tr, \"add.scan\")}"
+                    }
+                    button {
+                        class: "btn",
+                        "data-t": "share",
+                        onclick: move |_| share_or_copy(tr, toast_sig, share_text.clone(), t(&tr, "add.share")),
+                        Icon { name: IconName::Share, size: 20 }
+                        "{t(&tr, \"add.share\")}"
+                    }
+                }
+                div { class: "group",
+                    Row {
+                        icon: IconName::Pencil,
+                        title: t(&tr, "add.type"),
+                        note: t(&tr, "add.type_note"),
+                        to: Route::AddType {},
+                        tag: "type",
+                    }
+                    Row {
+                        icon: IconName::Link,
+                        title: t(&tr, "address.title"),
+                        note: t(&tr, "address.row_note"),
+                        to: Route::PublicAddress {},
+                        tag: "address",
+                    }
                 }
             }
-
-            div { class: "settings-section",
-                label { class: "section-label", "{t(&tr, \"add.their_key\")}" }
-                button {
-                    class: "save-btn scan-btn",
-                    onclick: start_scan,
-                    Icon { name: IconName::Scan, size: 20 }
-                    "{t(&tr, \"add.scan\")}"
+            if scanning() {
+                ScanOverlay {
+                    on_code: move |code: String| {
+                        scanning.set(false);
+                        if !links::offer(invite, &code) {
+                            toast(&mut toast_sig, t(&tr, "add.scan_not_ours"), ToastLevel::Warning);
+                        }
+                    },
+                    on_close: move |_| scanning.set(false),
                 }
-                div { class: "field",
+            }
+        }
+    }
+}
+
+/// Type what they gave you: a link, a name code, or the code they read out.
+#[component]
+pub fn AddType() -> Element {
+    let tr = use_tr();
+    crate::js::use_scroll_top();
+    let core = use_core();
+    let nav = use_navigator();
+    let mut toast_sig = use_context::<ToastSig>();
+    let mut typed = use_signal(String::new);
+    let mut greeting = use_signal(String::new);
+    let mut error = use_signal(|| None::<String>);
+    let mut busy = use_signal(|| false);
+    let mut code = use_signal(|| None::<String>);
+
+    let submit = {
+        let core = core.clone();
+        move |_| {
+            let text = typed.peek().trim().to_owned();
+            let hello = greeting.peek().trim().to_owned();
+            let core = core.clone();
+            busy.set(true);
+            error.set(None);
+            spawn(async move {
+                let result = core.add_by_text(&text, &hello).await;
+                busy.set(false);
+                match result {
+                    Ok(c) => {
+                        nav.replace(Route::Chat { id: c.id });
+                    }
+                    Err(e) => error.set(Some(t(&tr, &format!("add.err.{e}")))),
+                }
+            });
+        }
+    };
+
+    let new_code = {
+        let core = core.clone();
+        move |_| {
+            let core = core.clone();
+            spawn(async move {
+                code.set(Some(core.read_out_code().await));
+            });
+        }
+    };
+    let new_code_again = new_code.clone();
+
+    rsx! {
+        div { class: "screen no-nav",
+            Header { title: t(&tr, "add.type") }
+            div { class: "body g12",
+                label { class: "field",
+                    span { class: "gt", "{t(&tr, \"add.their_code\")}" }
                     div { class: "input-row",
                         input {
                             r#type: "text",
                             placeholder: "{t(&tr, \"add.key_placeholder\")}",
-                            value: "{their_key}",
+                            value: "{typed}",
                             autocomplete: "off",
                             spellcheck: "false",
                             oninput: move |e| {
-                                their_key.set(e.value());
+                                typed.set(e.value());
                                 error.set(None);
                             },
                         }
                         button {
-                            class: "secondary-btn",
+                            class: "btn",
                             title: "{t(&tr, \"add.paste\")}",
                             onclick: move |_| async move {
                                 if let Some(text) = js::paste_text().await {
-                                    their_key.set(text.trim().to_string());
+                                    typed.set(text.trim().to_string());
                                     error.set(None);
                                 }
                             },
@@ -208,34 +275,55 @@ pub fn AddContact() -> Element {
                         p { class: "field-error", "{err}" }
                     }
                 }
-                div { class: "field",
-                    input {
-                        r#type: "text",
-                        maxlength: "64",
-                        placeholder: "{t(&tr, \"add.nickname_placeholder\")}",
-                        value: "{nickname}",
-                        oninput: move |e| nickname.set(e.value()),
+                label { class: "field",
+                    span { class: "gt", "{t(&tr, \"add.greeting\")}" }
+                    textarea {
+                        rows: "2",
+                        maxlength: "120",
+                        placeholder: "{t(&tr, \"add.greeting_placeholder\")}",
+                        value: "{greeting}",
+                        oninput: move |e| greeting.set(e.value()),
                     }
-                    p { class: "setting-hint", "{t(&tr, \"add.nickname_hint\")}" }
                 }
                 button {
-                    class: "save-btn",
-                    disabled: their_key().trim().is_empty(),
+                    class: "btn main",
+                    "data-t": "send-request",
+                    disabled: typed().trim().is_empty() || busy(),
                     onclick: submit,
-                    "{t(&tr, \"add.send_request\")}"
+                    if busy() {
+                        "{t(&tr, \"add.looking\")}"
+                    } else {
+                        "{t(&tr, \"add.send_request\")}"
+                    }
                 }
-                p { class: "setting-hint", "{t(&tr, \"add.request_hint\")}" }
-            }
-
-            if scanning() {
-                ScanOverlay {
-                    on_code: move |code: String| {
-                        scanning.set(false);
-                        if !links::offer(invite, &code) {
-                            toast(&mut toast_sig, t(&tr, "add.scan_not_ours"), ToastLevel::Warning);
+                p { class: "note", "{t(&tr, \"add.request_hint\")}" }
+                h2 { class: "gt", "{t(&tr, \"add.on_the_phone\")}" }
+                section { class: "panel center",
+                    if let Some(shown) = code() {
+                        span { class: "code-big", "{shown}" }
+                        span { class: "sub", "{t(&tr, \"add.read_out_note\")}" }
+                        div { class: "btns", style: "align-self:stretch",
+                            button {
+                                class: "btn",
+                                onclick: move |_| {
+                                    js::copy_text(&shown);
+                                    toast(&mut toast_sig, t(&tr, "common.copied"), ToastLevel::Info);
+                                },
+                                Icon { name: IconName::Copy, size: 20 }
+                                "{t(&tr, \"common.copy\")}"
+                            }
+                            button { class: "btn", onclick: new_code_again,
+                                Icon { name: IconName::Restart, size: 20 }
+                                "{t(&tr, \"add.new_code\")}"
+                            }
                         }
-                    },
-                    on_close: move |_| scanning.set(false),
+                    } else {
+                        span { class: "sub", "{t(&tr, \"add.read_out_text\")}" }
+                        button { class: "btn", "data-t": "read-out", onclick: new_code,
+                            Icon { name: IconName::Phone, size: 20 }
+                            "{t(&tr, \"add.read_out\")}"
+                        }
+                    }
                 }
             }
         }

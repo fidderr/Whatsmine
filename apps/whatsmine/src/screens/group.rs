@@ -4,7 +4,11 @@ use dioxus::prelude::*;
 use whatsmine_core::{ContactKind, ContactState};
 
 use crate::app::{Rev, Route, ToastSig, t, toast, use_core, use_tr};
-use crate::components::{Avatar, ConfirmDialog, Icon, IconName, ToastLevel};
+use crate::call::{self, CallBridge, CallUi};
+use crate::components::{
+    Avatar, BackButton, ConfirmDialog, Header, Icon, IconName, Row, Sheet, ToastLevel,
+};
+use crate::screens::contact::{DisappearSheet, disappear_label};
 
 /// Pick contacts and a name; you become the group's admin.
 #[component]
@@ -48,67 +52,61 @@ pub fn NewGroup() -> Element {
 
     rsx! {
         div { class: "screen no-nav",
-            div { class: "config-header",
-                button { class: "back-btn", onclick: move |_| nav.go_back(),
-                    Icon { name: IconName::ArrowLeft }
+            Header { title: t(&tr, "group.new") }
+            div { class: "body g12",
+                label { class: "field",
+                    span { class: "gt", "{t(&tr, \"group.name\")}" }
+                    input {
+                        r#type: "text",
+                        maxlength: "64",
+                        placeholder: "{t(&tr, \"group.name_placeholder\")}",
+                        value: "{name}",
+                        oninput: move |e| name.set(e.value()),
+                    }
                 }
-                span { class: "config-title", "{t(&tr, \"group.new\")}" }
-            }
-            div { class: "settings-section",
-                label { class: "section-label", "{t(&tr, \"group.name\")}" }
-                input {
-                    r#type: "text",
-                    maxlength: "64",
-                    placeholder: "{t(&tr, \"group.name_placeholder\")}",
-                    value: "{name}",
-                    oninput: move |e| name.set(e.value()),
-                }
-            }
-            div { class: "settings-section",
-                label { class: "section-label", "{pick_label}" }
+                h2 { class: "gt", "{pick_label}" }
                 if contacts.is_empty() {
-                    p { class: "setting-hint", "{t(&tr, \"group.no_contacts\")}" }
-                }
-                div { class: "list",
-                    for c in contacts {
-                        {
-                            let id = c.id.clone();
-                            let on = picked.read().contains(&id);
-                            let label = c.display_name();
-                            rsx! {
-                                div {
-                                    key: "{c.id}",
-                                    class: if on { "card pick on" } else { "card pick" },
-                                    onclick: {
-                                        let id = id.clone();
-                                        move |_| {
+                    p { class: "note", "{t(&tr, \"group.no_contacts\")}" }
+                } else {
+                    div { class: "group",
+                        for c in contacts {
+                            {
+                                let id = c.id.clone();
+                                let on = picked.read().contains(&id);
+                                let label = c.display_name();
+                                rsx! {
+                                    button {
+                                        key: "{c.id}",
+                                        class: "row",
+                                        role: "checkbox",
+                                        aria_checked: "{on}",
+                                        onclick: move |_| {
                                             let mut p = picked.write();
                                             if !p.remove(&id) {
                                                 p.insert(id.clone());
                                             }
+                                        },
+                                        Avatar {
+                                            id: c.id.clone(),
+                                            name: label.clone(),
+                                            size: "medium",
+                                            image: c.avatar.clone(),
                                         }
-                                    },
-                                    Avatar {
-                                        id: c.id.clone(),
-                                        name: label.clone(),
-                                        size: "small",
-                                        image: c.avatar.clone(),
-                                    }
-                                    div { class: "card-main",
-                                        span { class: "card-title", "{label}" }
-                                    }
-                                    if on {
-                                        Icon { name: IconName::Check, size: 20 }
+                                        span { class: "row-t stack one-line", "{label}" }
+                                        if on {
+                                            span { class: "accent-text", style: "display:flex",
+                                                Icon { name: IconName::Check, size: 20 }
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
                     }
                 }
-            }
-            div { class: "settings-section",
                 button {
-                    class: "save-btn",
+                    class: "btn main",
+                    "data-t": "create-group",
                     disabled: !can_create,
                     onclick: create,
                     "{t(&tr, \"group.create\")}"
@@ -125,7 +123,7 @@ enum Confirm {
     Remove,
 }
 
-/// Members, and (for the admin) rename / add / remove.
+/// Members, and (for the admin) rename, add and remove.
 #[component]
 pub fn GroupInfoScreen(id: String) -> Element {
     let tr = use_tr();
@@ -134,8 +132,13 @@ pub fn GroupInfoScreen(id: String) -> Element {
     let nav = use_navigator();
     let rev = use_context::<Rev>().0;
     let mut toast_sig = use_context::<ToastSig>();
+    let bridge = use_context::<CallBridge>();
+    let phase = use_context::<CallUi>().0;
     let mut confirm = use_signal(|| None::<Confirm>);
     let mut target = use_signal(String::new);
+    let mut renaming = use_signal(|| false);
+    let mut adding = use_signal(|| false);
+    let mut disappear = use_signal(|| false);
     let mut new_name = {
         let (core, id) = (core.clone(), id.clone());
         use_signal(move || core.group_info(&id).map(|g| g.name).unwrap_or_default())
@@ -145,11 +148,7 @@ pub fn GroupInfoScreen(id: String) -> Element {
     let Some(info) = core.group_info(&id) else {
         return rsx! {
             div { class: "screen no-nav",
-                div { class: "config-header",
-                    button { class: "back-btn", onclick: move |_| nav.go_back(),
-                        Icon { name: IconName::ArrowLeft }
-                    }
-                }
+                header { class: "hdr", BackButton {} }
                 div { class: "empty-state",
                     p { class: "empty-title", "{t(&tr, \"chat.not_found\")}" }
                 }
@@ -179,78 +178,91 @@ pub fn GroupInfoScreen(id: String) -> Element {
         .find(|m| m.id == target())
         .map(|m| m.name.clone())
         .unwrap_or_default();
+    let prefs = core.chat_prefs(&id);
+    let id_shared = id.clone();
+    let (call_core, call_id) = (core.clone(), id.clone());
+    let id_look = id.clone();
 
     rsx! {
         div { class: "screen no-nav",
-            div { class: "config-header",
-                button { class: "back-btn", onclick: move |_| nav.go_back(),
-                    Icon { name: IconName::ArrowLeft }
-                }
-                span { class: "config-title", "{t(&tr, \"group.info\")}" }
-            }
-            div { class: "profile-head",
-                Avatar { id: id.clone(), name: name.clone(), size: "large", group: true, zoom: true }
-                span { class: "profile-name", "{name}" }
-                span { class: "profile-sub", "{subtitle}" }
-                if !info.active {
-                    span { class: "profile-sub", "{t(&tr, \"group.inactive\")}" }
-                }
-            }
-
-            if info.i_am_admin && info.active {
-                div { class: "settings-section",
-                    label { class: "section-label", "{t(&tr, \"group.rename\")}" }
-                    div { class: "input-row",
-                        input {
-                            r#type: "text",
-                            maxlength: "64",
-                            value: "{new_name}",
-                            oninput: move |e| new_name.set(e.value()),
-                        }
-                        button {
-                            class: "secondary-btn",
-                            onclick: {
-                                let (core, id) = (core.clone(), id.clone());
-                                move |_| match core.group_rename(&id, &new_name.peek()) {
-                                    Ok(()) => toast(&mut toast_sig, t(&tr, "common.saved"), ToastLevel::Info),
-                                    Err(e) => toast(&mut toast_sig, t(&tr, &format!("group.err.{e}")), ToastLevel::Error),
-                                }
-                            },
-                            "{t(&tr, \"common.save\")}"
-                        }
+            header { class: "hdr", style: "padding-bottom:0",
+                BackButton {}
+                span { style: "flex:1" }
+                if info.i_am_admin && info.active {
+                    button {
+                        class: "ib",
+                        "data-t": "edit-group",
+                        aria_label: "{t(&tr, \"group.rename\")}",
+                        onclick: move |_| renaming.set(true),
+                        Icon { name: IconName::Pencil, size: 22 }
                     }
                 }
             }
-
-            div { class: "settings-section",
-                label { class: "section-label", "{t(&tr, \"group.members\")}" }
-                div { class: "list",
+            div { class: "body",
+                div { class: "panel center", style: "background:transparent;padding:0;gap:4px",
+                    Avatar { id: id.clone(), name: name.clone(), size: "big", group: true, zoom: true }
+                    h1 { style: "font-size:1.75rem;line-height:1.3;font-weight:700", "{name}" }
+                    span { class: "sub", "{subtitle}" }
+                    if !info.active {
+                        span { class: "sub", "{t(&tr, \"group.inactive\")}" }
+                    }
+                }
+                div { class: "tile-actions",
+                    if !addable.is_empty() {
+                        button {
+                            class: "tile-action",
+                            "data-t": "add-member",
+                            onclick: move |_| adding.set(true),
+                            Icon { name: IconName::UserPlus, size: 22 }
+                            "{t(&tr, \"group.add\")}"
+                        }
+                    }
+                    if info.active {
+                        button {
+                            class: "tile-action",
+                            onclick: move |_| {
+                                call::start_call(&call_core, &call_id, false, phase, &bridge, &mut toast_sig, &tr);
+                            },
+                            Icon { name: IconName::Phone, size: 22 }
+                            "{t(&tr, \"call.voice_short\")}"
+                        }
+                    }
+                    Link {
+                        class: "tile-action",
+                        to: Route::SharedMedia { id: id_shared.clone() },
+                        Icon { name: IconName::Search, size: 22 }
+                        "{t(&tr, \"contact.search\")}"
+                    }
+                }
+                h2 { class: "gt", "{t(&tr, \"group.members\")}" }
+                div { class: "group",
                     for m in info.members.clone() {
-                        div { key: "{m.id}", class: "card member",
+                        div { key: "{m.id}", class: "row still",
                             Avatar {
                                 id: m.id.clone(),
                                 name: m.name.clone(),
-                                size: "small",
+                                size: "medium",
                                 online: m.online || m.is_me,
                                 image: core.contact(&m.id).and_then(|c| c.avatar),
                                 zoom: true,
                             }
-                            div { class: "card-main",
-                                span { class: "card-title",
+                            span { class: "stack",
+                                span { class: "row-t one-line",
                                     "{m.name}"
                                     if m.is_me {
                                         " ({you_label})"
                                     }
                                 }
                                 if m.is_admin {
-                                    span { class: "card-sub accent", "{t(&tr, \"group.admin\")}" }
+                                    span { class: "sub accent-text", "{t(&tr, \"group.admin\")}" }
                                 } else if !m.is_contact && !m.is_me {
-                                    span { class: "card-sub", "{t(&tr, \"group.not_contact\")}" }
+                                    span { class: "sub", "{t(&tr, \"group.not_contact\")}" }
                                 }
                             }
                             if info.i_am_admin && info.active && !m.is_me {
                                 button {
-                                    class: "icon-btn remove-member",
+                                    class: "ib danger-text",
+                                    "data-t": "remove-member",
                                     title: "{t(&tr, \"group.remove\")}",
                                     onclick: {
                                         let mid = m.id.clone();
@@ -265,52 +277,89 @@ pub fn GroupInfoScreen(id: String) -> Element {
                         }
                     }
                 }
+                div { class: "group",
+                    Row {
+                        icon: IconName::Clock,
+                        title: t(&tr, "contact.disappear"),
+                        value: disappear_label(&tr, prefs.disappear_ms),
+                        small: true,
+                        on_tap: move |_| disappear.set(true),
+                    }
+                    Row {
+                        icon: IconName::Palette,
+                        title: t(&tr, "look.title"),
+                        small: true,
+                        to: Route::ChatLook { id: id_look.clone() },
+                    }
+                    if info.active {
+                        Row {
+                            icon: IconName::Xmark,
+                            title: t(&tr, "group.leave"),
+                            small: true,
+                            danger: true,
+                            tag: "leave",
+                            on_tap: move |_| confirm.set(Some(Confirm::Leave)),
+                        }
+                    }
+                    Row {
+                        icon: IconName::Trash,
+                        title: t(&tr, "group.delete"),
+                        small: true,
+                        danger: true,
+                        on_tap: move |_| confirm.set(Some(Confirm::Delete)),
+                    }
+                }
             }
-
-            if !addable.is_empty() {
-                div { class: "settings-section",
-                    label { class: "section-label", "{t(&tr, \"group.add_member\")}" }
-                    div { class: "list",
+            if disappear() {
+                DisappearSheet { id: id.clone(), on_close: move |_| disappear.set(false) }
+            }
+            if renaming() {
+                Sheet { on_close: move |_| renaming.set(false), title: t(&tr, "group.rename"),
+                    input {
+                        r#type: "text",
+                        maxlength: "64",
+                        value: "{new_name}",
+                        oninput: move |e| new_name.set(e.value()),
+                    }
+                    button {
+                        class: "btn main",
+                        onclick: {
+                            let (core, id) = (core.clone(), id.clone());
+                            move |_| {
+                                match core.group_rename(&id, &new_name.peek()) {
+                                    Ok(()) => toast(&mut toast_sig, t(&tr, "common.saved"), ToastLevel::Info),
+                                    Err(e) => toast(&mut toast_sig, t(&tr, &format!("group.err.{e}")), ToastLevel::Error),
+                                }
+                                renaming.set(false);
+                            }
+                        },
+                        "{t(&tr, \"common.save\")}"
+                    }
+                }
+            }
+            if adding() {
+                Sheet { on_close: move |_| adding.set(false), title: t(&tr, "group.add_member"),
+                    div { class: "sheet-list",
                         for c in addable {
-                            div { key: "{c.id}", class: "card",
-                                Avatar {
-                                    id: c.id.clone(),
-                                    name: c.display_name(),
-                                    size: "small",
-                                    image: c.avatar.clone(),
-                                }
-                                div { class: "card-main",
-                                    span { class: "card-title", "{c.display_name()}" }
-                                }
-                                button {
-                                    class: "secondary-btn add-member",
-                                    onclick: {
-                                        let (core, gid, cid) = (core.clone(), id.clone(), c.id.clone());
-                                        move |_| {
-                                            if let Err(e) = core.group_add(&gid, &cid) {
-                                                toast(&mut toast_sig, t(&tr, &format!("group.err.{e}")), ToastLevel::Error);
-                                            }
+                            button {
+                                key: "{c.id}",
+                                class: "sheet-item",
+                                onclick: {
+                                    let (core, gid, cid) = (core.clone(), id.clone(), c.id.clone());
+                                    move |_| {
+                                        if let Err(e) = core.group_add(&gid, &cid) {
+                                            toast(&mut toast_sig, t(&tr, &format!("group.err.{e}")), ToastLevel::Error);
                                         }
-                                    },
-                                    "{t(&tr, \"group.add\")}"
-                                }
+                                        adding.set(false);
+                                    }
+                                },
+                                Avatar { id: c.id.clone(), name: c.display_name(), size: "tiny", image: c.avatar.clone() }
+                                span { "{c.display_name()}" }
                             }
                         }
                     }
                 }
             }
-
-            div { class: "settings-section",
-                if info.active {
-                    button { class: "delete-btn", onclick: move |_| confirm.set(Some(Confirm::Leave)),
-                        "{t(&tr, \"group.leave\")}"
-                    }
-                }
-                button { class: "delete-btn", onclick: move |_| confirm.set(Some(Confirm::Delete)),
-                    "{t(&tr, \"group.delete\")}"
-                }
-            }
-
             if let Some(which) = confirm() {
                 ConfirmDialog {
                     title: match which {

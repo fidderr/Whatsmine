@@ -13,9 +13,12 @@ pub mod debug_hooks;
 #[cfg(feature = "desktop")]
 pub mod desktop;
 pub mod fmt;
+mod health;
 pub mod i18n;
 pub mod js;
 pub mod links;
+mod lock;
+mod look;
 pub mod media;
 pub mod media_server;
 pub mod notify;

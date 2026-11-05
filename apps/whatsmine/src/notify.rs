@@ -64,6 +64,14 @@ pub trait Lookup {
     fn muted(&self, _id: &str) -> bool {
         false
     }
+    /// Whether this key is the person using this device.
+    fn is_me(&self, _id: &str) -> bool {
+        false
+    }
+    /// A reminder's chat and first line.
+    fn message_line(&self, _message_id: &str) -> Option<(String, String)> {
+        None
+    }
 }
 
 #[derive(Default)]
@@ -90,7 +98,8 @@ impl Hub {
         let generic = |look: &dyn Lookup, key: &str| (look.text("app.name"), look.text(key));
         match ev {
             CoreEvent::MessageAdded(m) if !m.outgoing => {
-                if ui_active || look.muted(&m.contact_id) {
+                let named = m.extra.mentions.iter().any(|who| look.is_me(who));
+                if ui_active || ((look.muted(&m.contact_id) || m.extra.silent) && !named) {
                     return Vec::new();
                 }
                 let tag = format!("chat:{}", m.contact_id);
@@ -113,8 +122,24 @@ impl Hub {
                     chat: Some(m.contact_id.clone()),
                 })]
             }
+            CoreEvent::Reminder { message_id } => {
+                let Some((chat, line)) = look.message_line(message_id) else {
+                    return Vec::new();
+                };
+                vec![Action::Post(Notice {
+                    tag: format!("reminder:{message_id}"),
+                    kind: Kind::Message,
+                    title: look.text("notify.reminder"),
+                    body: if settings.notification_previews {
+                        format!("{}: {line}", look.name(&chat))
+                    } else {
+                        look.name(&chat)
+                    },
+                    chat: Some(chat),
+                })]
+            }
             CoreEvent::RequestReceived { contact_id, name } => {
-                if ui_active {
+                if ui_active || settings.quiet_requests {
                     return Vec::new();
                 }
                 let who = if name.is_empty() {
@@ -250,7 +275,19 @@ impl Lookup for CoreLookup<'_> {
             .unwrap_or_else(|| key.to_string())
     }
     fn muted(&self, id: &str) -> bool {
-        self.core.contact(id).is_some_and(|c| c.muted)
+        let snoozed = self
+            .core
+            .chat_prefs(id)
+            .snoozed_until
+            .is_some_and(|until| until > whatsmine_core::model::now_ms());
+        snoozed || self.core.contact(id).is_some_and(|c| c.muted)
+    }
+    fn is_me(&self, id: &str) -> bool {
+        self.core.my_key() == id
+    }
+    fn message_line(&self, message_id: &str) -> Option<(String, String)> {
+        let m = self.core.message(message_id)?;
+        Some((m.contact_id, crate::fmt::plain(&m.body)))
     }
 }
 
@@ -390,6 +427,55 @@ mod tests {
         fn muted(&self, id: &str) -> bool {
             id == "bob"
         }
+    }
+
+    #[test]
+    fn being_named_breaks_through_a_mute_and_no_sound_stays_quiet() {
+        struct Me;
+        impl Lookup for Me {
+            fn name(&self, id: &str) -> String {
+                id.into()
+            }
+            fn text(&self, key: &str) -> String {
+                key.into()
+            }
+            fn muted(&self, _id: &str) -> bool {
+                true
+            }
+            fn is_me(&self, id: &str) -> bool {
+                id == "me"
+            }
+        }
+        let mut hub = Hub::default();
+        let s = Settings::default();
+        let mut named = msg("grp", "hi @Me", None);
+        named.extra.mentions = vec!["me".into()];
+        assert_eq!(
+            hub.decide(&CoreEvent::MessageAdded(named), &s, false, &Me)
+                .len(),
+            1
+        );
+        let mut silent = msg("bob", "psst", None);
+        silent.extra.silent = true;
+        let mut hub = Hub::default();
+        assert!(
+            hub.decide(&CoreEvent::MessageAdded(silent), &s, false, &Fake)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn quiet_mode_keeps_requests_quiet() {
+        let mut hub = Hub::default();
+        let s = Settings {
+            quiet_requests: true,
+            ..Settings::default()
+        };
+        let ev = CoreEvent::RequestReceived {
+            contact_id: "x".into(),
+            name: "X".into(),
+        };
+        assert!(hub.decide(&ev, &s, false, &Fake).is_empty());
     }
 
     #[test]

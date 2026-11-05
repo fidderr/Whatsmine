@@ -13,10 +13,10 @@ pub fn ConfirmDialog(
     on_cancel: EventHandler<()>,
 ) -> Element {
     let tr = use_tr();
-    let confirm_class = if danger { "btn-delete" } else { "btn-confirm" };
+    let confirm_class = if danger { "btn danger" } else { "btn main" };
     rsx! {
         div {
-            class: "confirm-dialog-overlay",
+            class: "scrim center",
             onclick: move |_| on_cancel.call(()),
             BackLayer { on_back: move |_| on_cancel.call(()) }
             div {
@@ -24,8 +24,8 @@ pub fn ConfirmDialog(
                 onclick: move |e| e.stop_propagation(),
                 h3 { "{title}" }
                 p { "{message}" }
-                div { class: "confirm-actions",
-                    button { class: "btn-cancel", onclick: move |_| on_cancel.call(()),
+                div { class: "btns",
+                    button { class: "btn", onclick: move |_| on_cancel.call(()),
                         "{t(&tr, \"common.cancel\")}"
                     }
                     button { class: confirm_class, onclick: move |_| on_confirm.call(()),

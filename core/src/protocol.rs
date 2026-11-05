@@ -50,6 +50,8 @@ pub enum Frame {
     Accept {
         name: String,
         location: [u8; 32],
+        /// Their public link, for passing them on to someone.
+        card: String,
     },
     Msg {
         id: [u8; 16],
@@ -257,6 +259,7 @@ mod tests {
             Frame::Accept {
                 name: String::new(),
                 location: [7; 32],
+                card: String::new(),
             },
             Frame::Msg {
                 id: [7; 16],

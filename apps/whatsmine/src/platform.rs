@@ -130,7 +130,7 @@ pub fn is_dark(theme: &str, system_dark: bool) -> bool {
 
 /// The page's background as `0xAARRGGBB`: `--bg` in style.css.
 pub fn background(dark: bool) -> u32 {
-    if dark { 0xFF12_121A } else { 0xFFF5_F5FA }
+    if dark { 0xFF10_1218 } else { 0xFFF5_F6F9 }
 }
 
 /// The colour the page comes up on, before it has painted anything: the saved theme's. Dioxus's

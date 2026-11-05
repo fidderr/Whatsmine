@@ -120,6 +120,17 @@ pub(crate) enum Cmd {
     SendChanges(Vec<PublicKey>),
     /// A scheduled message, reminder or disappearing message was added or removed.
     TimersChanged,
+    /// Leave this invitation under this code.
+    PublishCode {
+        code: String,
+        invite: crate::identity::Invite,
+        done: tokio::sync::oneshot::Sender<bool>,
+    },
+    /// Who this code stands for.
+    LookUpCode {
+        code: String,
+        reply: tokio::sync::oneshot::Sender<Result<Option<crate::identity::Invite>, ()>>,
+    },
     /// Send this stored message if the contact is connected.
     SendOne {
         contact: PublicKey,
@@ -1008,8 +1019,20 @@ impl Engine {
         }
         let person = self.key.clone();
         let tx = self.tx.clone();
+        // Whoever has our name code finds our invitation here, while we are around.
+        let main = self
+            .db
+            .invites()
+            .into_iter()
+            .find(|i| i.main && !i.revoked)
+            .map(|mine| mine.to_invite(&self.me, &self.settings().display_name));
         tokio::spawn(async move {
             let at = now_ms();
+            if let Some(invite) = main {
+                let code = crate::codes::name_code_text(&invite);
+                let sealed = crate::codes::seal(&code, &invite);
+                records.put(&crate::codes::seed(&code), &sealed).await;
+            }
             let record = LocationRecord::from_addr(&addr, at);
             let mut any = false;
             for secret in secrets {
@@ -1314,6 +1337,16 @@ impl Engine {
         if state == Some(ContactState::Blocked) {
             return;
         }
+        // Words someone never wants to see in a request.
+        let said = format!("{name} {}", request.greeting).to_lowercase();
+        if self
+            .settings()
+            .request_filter
+            .iter()
+            .any(|word| !word.is_empty() && said.contains(&word.to_lowercase()))
+        {
+            return;
+        }
         let met = invite.met_token.is_some() && invite.met_token == request.met_token;
         let mut keys = self.db.contact_keys(&id).unwrap_or_default();
         keys.location = Some(request.location);
@@ -1468,9 +1501,31 @@ impl Engine {
 
     /// They get to know how to find us.
     fn tell_where_we_are(&mut self, peer: PublicKey) {
-        let name = self.settings().display_name;
+        let id = key_to_string(&peer);
+        let name = self
+            .db
+            .chat_prefs(&id)
+            .my_name
+            .unwrap_or_else(|| self.settings().display_name);
         let location = self.identity.location;
-        if self.send(peer, Frame::Accept { name, location }) {
+        let card = self
+            .db
+            .invites()
+            .into_iter()
+            .find(|i| i.main && !i.revoked)
+            .map(|mine| {
+                mine.to_invite(&self.me, &self.settings().display_name)
+                    .link()
+            })
+            .unwrap_or_default();
+        if self.send(
+            peer,
+            Frame::Accept {
+                name,
+                location,
+                card,
+            },
+        ) {
             let id = key_to_string(&peer);
             let mut keys = self.db.contact_keys(&id).unwrap_or_default();
             keys.told = true;
@@ -1598,6 +1653,30 @@ impl Engine {
                 }
             }
             Cmd::TimersChanged => self.timers_dirty = true,
+            Cmd::PublishCode { code, invite, done } => {
+                let Some(records) = self.records.clone() else {
+                    let _ = done.send(false);
+                    return;
+                };
+                tokio::spawn(async move {
+                    let sealed = crate::codes::seal(&code, &invite);
+                    let ok = records.put(&crate::codes::seed(&code), &sealed).await;
+                    let _ = done.send(ok);
+                });
+            }
+            Cmd::LookUpCode { code, reply } => {
+                let Some(records) = self.records.clone() else {
+                    let _ = reply.send(Err(()));
+                    return;
+                };
+                tokio::spawn(async move {
+                    let found = records
+                        .get(&crate::codes::seed(&code))
+                        .await
+                        .and_then(|sealed| crate::codes::open(&code, &sealed));
+                    let _ = reply.send(Ok(found));
+                });
+            }
             Cmd::SendOne {
                 contact,
                 message_id,
@@ -2339,14 +2418,22 @@ impl Engine {
                 } else {
                     self.hides_last_seen.insert(peer);
                 }
+                if state == Some(ContactState::Accepted) && self.sessions.contains_key(&peer) {
+                    self.set_online(peer, true, None);
+                }
                 if contact.is_some() && self.db.set_their_name(&id, &clean_name(&name)) {
                     emit(&self.events, CoreEvent::ContactsChanged);
                 }
             }
-            Frame::Accept { name, location } => match state {
+            Frame::Accept {
+                name,
+                location,
+                card,
+            } => match state {
                 Some(ContactState::PendingOut) => {
                     let mut keys = self.db.contact_keys(&id).unwrap_or_default();
                     keys.location = Some(location);
+                    keys.card = crate::identity::parse_invite(&card).map(|_| card);
                     keys.invite = None;
                     keys.told = false;
                     self.db.set_contact_keys(&id, &keys);
@@ -2356,8 +2443,10 @@ impl Engine {
                 }
                 Some(ContactState::Accepted) => {
                     let mut keys = self.db.contact_keys(&id).unwrap_or_default();
-                    if keys.location != Some(location) {
+                    let card = crate::identity::parse_invite(&card).map(|_| card);
+                    if keys.location != Some(location) || keys.card != card {
                         keys.location = Some(location);
+                        keys.card = card;
                         self.db.set_contact_keys(&id, &keys);
                     }
                     if self.db.set_their_name(&id, &clean_name(&name)) {
@@ -2674,6 +2763,9 @@ impl Engine {
             .upsert_contact(&id, ContactState::Accepted, Some(&name), None)
             .is_ok()
         {
+            self.db
+                .start_with_default_timer(&id, self.settings().disappear_default_ms);
+            self.timers_dirty = true;
             emit(&self.events, CoreEvent::Accepted { contact_id: id });
             emit(&self.events, CoreEvent::ContactsChanged);
             self.on_accepted_session(peer);
@@ -2709,12 +2801,13 @@ impl Engine {
 
     fn send_hello(&self, peer: PublicKey) {
         let s = self.settings();
+        let prefs = self.db.chat_prefs(&key_to_string(&peer));
         self.send(
             peer,
             Frame::Hello {
                 version: PROTO_VERSION,
-                name: s.display_name,
-                share_last_seen: s.share_last_seen,
+                name: prefs.my_name.unwrap_or(s.display_name),
+                share_last_seen: s.share_last_seen && !prefs.hide_presence,
             },
         );
     }
@@ -2808,6 +2901,8 @@ impl Engine {
 
     fn set_online(&self, peer: PublicKey, online: bool, last_seen: Option<i64>) {
         let id = key_to_string(&peer);
+        // Someone who keeps this from you is not shown as online either.
+        let online = online && !self.hides_last_seen.contains(&peer);
         let changed = {
             let mut set = self.shared.online.lock().unwrap_or_else(|p| p.into_inner());
             if online {

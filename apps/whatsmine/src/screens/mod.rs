@@ -1,19 +1,30 @@
 mod add;
+mod address;
+mod calls;
 mod chat;
+mod chat_rich;
 mod chats;
 mod contact;
-mod contacts;
+mod finding;
 mod group;
-mod onboarding;
+mod people;
 mod requests;
 mod settings;
+mod simple;
+mod start;
 
-pub use add::AddContact;
+pub use add::{AddContact, AddType};
+pub use address::PublicAddress;
+pub use calls::{Calls, calls_seen_at};
 pub use chat::Chat;
-pub use chats::Chats;
+pub use chats::{ChatList, Chats};
 pub use contact::ContactInfo;
-pub use contacts::ContactsScreen;
+pub use finding::{FoldersScreen, SavedScreen, SearchScreen, SharedMedia};
 pub use group::{GroupInfoScreen, NewGroup};
-pub use onboarding::Onboarding;
+pub use people::People;
 pub use requests::Requests;
-pub use settings::SettingsScreen;
+pub use settings::{
+    AppearanceScreen, ChatLook, ConnectionScreen, DevicesScreen, HelpScreen, NotificationsScreen,
+    PrivacyScreen, SettingsScreen, SpeedScreen, StorageScreen,
+};
+pub use start::Start;

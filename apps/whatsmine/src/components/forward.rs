@@ -66,11 +66,11 @@ pub fn ForwardSheet(message: Message, on_close: EventHandler<()>) -> Element {
     });
 
     rsx! {
-        div { class: "bottom-sheet-overlay", onclick: move |_| on_close.call(()),
+        div { class: "scrim", onclick: move |_| on_close.call(()),
             BackLayer { on_back: move |_| on_close.call(()) }
-            div { class: "bottom-sheet forward-sheet", onclick: move |e| e.stop_propagation(),
-                div { class: "sheet-title", "{t(&tr, \"forward.title\")}" }
-                div { class: "search",
+            div { class: "sheet", onclick: move |e| e.stop_propagation(),
+                h2 { "{t(&tr, \"forward.title\")}" }
+                label { class: "search-box",
                     Icon { name: IconName::Search, size: 18 }
                     input {
                         r#type: "search",
@@ -79,14 +79,14 @@ pub fn ForwardSheet(message: Message, on_close: EventHandler<()>) -> Element {
                         oninput: move |e| query.set(e.value()),
                     }
                 }
-                div { class: "forward-list",
+                div { class: "sheet-list",
                     if targets.is_empty() {
                         p { class: "empty-subtitle", "{t(&tr, \"chats.no_match\")}" }
                     }
                     for c in targets {
                         button {
                             key: "{c.id}",
-                            class: "sheet-option",
+                            class: "sheet-item",
                             onclick: {
                                 let (c, send) = (c.clone(), send_to.clone());
                                 move |_| send(c.clone())
@@ -102,7 +102,7 @@ pub fn ForwardSheet(message: Message, on_close: EventHandler<()>) -> Element {
                         }
                     }
                 }
-                button { class: "sheet-option cancel", onclick: move |_| on_close.call(()),
+                button { class: "btn", onclick: move |_| on_close.call(()),
                     "{t(&tr, \"common.cancel\")}"
                 }
             }

@@ -156,9 +156,167 @@ pub fn pieces(body: &str) -> Vec<Piece> {
     out
 }
 
+/// A moment, in full enough words for a list of what is planned.
+pub fn when(tr: &Translations, ms: Millis) -> String {
+    format!("{} {}", day_label(tr, ms), clock(ms))
+}
+
+/// How long until something, in the largest unit that says enough.
+pub fn wait_time(tr: &Translations, ms: u64) -> String {
+    let minutes = ms / 60_000;
+    if ms < 60_000 {
+        crate::app::t(tr, "time.seconds").replace("{n}", &(ms / 1000).max(1).to_string())
+    } else if minutes < 60 {
+        crate::app::t(tr, "time.minutes").replace("{n}", &minutes.to_string())
+    } else {
+        crate::app::t(tr, "time.hours").replace("{n}", &(minutes / 60).to_string())
+    }
+}
+
+/// A bit of text with the marks people type around it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Styled {
+    Plain(String),
+    Bold(String),
+    Italic(String),
+    Strike(String),
+    Code(String),
+    Spoiler(String),
+}
+
+/// Finds `*bold*`, `_italic_`, `~gone~`, `` `code` `` and `||spoiler||`. A mark only counts at the
+/// edge of a word, so 2*3*4 and snake_case_names stay as they are.
+pub fn styled(text: &str) -> Vec<Styled> {
+    type Make = fn(String) -> Styled;
+    let marks: [(&str, Make); 5] = [
+        ("||", Styled::Spoiler),
+        ("`", Styled::Code),
+        ("*", Styled::Bold),
+        ("_", Styled::Italic),
+        ("~", Styled::Strike),
+    ];
+    let mut out = Vec::new();
+    let mut plain = String::new();
+    let mut rest = text;
+    'outer: while !rest.is_empty() {
+        let before = plain.chars().last();
+        let at_edge = before.is_none_or(|c| !c.is_alphanumeric());
+        if at_edge {
+            for (mark, make) in &marks {
+                if let Some(after) = rest.strip_prefix(mark)
+                    && !after.starts_with(char::is_whitespace)
+                    && let Some(end) = after.find(mark)
+                    && end > 0
+                    && !after[..end].ends_with(char::is_whitespace)
+                    && !after[..end].contains('\n')
+                    && after[end + mark.len()..]
+                        .chars()
+                        .next()
+                        .is_none_or(|c| !c.is_alphanumeric())
+                {
+                    if !plain.is_empty() {
+                        out.push(Styled::Plain(std::mem::take(&mut plain)));
+                    }
+                    out.push(make(after[..end].to_owned()));
+                    rest = &after[end + mark.len()..];
+                    continue 'outer;
+                }
+            }
+        }
+        let mut chars = rest.chars();
+        if let Some(c) = chars.next() {
+            plain.push(c);
+        }
+        rest = chars.as_str();
+    }
+    if !plain.is_empty() {
+        out.push(Styled::Plain(plain));
+    }
+    out
+}
+
+/// The text without the marks: for a line in a list or a quote.
+pub fn plain(text: &str) -> String {
+    styled(text)
+        .into_iter()
+        .map(|piece| match piece {
+            Styled::Plain(t)
+            | Styled::Bold(t)
+            | Styled::Italic(t)
+            | Styled::Strike(t)
+            | Styled::Code(t) => t,
+            // A secret stays one in a list.
+            Styled::Spoiler(t) => "•".repeat(t.chars().count().min(8)),
+        })
+        .collect()
+}
+
+/// Splits off who is named with an @: text, and whether it is a name.
+pub fn with_mentions(text: &str, names: &[String]) -> Vec<(String, bool)> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some((at, name)) = names
+        .iter()
+        .filter(|n| !n.is_empty())
+        .filter_map(|n| rest.find(&format!("@{n}")).map(|i| (i, n)))
+        .min_by_key(|(i, _)| *i)
+    {
+        if at > 0 {
+            out.push((rest[..at].to_owned(), false));
+        }
+        let end = at + 1 + name.len();
+        out.push((rest[at..end].to_owned(), true));
+        rest = &rest[end..];
+    }
+    if !rest.is_empty() {
+        out.push((rest.to_owned(), false));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Piece, bytes, duration, grouped_key, percent, pieces};
+    use super::{
+        Piece, Styled, bytes, duration, grouped_key, percent, pieces, styled, with_mentions,
+    };
+
+    #[test]
+    fn marks_only_count_at_the_edge_of_a_word() {
+        assert_eq!(
+            styled("a *big* one"),
+            vec![
+                Styled::Plain("a ".into()),
+                Styled::Bold("big".into()),
+                Styled::Plain(" one".into())
+            ]
+        );
+        assert_eq!(styled("2*3*4"), vec![Styled::Plain("2*3*4".into())]);
+        assert_eq!(
+            styled("snake_case_name"),
+            vec![Styled::Plain("snake_case_name".into())]
+        );
+        assert_eq!(styled("* no *"), vec![Styled::Plain("* no *".into())]);
+        assert_eq!(styled("||secret||"), vec![Styled::Spoiler("secret".into())]);
+        assert_eq!(styled("`a*b*`"), vec![Styled::Code("a*b*".into())]);
+        assert_eq!(super::plain("a *big* one ||no||"), "a big one ••");
+    }
+
+    #[test]
+    fn names_are_found_in_a_text() {
+        let names = vec!["Roy".to_owned()];
+        assert_eq!(
+            with_mentions("hi @Roy, ok", &names),
+            vec![
+                ("hi ".to_owned(), false),
+                ("@Roy".to_owned(), true),
+                (", ok".to_owned(), false)
+            ]
+        );
+        assert_eq!(
+            with_mentions("nobody", &names),
+            vec![("nobody".to_owned(), false)]
+        );
+    }
 
     #[test]
     fn links_are_found_without_their_punctuation() {

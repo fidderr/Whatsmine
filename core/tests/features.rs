@@ -319,3 +319,138 @@ async fn a_call_that_nobody_answered_stays_on_the_list() {
     assert_eq!(theirs.contact_id, p.ka);
     assert!(p.a.call_records()[0].outgoing);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_chat_starts_as_asked_and_the_timer_goes_both_ways() {
+    let net = LocalRecords::default();
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let a = Core::start(dir_a.path(), NetMode::Local(net.clone())).unwrap();
+    let b = Core::start(dir_b.path(), NetMode::Local(net.clone())).unwrap();
+    let mut settings = b.settings();
+    settings.disappear_default_ms = 86_400_000;
+    b.save_settings(&settings).unwrap();
+    a.add_contact(&b.invite_link(), None).unwrap();
+    until("the request", || !b.requests().is_empty()).await;
+    b.accept(&a.my_key()).unwrap();
+    assert_eq!(b.chat_prefs(&a.my_key()).disappear_ms, Some(86_400_000));
+    until("being connected", || {
+        a.is_online(&b.my_key()) && b.is_online(&a.my_key())
+    })
+    .await;
+    // Set on one side, it holds for the other too.
+    let mut prefs = a.chat_prefs(&b.my_key());
+    prefs.disappear_ms = Some(3_600_000);
+    a.set_chat_prefs(&b.my_key(), &prefs);
+    until("the other side to follow", || {
+        b.chat_prefs(&a.my_key()).disappear_ms == Some(3_600_000)
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_word_someone_filters_keeps_a_request_away() {
+    let net = LocalRecords::default();
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let a = Core::start(dir_a.path(), NetMode::Local(net.clone())).unwrap();
+    let c = Core::start(
+        tempfile::tempdir().unwrap().path(),
+        NetMode::Local(net.clone()),
+    )
+    .unwrap();
+    let b = Core::start(dir_b.path(), NetMode::Local(net.clone())).unwrap();
+    let mut settings = b.settings();
+    settings.request_filter = vec!["casino".into()];
+    b.save_settings(&settings).unwrap();
+    a.add_contact_with_greeting(&b.invite_link(), None, "Win at the CASINO now")
+        .unwrap();
+    c.add_contact_with_greeting(&b.invite_link(), None, "Hi, it is me")
+        .unwrap();
+    until("the fair one", || b.requests().len() == 1).await;
+    assert_eq!(b.requests()[0].id, c.my_key());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn someone_can_be_found_by_a_code() {
+    let net = LocalRecords::default();
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let a = Core::start(dir_a.path(), NetMode::Local(net.clone())).unwrap();
+    let b = Core::start(dir_b.path(), NetMode::Local(net.clone())).unwrap();
+    let mut settings = b.settings();
+    settings.display_name = "Bob".into();
+    b.save_settings(&settings).unwrap();
+    assert!(b.handle().starts_with("bob-"));
+
+    // Read out on the phone.
+    let code = b.read_out_code().await;
+    let added = a.add_by_text(&code, "It's me").await.unwrap();
+    assert_eq!(added.id, b.my_key());
+    until("the request", || !b.requests().is_empty()).await;
+    assert_eq!(b.contact_keys(&a.my_key()).greeting, "It's me");
+
+    // Something that is no code, and a code nobody has.
+    assert!(a.add_by_text("hello there", "").await.is_err());
+    let nothing = a.add_by_text("ABCD-EFGH", "").await.unwrap_err();
+    assert_eq!(nothing.to_string(), "code_not_found");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_name_code_finds_someone_and_a_reset_ends_it() {
+    let net = LocalRecords::default();
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let a = Core::start(dir_a.path(), NetMode::Local(net.clone())).unwrap();
+    let b = Core::start(dir_b.path(), NetMode::Local(net.clone())).unwrap();
+    let handle = b.handle();
+    // It goes up with the first publication of where we are.
+    let found = async {
+        loop {
+            if let Ok(c) = a.add_by_text(&handle, "").await {
+                return c;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    };
+    let added = tokio::time::timeout(Duration::from_secs(30), found)
+        .await
+        .expect("the name code to work");
+    assert_eq!(added.id, b.my_key());
+    b.reset_public_address();
+    assert_ne!(b.handle(), handle);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn safety_words_are_the_same_on_both_sides_and_a_card_comes_along() {
+    let p = pair().await;
+    let words = p.a.safety_words(&p.kb);
+    assert_eq!(words.len(), 6);
+    assert_eq!(words, p.b.safety_words(&p.ka));
+    p.a.mark_safety_words(&p.kb);
+    assert_eq!(
+        p.a.contact_keys(&p.kb).trust,
+        whatsmine_core::Trust::SafetyWords
+    );
+    until("their card", || p.a.contact_card(&p.kb).is_some()).await;
+    let card = p.a.contact_card(&p.kb).unwrap();
+    assert!(whatsmine_core::identity::parse_invite(&card).is_some());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn someone_who_hides_is_not_shown_online_and_gets_another_name() {
+    let p = pair().await;
+    let mut prefs = p.b.chat_prefs(&p.ka);
+    prefs.hide_presence = true;
+    prefs.my_name = Some("B.".into());
+    p.b.set_chat_prefs(&p.ka, &prefs);
+    // It takes effect from the next connection on.
+    let kb = p.kb.clone();
+    p.b.shutdown();
+    until("the connection to end", || !p.a.is_online(&kb)).await;
+    let b = Core::start(p.dir_b.path(), NetMode::Local(p.net.clone())).unwrap();
+    let m = p.a.send(&p.kb, "hello").unwrap();
+    until("it to arrive", || b.message(&m.id).is_some()).await;
+    until("the other name", || {
+        p.a.contact(&kb).is_some_and(|c| c.their_name == "B.")
+    })
+    .await;
+    assert!(!p.a.is_online(&kb));
+    b.shutdown();
+}

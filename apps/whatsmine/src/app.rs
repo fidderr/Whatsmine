@@ -11,8 +11,10 @@ use crate::call::{self, CallOverlay, CallUi, Phase};
 use crate::components::{Toast, ToastLevel, ToastMessage};
 use crate::i18n;
 use crate::screens::{
-    AddContact, Chat, Chats, ContactInfo, ContactsScreen, GroupInfoScreen, NewGroup, Onboarding,
-    Requests, SettingsScreen,
+    AddContact, AddType, AppearanceScreen, Calls, Chat, ChatLook, Chats, ConnectionScreen,
+    ContactInfo, DevicesScreen, FoldersScreen, GroupInfoScreen, HelpScreen, NewGroup,
+    NotificationsScreen, People, PrivacyScreen, PublicAddress, Requests, SavedScreen, SearchScreen,
+    SettingsScreen, SharedMedia, SpeedScreen, Start, StorageScreen,
 };
 use crate::shell::Shell;
 
@@ -34,20 +36,52 @@ pub enum Route {
     Chats {},
     #[route("/chat/:id")]
     Chat { id: String },
+    #[route("/calls")]
+    Calls {},
+    #[route("/people")]
+    People {},
     #[route("/add")]
     AddContact {},
-    #[route("/contacts")]
-    ContactsScreen {},
+    #[route("/add/type")]
+    AddType {},
     #[route("/requests")]
     Requests {},
+    #[route("/address")]
+    PublicAddress {},
     #[route("/contact/:id")]
     ContactInfo { id: String },
+    #[route("/look/:id")]
+    ChatLook { id: String },
+    #[route("/shared/:id")]
+    SharedMedia { id: String },
+    #[route("/search")]
+    SearchScreen {},
+    #[route("/saved")]
+    SavedScreen {},
+    #[route("/folders")]
+    FoldersScreen {},
     #[route("/group/new")]
     NewGroup {},
     #[route("/group/:id")]
     GroupInfoScreen { id: String },
     #[route("/settings")]
     SettingsScreen {},
+    #[route("/settings/privacy")]
+    PrivacyScreen {},
+    #[route("/settings/notifications")]
+    NotificationsScreen {},
+    #[route("/settings/appearance")]
+    AppearanceScreen {},
+    #[route("/settings/connection")]
+    ConnectionScreen {},
+    #[route("/settings/speed")]
+    SpeedScreen {},
+    #[route("/settings/devices")]
+    DevicesScreen {},
+    #[route("/settings/storage")]
+    StorageScreen {},
+    #[route("/settings/help")]
+    HelpScreen {},
 }
 
 /// The core handle, shared through context.
@@ -334,10 +368,29 @@ fn Main(core: AppCore) -> Element {
     let theme_class = match s.theme.as_str() {
         "light" => "theme-light",
         "dark" => "theme-dark",
+        "black" => "theme-black",
+        "colorblind" => "theme-colorblind",
+        "colorblind-light" => "theme-colorblind-light",
         _ => "theme-system",
     };
+    let density_class = match s.density.as_str() {
+        "roomy" => "density-roomy",
+        "compact" => "density-compact",
+        "big" => "density-big",
+        _ => "",
+    };
+    let accent = crate::look::accent_style(&s.accent);
     let onboarded = s.onboarded;
+    let locked_app = s.app_lock;
+    let text_size = s.text_size.clone();
     drop(s);
+    // Text follows the size chosen: everything is in rem.
+    use_effect(use_reactive!(|text_size| {
+        document::eval(&format!(
+            "document.documentElement.style.fontSize = '{}px';",
+            crate::look::root_font_px(&text_size)
+        ));
+    }));
     // System bars and keyboard: how far they overlap us (rotation and window changes alter it),
     // and the bars' colour.
     let mut safe_area = use_signal(crate::platform::safe_area_style);
@@ -392,12 +445,15 @@ fn Main(core: AppCore) -> Element {
             name: "viewport",
             content: "width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content",
         }
-        div { class: "app-root {theme_class}", style: "{safe_area.read()}",
+        div { class: "app-root {theme_class} {density_class}", style: "{safe_area.read()}{accent}",
             div { class: "status-bar-bg" }
             if onboarded {
                 Router::<Route> {}
             } else {
-                Onboarding {}
+                Start {}
+            }
+            if onboarded && locked_app {
+                crate::lock::LockScreen {}
             }
             CallOverlay {}
             if let Some(msg) = toast_sig.read().clone() {

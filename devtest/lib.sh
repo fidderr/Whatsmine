@@ -110,6 +110,11 @@ layout_check() { # end?
             if (!$1) return;
             var x = r.left + r.width / 2, y = r.top + r.height / 2;
             if (y < 0 || y > innerHeight) return;
+            for (var up = e.parentElement; up; up = up.parentElement) {
+                if (getComputedStyle(up).overflowY === 'visible') continue;
+                var c = up.getBoundingClientRect();
+                if (y < c.top || y > c.bottom) return;
+            }
             var on = document.elementFromPoint(x, y);
             if (on && on !== e && !e.contains(on) && !on.contains(e) && !on.closest('svg')) bad.push(name(e) + ' under ' + (on.className || on.tagName));
         });

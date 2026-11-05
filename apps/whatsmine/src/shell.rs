@@ -6,11 +6,35 @@ use dioxus::prelude::*;
 
 use crate::app::{Route, SettingsSig, use_core};
 use crate::back::BackStack;
+use crate::components::{Tab, Tabs};
 use crate::links::{InviteDialog, InviteSig};
 use crate::notify;
+use crate::screens::ChatList;
+
+/// The window is wide enough for the list and the chat side by side.
+#[derive(Clone, Copy)]
+pub struct Wide(pub Signal<bool>);
+
+const WIDE_FROM: i64 = 840;
 
 #[component]
 pub fn Shell() -> Element {
+    let mut wide = use_signal(|| false);
+    use_context_provider(|| Wide(wide));
+    use_future(move || async move {
+        let mut eval = document::eval(
+            "const tell = () => dioxus.send(innerWidth);\n\
+             addEventListener('resize', tell);\n\
+             tell();\n\
+             await new Promise(() => {});",
+        );
+        while let Ok(width) = eval.recv::<i64>().await {
+            let now = width >= WIDE_FROM;
+            if now != *wide.peek() {
+                wide.set(now);
+            }
+        }
+    });
     let core = use_core();
     let nav = use_navigator();
     let settings = use_context::<SettingsSig>().0;
@@ -77,6 +101,7 @@ pub fn Shell() -> Element {
             let s = settings.read();
             crate::android::apply_texts(&s.locale);
             crate::android::apply_background(s.background);
+            mobile_sentinel::display::set_secure(s.block_screenshots);
         });
         // Android 13+ needs the user's yes before any notification shows:
         // ask once, a moment after the first screen is up.
@@ -126,6 +151,39 @@ pub fn Shell() -> Element {
     #[cfg(not(target_os = "android"))]
     let _ = &core;
 
+    let simple = settings.read().simple_mode;
+    let route = use_route::<Route>();
+    if wide() && !simple {
+        let current = match &route {
+            Route::Chat { id } => Some(id.clone()),
+            _ => None,
+        };
+        let tab = match &route {
+            Route::Calls {} => Tab::Calls,
+            Route::People {}
+            | Route::AddContact {}
+            | Route::AddType {}
+            | Route::Requests {}
+            | Route::ContactInfo { .. }
+            | Route::NewGroup {}
+            | Route::GroupInfoScreen { .. } => Tab::People,
+            Route::Chats {}
+            | Route::Chat { .. }
+            | Route::SearchScreen {}
+            | Route::SharedMedia { .. } => Tab::Chats,
+            _ => Tab::Settings,
+        };
+        return rsx! {
+            div { class: "wide-shell",
+                nav { class: "wide-rail", Tabs { active: tab } }
+                aside { class: "wide-list",
+                    div { class: "screen", ChatList { current } }
+                }
+                main { class: "wide-main", Outlet::<Route> {} }
+            }
+            InviteDialog {}
+        };
+    }
     rsx! {
         Outlet::<Route> {}
         InviteDialog {}

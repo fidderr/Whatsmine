@@ -48,6 +48,38 @@ pub enum IconName {
     More,
     ChevronLeft,
     Info,
+    Folder,
+    Plus,
+    Reply,
+    Star,
+    Bookmark,
+    Poll,
+    ListCheck,
+    Calendar,
+    Place,
+    Card,
+    Qr,
+    Wifi,
+    Signal,
+    Battery,
+    Speaker,
+    Volume,
+    Archive,
+    Moon,
+    TextSize,
+    Device,
+    Monitor,
+    Storage,
+    Help,
+    Warning,
+    Restart,
+    CallIn,
+    CallOut,
+    Smile,
+    Palette,
+    Sliders,
+    People,
+    Hangup,
 }
 
 /// Inline stroke icon (24×24 grid). No fonts or CDN.
@@ -219,6 +251,62 @@ pub fn Icon(name: IconName, #[props(default = 20)] size: u32) -> Element {
             "M12 16v-4",
             "M12 8h.01",
         ],
+        IconName::Folder => &["M3 6h6l2 2h10v11H3V6Z"],
+        IconName::Plus => &["M12 5v14M5 12h14"],
+        IconName::Reply => &["M9 7 4 12l5 5M4 12h10a6 6 0 0 1 6 6v1"],
+        IconName::Star => {
+            &["M12 4l2.5 5.2 5.7.8-4.1 4 1 5.7-5.1-2.7-5.1 2.7 1-5.7-4.1-4 5.7-.8L12 4Z"]
+        }
+        IconName::Bookmark => &["M6 3h12v18l-6-4-6 4V3Z"],
+        IconName::Poll => &["M5 20V10M12 20V4M19 20v-7"],
+        IconName::ListCheck => &["M4 6l2 2 3-3M4 14l2 2 3-3M12 7h8M12 15h8"],
+        IconName::Calendar => &["M4 6h16v14H4zM4 10h16M8 3v4M16 3v4"],
+        IconName::Place => &[
+            "M12 22s7-6.5 7-12a7 7 0 1 0-14 0c0 5.5 7 12 7 12ZM12 12.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z",
+        ],
+        IconName::Card => {
+            &["M4 5h16v14H4zM9 12a2 2 0 1 0 0-4 2 2 0 0 0 0 4ZM6 16a3 3 0 0 1 6 0M15 9h3M15 13h3"]
+        }
+        IconName::Qr => &["M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h3v3h-3zM20 14v6M14 20h3"],
+        IconName::Wifi => {
+            &["M2 9a15 15 0 0 1 20 0M5.5 12.5a10 10 0 0 1 13 0M9 16a5 5 0 0 1 6 0M12 20h.01"]
+        }
+        IconName::Signal => &["M4 20v-3M9 20v-7M14 20V9M19 20V4"],
+        IconName::Battery => &["M3 8h16v8H3zM21 11v2"],
+        IconName::Speaker => &["M4 10v4h3l5 4V6L7 10H4ZM16 9a4 4 0 0 1 0 6M19 6a8 8 0 0 1 0 12"],
+        IconName::Volume => &["M4 10v4h3l5 4V6L7 10H4ZM16 9a4 4 0 0 1 0 6"],
+        IconName::Archive => &["M3 5h18v4H3zM5 9v10h14V9M10 13h4"],
+        IconName::Moon => &["M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5Z"],
+        IconName::TextSize => &["M4 18 9 6l5 12M6 14h6M15 18l3-7 3 7M16 16h4"],
+        IconName::Device => {
+            &["M8 3h8a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H8a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1ZM11 18h2"]
+        }
+        IconName::Monitor => &["M3 5h18v11H3zM8 20h8M12 16v4"],
+        IconName::Storage => &[
+            "M4 6c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3ZM4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3",
+        ],
+        IconName::Help => &[
+            "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.7.3-1 .8-1 1.7M12 17h.01",
+        ],
+        IconName::Warning => &[
+            "M12 9v4M12 17h.01M10.3 3.9 2.4 18a2 2 0 0 0 1.7 3h15.8a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z",
+        ],
+        IconName::Restart => &["M21 12a9 9 0 1 1-3-6.7M21 4v5h-5"],
+        IconName::CallIn => &["M17 7 7 17M7 9v8h8"],
+        IconName::CallOut => &["M7 17 17 7M9 7h8v8"],
+        IconName::Smile => {
+            &["M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM8.5 14a4 4 0 0 0 7 0M9 9.5h.01M15 9.5h.01"]
+        }
+        IconName::Palette => &[
+            "M12 3a9 9 0 1 0 0 18c1.5 0 2-1 2-2s-1-2 0-3 2-1 4-1 3-1.5 3-3a9 9 0 0 0-9-9ZM7.5 11h.01M10 7.5h.01M15 7.5h.01",
+        ],
+        IconName::Sliders => &[
+            "M4 7h10M18 7h2M4 17h2M10 17h10M18 7a2 2 0 1 1-4 0 2 2 0 0 1 4 0ZM10 17a2 2 0 1 1-4 0 2 2 0 0 1 4 0Z",
+        ],
+        IconName::People => &[
+            "M16 20v-1a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v1M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8ZM22 20v-1a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8",
+        ],
+        IconName::Hangup => &["M3 15c5-5 13-5 18 0l-2 3-4-1v-3a9 9 0 0 0-6 0v3l-4 1-2-3Z"],
     };
 
     rsx! {
