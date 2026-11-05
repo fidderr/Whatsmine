@@ -27,7 +27,7 @@ w_start() {
     mkdir -p "$W_DATA"
     printf 'name=Noor theme=dark locale=en\n' > "$W_DATA/debug_seed.txt"
     env WHATSMINE_PROFILE="$W_PROFILE" WHATSMINE_TEST_WINDOW="412x880" \
-        WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=$W_PORT --use-fake-device-for-media-stream --use-fake-ui-for-media-stream" \
+        WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=$W_PORT --use-fake-device-for-media-stream" \
         WEBVIEW2_USER_DATA_FOLDER="$(cygpath -w "$(cygpath -u "$LOCALAPPDATA")/fidderr/WhatsMine/devtest-webview-$W_PROFILE")" \
         "$WIN_EXE" >> "$OUT/share_window.log" 2>&1 &
     W_PID=$!

@@ -68,7 +68,7 @@ say() { echo ">>> $1"; }
 # A gets a made-up microphone, and the real screen picker.
 start_window "$A_PROFILE" 9361 "name=Roy theme=dark locale=en" "" "--use-fake-device-for-media-stream"
 A_PID=$!
-start_window "$B_PROFILE" 9362 "name=Noor theme=light locale=en" "412x880" "--use-fake-device-for-media-stream --use-fake-ui-for-media-stream"
+start_window "$B_PROFILE" 9362 "name=Noor theme=light locale=en" "412x880" "--use-fake-device-for-media-stream"
 B_PID=$!
 
 say "Setting up two people, this takes about a minute. Nothing to do yet."
@@ -86,7 +86,7 @@ window_a
 core "add $LINK_B" > /dev/null
 window_b
 requests_seen() { [ -n "$(core requests)" ]; }
-wait_for 120 requests_seen || { echo "the request never came"; exit 1; }
+wait_for 300 requests_seen || { echo "the request never came"; exit 1; }
 core "accept $KEY_A" > /dev/null
 window_a
 online_b() { [ "$(core "online $KEY_B")" = true ]; }

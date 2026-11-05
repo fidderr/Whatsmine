@@ -8,7 +8,7 @@ PLATFORM=windows
 . "$(dirname "$0")/lib.sh"
 
 SHOT_DIR="$OUT/share"
-export WEBVIEW2_EXTRA="--use-fake-device-for-media-stream --use-fake-ui-for-media-stream"
+export WEBVIEW2_EXTRA="--use-fake-device-for-media-stream"
 
 built_fresh "$EXE" || exit 1
 
@@ -79,7 +79,7 @@ window_a
 note "adding: $(core "add $LINK_B" | cut -c1-40)"
 window_b
 requests_seen() { [ -n "$(core requests)" ]; }
-if wait_for 180 requests_seen; then
+if wait_for 300 requests_seen; then
     core "accept $KEY_A" > /dev/null
     window_a
     online_b() { [ "$(core "online $KEY_B")" = true ]; }

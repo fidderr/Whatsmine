@@ -772,6 +772,9 @@ textarea::placeholder {
   background: var(--surface);
   color: var(--text-secondary);
 }
+.body > .search-box {
+  flex: none;
+}
 .search-box input,
 .search-box input:focus {
   flex: 1;

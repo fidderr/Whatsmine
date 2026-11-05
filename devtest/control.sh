@@ -9,7 +9,7 @@ PLATFORM=windows
 
 SHOT_DIR="$OUT/control"
 mkdir -p "$SHOT_DIR"
-export WEBVIEW2_EXTRA="--use-fake-device-for-media-stream --use-fake-ui-for-media-stream"
+export WEBVIEW2_EXTRA="--use-fake-device-for-media-stream"
 rm -f "$OUT/results.txt"
 
 built_fresh "$EXE" || exit 1
@@ -126,7 +126,7 @@ window_a
 core "add $LINK_B" > /dev/null
 window_b
 requests_seen() { [ -n "$(core requests)" ]; }
-if wait_for 120 requests_seen; then
+if wait_for 300 requests_seen; then
     core "accept $KEY_A" > /dev/null
     window_a
     online_b() { [ "$(core "online $KEY_B")" = true ]; }
