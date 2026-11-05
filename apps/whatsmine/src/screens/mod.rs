@@ -10,7 +10,6 @@ mod group;
 mod people;
 mod requests;
 pub mod settings;
-mod simple;
 mod start;
 
 pub use add::{AddContact, AddType};

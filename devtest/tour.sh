@@ -67,23 +67,17 @@ if wanted first_run; then
         type_in 'input[type=text]' 'Roy'
         sleep 0.2
         tap start-next 0 0.3
-        if on_screen '[data-t="mode-full"]' 6; then
-            look_through start_mode
-            tap mode-full 0 0.3
-            if on_screen '[data-t="start-done"]' 6; then
-                look_through start_allow
-                tap start-done 0 0.5
-                if on_screen '.bottom-nav' 6; then
-                    look_through empty_chats
-                    pass
-                else
-                    fail "first run did not end in the app"
-                fi
+        if on_screen '[data-t="start-done"]' 6; then
+            look_through start_allow
+            tap start-done 0 0.5
+            if on_screen '.bottom-nav' 6; then
+                look_through empty_chats
+                pass
             else
-                fail "no allow step"
+                fail "first run did not end in the app"
             fi
         else
-            fail "no mode step"
+            fail "no allow step"
         fi
     else
         fail "no first-run screen"
@@ -369,30 +363,6 @@ if wanted group; then
         fail "no group info"
     fi
     press_back_or_up
-else
-    skip
-fi
-
-scenario simple
-if wanted simple; then
-    tap tab-settings
-    on_screen '[data-t="simple"]' 6
-    tap simple 0 0.3
-    tap tab-chats 0 0.5
-    if on_screen '[data-t="big-person"]' 6; then
-        look_through simple_home
-        tap big-message 0 0.4
-        look_through simple_chat
-        press_back_or_up
-        tap simple-add 0 0.4
-        look_through simple_add
-        press_back_or_up
-        tap simple-settings 0 0.3 && picture simple_leave
-        tap simple-off 0 0.4
-        on_screen .bottom-nav 6 && pass || fail "could not leave simple mode"
-    else
-        fail "no simple home"
-    fi
 else
     skip
 fi

@@ -1593,20 +1593,15 @@ impl Core {
         let name = files::clean_file_name(name);
         let dest = files::final_path(&self.media_dir(), &id, &name);
         // Photos go out upright and without location data.
-        let lower = name.to_ascii_lowercase();
-        let is_jpeg = mime.eq_ignore_ascii_case("image/jpeg")
-            || lower.ends_with(".jpg")
-            || lower.ends_with(".jpeg");
         let cleaned = dest.with_extension("clean.tmp");
-        let (src, take_ownership) =
-            if is_jpeg && matches!(files::clean_photo(src, &cleaned), Ok(true)) {
-                if take_ownership {
-                    let _ = std::fs::remove_file(src);
-                }
-                (cleaned.as_path(), true)
-            } else {
-                (src, take_ownership)
-            };
+        let (src, take_ownership) = if matches!(files::clean_photo(src, &cleaned), Ok(true)) {
+            if take_ownership {
+                let _ = std::fs::remove_file(src);
+            }
+            (cleaned.as_path(), true)
+        } else {
+            (src, take_ownership)
+        };
         let (size, sha) = files::import(src, &dest, take_ownership).context("file_unreadable")?;
         if size == 0 {
             let _ = std::fs::remove_file(&dest);

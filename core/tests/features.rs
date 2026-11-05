@@ -253,16 +253,18 @@ async fn a_hidden_chat_shows_nowhere_until_asked_for() {
     let p = pair().await;
     let m = p.sent("Our secret plan").await;
     p.b.save_message(&m, &[]);
-    p.a.send_rich(
-        &p.kb,
-        Rich::Plan {
-            title: "Secret trip".into(),
-            at: now_ms() + 3_600_000,
-            place: String::new(),
-            answers: Vec::new(),
-        },
-    )
-    .unwrap();
+    let plan =
+        p.a.send_rich(
+            &p.kb,
+            Rich::Plan {
+                title: "Secret trip".into(),
+                at: now_ms() + 3_600_000,
+                place: String::new(),
+                answers: Vec::new(),
+            },
+        )
+        .unwrap();
+    until("the plan", || p.b.message(&plan.id).is_some()).await;
     assert!(!p.b.search("secret", SearchIn::All).is_empty());
     assert_eq!(p.b.saved_messages().len(), 1);
 

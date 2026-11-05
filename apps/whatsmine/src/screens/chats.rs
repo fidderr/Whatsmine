@@ -6,10 +6,9 @@ use whatsmine_core::{ChatSummary, ContactKind, ContactState, MediaKind, MessageS
 use crate::app::{Rev, Route, Typing, t, use_core, use_tr};
 use crate::components::{
     Avatar, BottomNav, ConfirmDialog, Icon, IconName, NetBanner, Notice, Sheet, SheetItem, Tab,
-    Title, use_settings,
+    Title,
 };
 use crate::fmt;
-use crate::screens::simple::SimpleHome;
 
 const HOUR: i64 = 3_600_000;
 
@@ -25,12 +24,8 @@ enum Filter {
 
 #[component]
 pub fn Chats() -> Element {
-    let settings = use_settings();
     let wide = use_context::<crate::shell::Wide>().0;
     crate::js::use_scroll_top();
-    if settings.read().simple_mode {
-        return rsx! { SimpleHome {} };
-    }
     // Side by side, the list is already there: this part says what to do.
     if wide() {
         let tr = use_tr();

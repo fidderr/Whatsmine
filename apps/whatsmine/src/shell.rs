@@ -178,9 +178,8 @@ pub fn Shell() -> Element {
         });
     }
 
-    let simple = settings.read().simple_mode;
     let route = use_route::<Route>();
-    if wide() && !simple {
+    if wide() {
         let current = match &route {
             Route::Chat { id } => Some(id.clone()),
             _ => None,

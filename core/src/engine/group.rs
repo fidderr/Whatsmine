@@ -445,7 +445,7 @@ impl Engine {
         let writer = key_to_string(&author_key);
         if writer == self.me_id()
             || text.len() > MAX_TEXT
-            || !self.group_allows(&group, &who_tells)
+            || !self.db.is_group_member(&group, &who_tells)
             || !self.group_allows(&group, &writer)
             || !groups::verify_message(&author_key, &group, &mid, &text, sent_at, &wire, &sig)
         {

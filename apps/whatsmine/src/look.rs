@@ -104,9 +104,6 @@ pub fn chat_style(settings: &Settings, prefs: &ChatPrefs) -> ChatStyle {
     if settings.flat_layout {
         class.push_str(" flat");
     }
-    if settings.simple_mode {
-        class.push_str(" simple");
-    }
     ChatStyle { messages, class }
 }
 

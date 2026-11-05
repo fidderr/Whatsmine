@@ -195,17 +195,92 @@ pub fn make_avatar(src: &Path) -> anyhow::Result<Vec<u8>> {
 /// Pictures larger than this are sent as they are.
 const MAX_CLEAN: u64 = 64 * 1024 * 1024;
 
-/// Prepares a JPEG photo for sending: turns it upright if the camera stored
-/// it sideways (the viewer on the other side then needs no EXIF handling) and
-/// removes the metadata (location, camera, time) without touching the
-/// pixels. Writes the result to `tmp` and returns true, or returns false when
-/// the file is not a JPEG or there is nothing to change.
+/// Prepares a photo for sending: removes the metadata (location, camera, time) without touching
+/// the pixels, and turns a JPEG upright if the camera stored it sideways, so the viewer on the
+/// other side needs no EXIF handling. Goes by what the file is, not what it is called. Writes the
+/// result to `tmp` and returns true, or returns false when it is no JPEG, PNG or WebP, or when
+/// there is nothing to change.
 pub fn clean_photo(src: &Path, tmp: &Path) -> anyhow::Result<bool> {
     if std::fs::metadata(src)?.len() > MAX_CLEAN {
         return Ok(false);
     }
+    let mut head = [0u8; 12];
+    let read = std::fs::File::open(src)?.read(&mut head)?;
+    let head = &head[..read];
+    let is_jpeg = head.starts_with(&[0xff, 0xd8]);
+    let is_png = head.starts_with(PNG_SIGNATURE);
+    let is_webp = head.starts_with(b"RIFF") && head.get(8..12) == Some(b"WEBP".as_slice());
+    if !(is_jpeg || is_png || is_webp) {
+        return Ok(false);
+    }
     let bytes = std::fs::read(src)?;
-    let Some(scan) = scan_jpeg(&bytes) else {
+    let stripped = if is_png {
+        without_png_metadata(&bytes)
+    } else if is_webp {
+        without_webp_metadata(&bytes)
+    } else {
+        return clean_jpeg(&bytes, tmp);
+    };
+    let Some(out) = stripped else {
+        return Ok(false);
+    };
+    if let Some(parent) = tmp.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(tmp, out)?;
+    Ok(true)
+}
+
+const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+
+/// A PNG without its text, time and EXIF chunks. `None` if damaged, or nothing changes.
+fn without_png_metadata(b: &[u8]) -> Option<Vec<u8>> {
+    let mut out = PNG_SIGNATURE.to_vec();
+    let mut i = PNG_SIGNATURE.len();
+    let mut changed = false;
+    while i < b.len() {
+        let len = u32::from_be_bytes(b.get(i..i + 4)?.try_into().ok()?) as usize;
+        let end = i.checked_add(12)?.checked_add(len)?;
+        let chunk = b.get(i..end)?;
+        match &chunk[4..8] {
+            b"tEXt" | b"zTXt" | b"iTXt" | b"eXIf" | b"tIME" => changed = true,
+            _ => out.extend_from_slice(chunk),
+        }
+        i = end;
+    }
+    changed.then_some(out)
+}
+
+/// A WebP without its EXIF and XMP chunks. `None` if damaged, or nothing changes.
+fn without_webp_metadata(b: &[u8]) -> Option<Vec<u8>> {
+    let mut out = b.get(..12)?.to_vec();
+    let mut i = 12;
+    let mut changed = false;
+    while i < b.len() {
+        let len = u32::from_le_bytes(b.get(i + 4..i + 8)?.try_into().ok()?) as usize;
+        // Chunks are padded to an even length.
+        let end = i.checked_add(8)?.checked_add(len)?.checked_add(len % 2)?;
+        let chunk = b.get(i..end.min(b.len()))?;
+        match &chunk[..4] {
+            b"EXIF" | b"XMP " => changed = true,
+            _ => out.extend_from_slice(chunk),
+        }
+        i = end;
+    }
+    if !changed {
+        return None;
+    }
+    // The file says how long it is, and an extended one says what it holds.
+    let size = u32::try_from(out.len() - 8).ok()?;
+    out[4..8].copy_from_slice(&size.to_le_bytes());
+    if out.get(12..16) == Some(b"VP8X".as_slice()) {
+        *out.get_mut(20)? &= !0b0000_1100;
+    }
+    Some(out)
+}
+
+fn clean_jpeg(bytes: &[u8], tmp: &Path) -> anyhow::Result<bool> {
+    let Some(scan) = scan_jpeg(bytes) else {
         return Ok(false);
     };
     let turn = scan
@@ -213,7 +288,7 @@ pub fn clean_photo(src: &Path, tmp: &Path) -> anyhow::Result<bool> {
         .and_then(image::metadata::Orientation::from_exif)
         .filter(|o| *o != image::metadata::Orientation::NoTransforms);
     let out = if let Some(o) = turn {
-        let mut img = image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg)?;
+        let mut img = image::load_from_memory_with_format(bytes, image::ImageFormat::Jpeg)?;
         img.apply_orientation(o);
         let mut out = Vec::new();
         image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 92)
@@ -654,6 +729,72 @@ mod tests {
         // Not a JPEG at all.
         std::fs::write(&src, b"hello").unwrap();
         assert!(!clean_photo(&src, &tmp).unwrap());
+    }
+
+    #[test]
+    fn a_png_loses_its_text_and_keeps_its_picture() {
+        let dir = tempfile::tempdir().unwrap();
+        let (src, tmp) = (dir.path().join("p.dat"), dir.path().join("p.clean"));
+        let mut plain = std::io::Cursor::new(Vec::new());
+        image::RgbImage::from_pixel(8, 8, image::Rgb([200, 10, 10]))
+            .write_to(&mut plain, image::ImageFormat::Png)
+            .unwrap();
+        let plain = plain.into_inner();
+        // A text chunk right after the header, as a phone or editor writes it.
+        let (head, rest) = plain.split_at(8 + 25);
+        let mut with_text = head.to_vec();
+        let text = b"Location\x0052.0, 4.7";
+        with_text.extend_from_slice(&(text.len() as u32).to_be_bytes());
+        with_text.extend_from_slice(b"tEXt");
+        with_text.extend_from_slice(text);
+        with_text.extend_from_slice(&[0; 4]);
+        with_text.extend_from_slice(rest);
+        std::fs::write(&src, &with_text).unwrap();
+
+        assert!(clean_photo(&src, &tmp).unwrap());
+        let out = std::fs::read(&tmp).unwrap();
+        assert_eq!(out, plain, "exactly the picture, nothing else");
+        // Nothing left to remove, and something else altogether.
+        assert!(!clean_photo(&tmp, &dir.path().join("again")).unwrap());
+        std::fs::write(&src, &with_text[..30]).unwrap();
+        assert!(!clean_photo(&src, &tmp).unwrap(), "damaged goes as it is");
+    }
+
+    #[test]
+    fn a_webp_loses_its_exif_and_says_so_in_its_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let (src, tmp) = (dir.path().join("p.webp"), dir.path().join("p.clean"));
+        let chunk = |name: &[u8; 4], body: &[u8]| {
+            let mut c = name.to_vec();
+            c.extend_from_slice(&(body.len() as u32).to_le_bytes());
+            c.extend_from_slice(body);
+            if body.len() % 2 == 1 {
+                c.push(0);
+            }
+            c
+        };
+        let mut body = b"WEBP".to_vec();
+        let mut extended = vec![0b0000_1100u8];
+        extended.extend_from_slice(&[0; 9]);
+        body.extend(chunk(b"VP8X", &extended));
+        body.extend(chunk(b"VP8 ", &[1, 2, 3, 4]));
+        body.extend(chunk(b"EXIF", b"GPS 52.0 4.7"));
+        body.extend(chunk(b"XMP ", b"<xmp>"));
+        let mut file = b"RIFF".to_vec();
+        file.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        file.extend_from_slice(&body);
+        std::fs::write(&src, &file).unwrap();
+
+        assert!(clean_photo(&src, &tmp).unwrap());
+        let out = std::fs::read(&tmp).unwrap();
+        assert!(!out.windows(3).any(|w| w == b"GPS"));
+        assert!(!out.windows(4).any(|w| w == b"XMP "));
+        assert!(out.windows(4).any(|w| w == b"VP8 "), "the picture stays");
+        assert_eq!(out[20] & 0b0000_1100, 0);
+        assert_eq!(
+            u32::from_le_bytes(out[4..8].try_into().unwrap()) as usize,
+            out.len() - 8
+        );
     }
 
     #[test]

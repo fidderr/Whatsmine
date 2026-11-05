@@ -39,14 +39,6 @@ pub fn SettingsScreen() -> Element {
         SpeedMode::AlwaysInstant => t(&tr, "speed.instant_short"),
         SpeedMode::BatterySaver => t(&tr, "speed.saver_short"),
     };
-    let simple_value = t(
-        &tr,
-        if s.simple_mode {
-            "common.on"
-        } else {
-            "common.off"
-        },
-    );
 
     rsx! {
         div { class: "screen",
@@ -89,14 +81,6 @@ pub fn SettingsScreen() -> Element {
                     Row { icon: IconName::Wifi, title: t(&tr, "connection.title"), small: true, to: Route::ConnectionScreen {}, tag: "connection" }
                     Row { icon: IconName::Device, title: t(&tr, "devices.title"), small: true, to: Route::DevicesScreen {}, tag: "devices" }
                     Row { icon: IconName::Storage, title: t(&tr, "storage.title"), small: true, to: Route::StorageScreen {}, tag: "storage" }
-                    Row {
-                        icon: IconName::TextSize,
-                        title: t(&tr, "simple.title"),
-                        value: simple_value,
-                        small: true,
-                        tag: "simple",
-                        on_tap: move |_| change(settings, |s| s.simple_mode = !s.simple_mode),
-                    }
                     Row { icon: IconName::Help, title: t(&tr, "help.title"), small: true, to: Route::HelpScreen {}, tag: "help" }
                 }
             }

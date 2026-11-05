@@ -11,17 +11,15 @@ use crate::media::{self, Picked};
 #[derive(Clone, Copy, PartialEq)]
 enum Step {
     Welcome,
-    Mode,
     Allow,
 }
 
-/// The first run: a name, how you want it, and what the phone has to allow.
+/// The first run: a name, and what the phone has to allow.
 #[component]
 pub fn Start() -> Element {
     let mut step = use_signal(|| Step::Welcome);
     match step() {
-        Step::Welcome => rsx! { Welcome { on_next: move |_| step.set(Step::Mode) } },
-        Step::Mode => rsx! { Mode { on_next: move |_| step.set(Step::Allow) } },
+        Step::Welcome => rsx! { Welcome { on_next: move |_| step.set(Step::Allow) } },
         Step::Allow => rsx! { Allow {} },
     }
 }
@@ -171,47 +169,6 @@ fn Welcome(on_next: EventHandler<()>) -> Element {
                     },
                 }
             }
-        }
-    }
-}
-
-#[component]
-fn Mode(on_next: EventHandler<()>) -> Element {
-    let tr = use_tr();
-    let settings = use_settings();
-    rsx! {
-        div { class: "start",
-            h1 { "{t(&tr, \"start.mode_title\")}" }
-            button {
-                class: "mode-card",
-                "data-t": "mode-simple",
-                onclick: move |_| {
-                    change(settings, |s| s.simple_mode = true);
-                    on_next.call(());
-                },
-                div { class: "mode-preview",
-                    span { "A" }
-                    span { "B" }
-                }
-                span { class: "mode-title", "{t(&tr, \"start.simple\")}" }
-                span { class: "sub", "{t(&tr, \"start.simple_text\")}" }
-            }
-            button {
-                class: "mode-card",
-                "data-t": "mode-full",
-                onclick: move |_| {
-                    change(settings, |s| s.simple_mode = false);
-                    on_next.call(());
-                },
-                div { class: "mode-preview lines",
-                    span {}
-                    span {}
-                    span {}
-                }
-                span { class: "mode-title", "{t(&tr, \"start.full\")}" }
-                span { class: "sub", "{t(&tr, \"start.full_text\")}" }
-            }
-            p { class: "note", "{t(&tr, \"start.mode_note\")}" }
         }
     }
 }

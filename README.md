@@ -8,7 +8,7 @@ WhatsMine is a free, open-source messenger with no company in the middle:
 - **Nothing to run.** Phones and PCs find each other through the BitTorrent DHT, which nobody owns, and connect directly. You and the people you talk to set up nothing.
 - **Who you are is not where you are.** Strangers only get a link, a name code or a QR code, and those only let them leave a sealed request. They never reach your phone and never learn its address.
 - **Being bothered?** One button makes all your links stop working. Your contacts keep talking to you and notice nothing.
-- **Encrypted end to end,** per device, with Olm. Everything on disk is sealed with a key the system holds (Android Keystore, Windows DPAPI).
+- **Encrypted end to end,** per device, with Olm. Names, messages and keys on disk are sealed with a key the system holds (Android Keystore, Windows DPAPI).
 
 It runs on Android 12 and newer (64-bit) and on Windows, from one Rust codebase.
 
@@ -24,7 +24,6 @@ It runs on Android 12 and newer (64-bit) and on Windows, from one Rust codebase.
 - **Battery:** nothing is held open on a sleeping phone on mobile data. Short texts wait sealed in the DHT
 - **Staying on top of things:** folders by rule, labels, archive, snooze, hidden chats, send later, send without sound, reminders, remind me if nobody answers, your own list, notes to self, quick replies
 - **Your look:** themes including pure black and colorblind, accent colours, text size, spacing, wallpapers and bubble colour per chat, flat layout
-- **Simple mode:** big buttons and your people, chosen at first run, for whoever wants nothing else in the way
 - **Privacy:** app lock, disappearing messages, per-person name and visibility, screenshot block, incognito keyboard, safety words, a filter and a quiet mode for requests
 - **Coming back:** recovery words, and encrypted backups only those words open
 - English, Nederlands, Español, Français, Deutsch
@@ -55,6 +54,8 @@ It runs on Android 12 and newer (64-bit) and on Windows, from one Rust codebase.
 - **Links** go through a static page (`site/`) because chat apps do not make `whatsmine://` clickable. The part after the # never reaches any server.
 - **Two devices per person.** A lost linked device holds your key until it is removed.
 - **Files stay on the device that has them.** Files of others can be fetched again from whoever sent them.
+- **What a copy of the app's folder shows.** Names, messages and keys cannot be read from it. Contact keys and times can, and so can photos and files, which lie as they are in the app's private folder.
+- **Photos lose their location, other files do not.** JPEG, PNG and WebP go out without metadata. Videos, HEIC and other files go exactly as they are.
 - **Not audited.** Nothing here has had an outside security audit yet.
 
 ## Build

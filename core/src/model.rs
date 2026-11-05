@@ -303,8 +303,6 @@ pub struct Settings {
     pub auto_download_wifi_mb: u64,
     /// The same on mobile data.
     pub auto_download_mobile_mb: u64,
-    /// Big buttons and favourite people, nothing else in the way.
-    pub simple_mode: bool,
     /// "" for the theme's own, or "teal", "violet", "pink", "amber", "white".
     pub accent: String,
     /// "small", "normal", "large" or "huge".
@@ -365,7 +363,6 @@ impl Default for Settings {
             keep_trying_days: 7,
             auto_download_wifi_mb: 2048,
             auto_download_mobile_mb: 16,
-            simple_mode: false,
             accent: String::new(),
             text_size: "normal".into(),
             density: "normal".into(),

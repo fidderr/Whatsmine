@@ -617,6 +617,32 @@ async fn a_message_comes_from_any_member_when_its_writer_is_gone() {
     assert_eq!(got.sender.as_deref(), Some(kb.as_str()));
 }
 
+/// Where only admins write, any member can still pass on what an admin wrote.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plain_member_passes_on_what_only_admins_can_write() {
+    let mut t = trio().await;
+    t.a.group_set_rules(&t.group, |r| r.only_admins_send = true)
+        .unwrap();
+    until("the rules", || {
+        [&t.b, &t.c].iter().all(|core| {
+            core.group_info(&t.group)
+                .is_some_and(|g| g.rules.only_admins_send)
+        })
+    })
+    .await;
+    let kc = t.c.my_key();
+    t.c.shutdown();
+    let m = t.a.send(&t.group, "Saturday at ten").unwrap();
+    until("bob to have it", || t.b.message(&m.id).is_some()).await;
+    t.a.shutdown();
+    t.c = start(t.dirs[2].path(), &t.lookup, "Carol");
+    assert_eq!(t.c.my_key(), kc);
+    until("carol to have it, from bob", || {
+        t.c.message(&m.id).is_some()
+    })
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn joining_with_a_link_goes_through_who_runs_it() {
     let t = trio().await;

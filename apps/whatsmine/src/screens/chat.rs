@@ -157,7 +157,6 @@ fn ChatView(id: String) -> Element {
     let mut show_scheduled = use_signal(|| false);
     let mut searching = use_signal(|| false);
     let mut disappear = use_signal(|| false);
-    let mut typed_simple = use_signal(|| false);
     let mut query = use_signal(String::new);
     let mut selection: Signal<Option<Vec<String>>> = use_signal(|| None);
     let mut away_from_newest = use_signal(|| false);
@@ -247,7 +246,6 @@ fn ChatView(id: String) -> Element {
     let online = !is_group && core.is_online(&id);
     let is_typing = typing.read().contains_key(&id);
     let s = settings();
-    let simple = s.simple_mode;
     let show_last_seen = s.share_last_seen;
     let prefs = core.chat_prefs(&id);
     let style = look::chat_style(&s, &prefs);
@@ -430,7 +428,6 @@ fn ChatView(id: String) -> Element {
             });
         }
     };
-    let start_voice_simple = start_voice.clone();
 
     // The photos of this chat, in order, for the viewer to page through.
     let image_ids: Vec<String> = messages
@@ -478,92 +475,65 @@ fn ChatView(id: String) -> Element {
 
     rsx! {
         div { class: "chat{style.class}",
-            if simple {
-                header { class: "hdr s", style: "gap:8px",
-                    button {
-                        class: "btn tall",
-                        style: "background:transparent",
-                        "data-t": "back",
-                        onclick: move |_| nav.go_back(),
-                        Icon { name: IconName::ArrowLeft }
-                        "{t(&tr, \"common.back\")}"
+            header { class: "hdr s",
+                button { class: "ib back-btn", aria_label: "{t(&tr, \"common.back\")}", onclick: move |_| nav.go_back(),
+                    Icon { name: IconName::ArrowLeft }
+                }
+                div {
+                    class: "chat-peer",
+                    "data-t": "chat-peer",
+                    onclick: move |_| {
+                        if is_group {
+                            nav.push(Route::GroupInfoScreen { id: contact_id.clone() });
+                        } else {
+                            nav.push(Route::ContactInfo { id: contact_id.clone() });
+                        }
+                    },
+                    Avatar {
+                        id: id.clone(),
+                        name: name.clone(),
+                        size: "small",
+                        online,
+                        image: contact.avatar.clone(),
+                        group: is_group,
                     }
-                    h1 { style: "text-align:center;font-size:1.5rem;font-weight:700", "{name}" }
-                    if call_ready {
-                        button {
-                            class: "btn main tall",
-                            onclick: {
-                                let (core, id, bridge) = (core.clone(), id.clone(), bridge.clone());
-                                move |_| {
-                                    call::start_call(&core, &id, false, call_phase, &bridge, &mut toast_sig, &tr)
-                                }
-                            },
-                            Icon { name: IconName::Phone, size: 22 }
-                            "{t(&tr, \"simple.call\")}"
+                    div { style: "min-width:0",
+                        span { class: "chat-peer-name", "{name}" }
+                        if !status.is_empty() {
+                            span { class: if live { "chat-peer-status live" } else { "chat-peer-status" }, "{status}" }
                         }
                     }
                 }
-            } else {
-                header { class: "hdr s",
-                    button { class: "ib back-btn", aria_label: "{t(&tr, \"common.back\")}", onclick: move |_| nav.go_back(),
-                        Icon { name: IconName::ArrowLeft }
-                    }
-                    div {
-                        class: "chat-peer",
-                        "data-t": "chat-peer",
-                        onclick: move |_| {
-                            if is_group {
-                                nav.push(Route::GroupInfoScreen { id: contact_id.clone() });
-                            } else {
-                                nav.push(Route::ContactInfo { id: contact_id.clone() });
+                if call_ready {
+                    button {
+                        class: "ib call-start-video",
+                        aria_label: "{t(&tr, \"call.video\")}",
+                        onclick: {
+                            let (core, id, bridge) = (core.clone(), id.clone(), bridge.clone());
+                            move |_| {
+                                call::start_call(&core, &id, true, call_phase, &bridge, &mut toast_sig, &tr)
                             }
                         },
-                        Avatar {
-                            id: id.clone(),
-                            name: name.clone(),
-                            size: "small",
-                            online,
-                            image: contact.avatar.clone(),
-                            group: is_group,
-                        }
-                        div { style: "min-width:0",
-                            span { class: "chat-peer-name", "{name}" }
-                            if !status.is_empty() {
-                                span { class: if live { "chat-peer-status live" } else { "chat-peer-status" }, "{status}" }
-                            }
-                        }
-                    }
-                    if call_ready {
-                        button {
-                            class: "ib call-start-video",
-                            aria_label: "{t(&tr, \"call.video\")}",
-                            onclick: {
-                                let (core, id, bridge) = (core.clone(), id.clone(), bridge.clone());
-                                move |_| {
-                                    call::start_call(&core, &id, true, call_phase, &bridge, &mut toast_sig, &tr)
-                                }
-                            },
-                            Icon { name: IconName::Video, size: 22 }
-                        }
-                        button {
-                            class: "ib call-start",
-                            aria_label: "{t(&tr, \"call.voice\")}",
-                            onclick: {
-                                let (core, id, bridge) = (core.clone(), id.clone(), bridge.clone());
-                                move |_| {
-                                    call::start_call(&core, &id, false, call_phase, &bridge, &mut toast_sig, &tr)
-                                }
-                            },
-                            Icon { name: IconName::Phone, size: 22 }
-                        }
+                        Icon { name: IconName::Video, size: 22 }
                     }
                     button {
-                        class: "ib",
-                        "data-t": "chat-more",
-                        aria_label: "{t(&tr, \"chat.more\")}",
-                        onclick: move |_| more.set(true),
-                        Icon { name: IconName::More, size: 22 }
+                        class: "ib call-start",
+                        aria_label: "{t(&tr, \"call.voice\")}",
+                        onclick: {
+                            let (core, id, bridge) = (core.clone(), id.clone(), bridge.clone());
+                            move |_| {
+                                call::start_call(&core, &id, false, call_phase, &bridge, &mut toast_sig, &tr)
+                            }
+                        },
+                        Icon { name: IconName::Phone, size: 22 }
                     }
+                }
+                button {
+                    class: "ib",
+                    "data-t": "chat-more",
+                    aria_label: "{t(&tr, \"chat.more\")}",
+                    onclick: move |_| more.set(true),
+                    Icon { name: IconName::More, size: 22 }
                 }
             }
             if ongoing_call.is_some() && *call_phase.read() == Phase::Idle {
@@ -681,7 +651,6 @@ fn ChatView(id: String) -> Element {
                         }
                         Bubble {
                             message: m.clone(),
-                            read_aloud: simple,
                             selected: selection.read().as_ref().map(|s| s.contains(&m.id)),
                             on_select: move |id: String| {
                                 if let Some(list) = selection.write().as_mut() {
@@ -741,27 +710,6 @@ fn ChatView(id: String) -> Element {
                         ));
                     },
                     on_cancel: move |_| recording.set(false),
-                }
-            } else if simple && !typed_simple() {
-                div { class: "btns", style: "padding:8px 12px calc(16px + var(--safe-bottom))",
-                    button {
-                        class: "btn main big column",
-                        "data-t": "talk",
-                        onclick: start_voice_simple,
-                        Icon { name: IconName::Mic, size: 28 }
-                        "{t(&tr, \"simple.talk\")}"
-                    }
-                    button {
-                        class: "btn big column",
-                        style: "background:var(--surface)",
-                        "data-t": "type",
-                        onclick: move |_| {
-                            typed_simple.set(true);
-                            js::focus("composer");
-                        },
-                        Icon { name: IconName::Pencil, size: 28 }
-                        "{t(&tr, \"simple.type\")}"
-                    }
                 }
             } else {
                 if let Some(m) = reply_to() {
@@ -1244,7 +1192,6 @@ fn ScheduledSheet(list: Vec<Message>, on_close: EventHandler<()>) -> Element {
 fn Bubble(
     message: Message,
     #[props(default)] sender: Option<(String, String)>,
-    #[props(default)] read_aloud: bool,
     /// While choosing several: whether this one is chosen.
     #[props(default)]
     selected: Option<bool>,
@@ -1303,7 +1250,6 @@ fn Bubble(
             }
         })
         .collect();
-    let body_for_voice = message.body.clone();
     let tap_id = message.id.clone();
 
     rsx! {
@@ -1409,14 +1355,6 @@ fn Bubble(
                             on_menu.call(more.clone());
                         },
                         Icon { name: IconName::ChevronDown, size: 14 }
-                    }
-                }
-                if read_aloud && !message.body.is_empty() && !message.outgoing {
-                    button {
-                        class: "read-aloud",
-                        onclick: move |_| js::speak(&body_for_voice),
-                        Icon { name: IconName::Volume, size: 22 }
-                        "{t(&tr, \"simple.read_aloud\")}"
                     }
                 }
             }
@@ -1645,6 +1583,7 @@ fn MessageMenu(
         }
     };
     let react_more = react.clone();
+    let from_them = !message.outgoing;
 
     rsx! {
         Sheet { on_close: move |_| on_close.call(()), tag: "message-menu",
@@ -1716,6 +1655,20 @@ fn MessageMenu(
                         on_tap: move |_| {
                             on_forward.call(for_forward.clone());
                             on_close.call(());
+                        },
+                    }
+                }
+                if !body.is_empty() && from_them {
+                    SheetItem {
+                        label: t(&tr, "chat.read_aloud"),
+                        icon: IconName::Volume,
+                        tag: "read-aloud",
+                        on_tap: {
+                            let text = body.clone();
+                            move |_| {
+                                js::speak(&text);
+                                on_close.call(());
+                            }
                         },
                     }
                 }
