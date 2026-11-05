@@ -1,12 +1,14 @@
 //! WhatsMine: chat without servers, accounts or phone numbers.
 
-/// WebView2 flags (Windows). The page is our own `http://dioxus.index.html`,
-/// which the browser engine does not call a "secure context", so it would
-/// hide the camera from it. We declare that one origin trusted, and skip the
-/// per-use camera prompt: the page only ever runs our own code, and the user
-/// started the camera by tapping the button.
+/// WebView2 flags (Windows). The page is our own `http://dioxus.index.html`, which the browser engine
+/// does not call a "secure context", so it would hide the camera from it. We declare that one origin
+/// trusted, and skip the per-use prompt for camera and microphone: the page only ever runs our own
+/// code, and the user started the camera by tapping the button.
+///
+/// Showing a screen is another matter: that must always go through the system's own picker. So not
+/// `--use-fake-ui-for-media-stream`, which would skip the picker too, and show everything at once.
 #[cfg(all(feature = "desktop", windows))]
-const WEBVIEW2_ARGS: &str = "--unsafely-treat-insecure-origin-as-secure=http://dioxus.index.html --use-fake-ui-for-media-stream";
+const WEBVIEW2_ARGS: &str = "--unsafely-treat-insecure-origin-as-secure=http://dioxus.index.html --auto-accept-camera-and-microphone-capture";
 
 fn main() {
     #[cfg(feature = "desktop")]

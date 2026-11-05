@@ -1022,6 +1022,13 @@
     stats: () => JSON.parse(JSON.stringify(stats)),
     state: () => run && { id: run.id, camOn: run.camOn, muted: run.muted, peers: Array.from(run.peers.keys()), showing: !!run.share },
     usePaintedScreen: on => { paintedScreen = !!on },
+    // For tests: what the capture calls itself.
+    shareInfo: () => {
+      const share = run && run.share
+      if (!share) return null
+      const set = share.track.getSettings()
+      return { label: share.track.label, surface: set.displaySurface, w: set.width, h: set.height }
+    },
     // For tests: how big the screen we watch is, and whether it has more than one colour in it.
     screenInfo: () => {
       const v = document.querySelector('.wm-screen video')
