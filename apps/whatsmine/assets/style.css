@@ -2148,25 +2148,6 @@ textarea::placeholder {
   width: 300px;
 }
 
-.media-audio {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 2px 4px;
-}
-
-.media-audio audio {
-  height: 40px;
-  width: 230px;
-  max-width: 100%;
-}
-
-.audio-length {
-  font-size: 0.75rem;
-  font-variant-numeric: tabular-nums;
-  opacity: 0.75;
-}
-
 .file-card {
   display: flex;
   align-items: center;
@@ -2607,15 +2588,6 @@ textarea::placeholder {
   margin-bottom: 8px;
 }
 
-.scan-btn {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  margin-bottom: 12px;
-}
-
 .viewer-body {
   position: absolute;
   inset: 0;
@@ -2699,4 +2671,142 @@ textarea::placeholder {
   color: white;
   font-size: 0.875rem;
   text-shadow: 0 1px 4px rgba(0, 0, 0, 0.7);
+}
+
+/* ===== The call screen on the design ===== */
+.call-overlay {
+  background: var(--bg);
+  color: var(--text);
+  padding-top: calc(96px + var(--safe-top, 0px));
+  padding-bottom: calc(48px + var(--safe-bottom, 0px));
+}
+.call-overlay.video-live {
+  color: #f2f3f7;
+}
+.call-avatar .avatar {
+  width: 120px;
+  height: 120px;
+  font-size: 1.75rem;
+}
+.call-name {
+  text-shadow: none;
+}
+.call-status {
+  font-size: 1.25rem;
+  opacity: 1;
+  text-shadow: none;
+}
+.call-path {
+  color: var(--success);
+  font-size: 0.875rem;
+}
+.call-controls {
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.call-btn {
+  position: relative;
+  width: 56px;
+  height: 56px;
+  margin-bottom: 24px;
+  background: var(--surface2);
+  color: var(--text);
+}
+.call-btn::after {
+  content: attr(aria-label);
+  position: absolute;
+  top: 60px;
+  left: 50%;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  color: var(--text);
+  font-size: 0.75rem;
+  line-height: 1.33;
+}
+.call-overlay.video-live .call-btn::after {
+  color: #f2f3f7;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.7);
+}
+.call-btn.toggle.on {
+  background: var(--text);
+  color: var(--bg);
+}
+.call-btn.decline {
+  width: 72px;
+  height: 72px;
+  background: var(--error);
+  color: var(--on-error);
+}
+.call-btn.decline::after,
+.call-btn.accept::after {
+  top: 76px;
+}
+.call-btn.accept {
+  width: 72px;
+  height: 72px;
+  background: var(--success);
+  color: var(--on-success);
+}
+
+/* ===== Voice messages ===== */
+.voice-player {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: min(272px, 68vw);
+  padding: 4px;
+}
+.voice-play {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border: none;
+  border-radius: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--primary);
+  color: var(--on-primary);
+  cursor: pointer;
+}
+.bubble.out .voice-play {
+  background: var(--bubble-out-text);
+  color: var(--bubble-out);
+}
+.voice-side {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.voice-wave {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 28px;
+  cursor: pointer;
+}
+.voice-wave span {
+  flex: 1;
+  height: 30%;
+  min-height: 3px;
+  border-radius: 1px;
+  background: currentColor;
+  opacity: 0.35;
+}
+.voice-wave span.on {
+  opacity: 1;
+}
+.voice-speed {
+  flex: none;
+  min-width: 40px;
+  height: 28px;
+  border: none;
+  border-radius: 14px;
+  background: var(--quote);
+  color: inherit;
+  font: inherit;
+  font-size: 0.75rem;
+  font-weight: 500;
+  cursor: pointer;
 }

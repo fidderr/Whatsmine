@@ -727,5 +727,7 @@
   "devices.remove": "Das andere Gerät entfernen",
   "devices.remove_text": "Es löscht alles von dir, sobald es online ist. Hast du es verloren, setze auch deine Adresse zurück, und bedenke: Wer es hat, hat bis dahin deinen Schlüssel.",
   "devices.remove_title": "Das andere Gerät entfernen?",
-  "devices.removing": "Wird entfernt, sobald es online ist"
+  "devices.removing": "Wird entfernt, sobald es online ist",
+  "call.path_direct": "Direkte Verbindung",
+  "call.path_relay": "Über ein Relay"
 }

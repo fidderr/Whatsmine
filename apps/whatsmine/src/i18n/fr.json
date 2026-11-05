@@ -727,5 +727,7 @@
   "devices.remove": "Retirer l'autre appareil",
   "devices.remove_text": "Il efface tout ce qui est à vous dès qu'il est en ligne. Si vous l'avez perdu, réinitialisez aussi votre adresse, et sachez que son détenteur a votre clé jusque-là.",
   "devices.remove_title": "Retirer l'autre appareil ?",
-  "devices.removing": "Sera retiré dès qu'il sera en ligne"
+  "devices.removing": "Sera retiré dès qu'il sera en ligne",
+  "call.path_direct": "Connexion directe",
+  "call.path_relay": "Via un relais"
 }

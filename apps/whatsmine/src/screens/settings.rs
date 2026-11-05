@@ -1494,7 +1494,7 @@ pub fn StorageScreen() -> Element {
             .unwrap_or(0)
             .max(u64::from(n > 0))
     };
-    let mb = |n: u64| crate::fmt::bytes(n * 1024 * 1024);
+    let mb = |n: u64| format!("{n} MB");
     let wifi_options = vec![
         ("0".to_owned(), t(&tr, "storage.nothing")),
         ("16".to_owned(), mb(16)),

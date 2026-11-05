@@ -727,5 +727,7 @@
   "devices.remove": "Het andere apparaat verwijderen",
   "devices.remove_text": "Het wist alles van jou zodra het online is. Ben je het kwijt, zet dan ook je adres opnieuw in, en bedenk dat wie het heeft tot die tijd je sleutel heeft.",
   "devices.remove_title": "Het andere apparaat verwijderen?",
-  "devices.removing": "Wordt verwijderd zodra het online is"
+  "devices.removing": "Wordt verwijderd zodra het online is",
+  "call.path_direct": "Directe verbinding",
+  "call.path_relay": "Via een relay"
 }

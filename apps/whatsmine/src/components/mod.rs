@@ -11,6 +11,7 @@ pub mod scan;
 mod toast;
 mod ui;
 mod voice;
+mod voice_player;
 
 pub use attachment::{AttachmentView, ImageViewer, open_file, save_file};
 pub use avatar::Avatar;
@@ -27,3 +28,4 @@ pub use ui::{
     use_settings,
 };
 pub use voice::VoiceBar;
+pub use voice_player::VoicePlayer;

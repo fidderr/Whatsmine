@@ -727,5 +727,7 @@
   "devices.remove": "Quitar el otro dispositivo",
   "devices.remove_text": "Borra todo lo tuyo en cuanto esté en línea. Si lo perdiste, restablece también tu dirección, y ten en cuenta que quien lo tenga posee tu clave hasta entonces.",
   "devices.remove_title": "¿Quitar el otro dispositivo?",
-  "devices.removing": "Se quitará en cuanto esté en línea"
+  "devices.removing": "Se quitará en cuanto esté en línea",
+  "call.path_direct": "Conexión directa",
+  "call.path_relay": "A través de un relé"
 }

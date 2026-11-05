@@ -137,16 +137,11 @@ pub fn AttachmentView(message: Message, on_view: EventHandler<String>) -> Elemen
                         }
                     },
                     MediaKind::Audio => rsx! {
-                        div { class: "media-audio",
-                            if let Some(ms) = att.duration_ms {
-                                span { class: "audio-length", "{fmt::duration(ms)}" }
-                            }
-                            audio {
-                                src: "{src}",
-                                controls: true,
-                                preload: "metadata",
-                                onerror: move |_| broken.set(true),
-                            }
+                        crate::components::VoicePlayer {
+                            id: message.id.clone(),
+                            src: src.clone(),
+                            duration_ms: att.duration_ms,
+                            on_broken: move |_| broken.set(true),
                         }
                     },
                     MediaKind::File => rsx! {

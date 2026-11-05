@@ -385,6 +385,23 @@ pub fn CallOverlay() -> Element {
     let bridge = use_context::<CallBridge>();
     let toast_sig = use_context::<ToastSig>();
     let mut now = use_signal(now_ms);
+    let mut path_turn = use_signal(|| 0u32);
+    let path_report = {
+        let core = core.clone();
+        use_resource(move || {
+            let core = core.clone();
+            let _ = path_turn();
+            async move { core.connection_report().await }
+        })
+    };
+    use_future(move || async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            if matches!(&*phase.peek(), Phase::Active { .. }) {
+                *path_turn.write() += 1;
+            }
+        }
+    });
 
     // Tick the call timer while connected.
     use_future(move || async move {
@@ -437,6 +454,25 @@ pub fn CallOverlay() -> Element {
     let name = name_of(&core, &contact_id);
     let image = core.contact(&contact_id).and_then(|c| c.avatar);
     let is_group = contact_id.starts_with("g:");
+    // How the connection runs, in words, while there is one.
+    let path_note = match (&current, path_report.read().clone().flatten()) {
+        (Phase::Active { .. }, Some(report)) => report
+            .peers
+            .iter()
+            .find(|p| p.contact_id == contact_id)
+            .map(|p| {
+                t(
+                    &tr,
+                    if p.direct {
+                        "call.path_direct"
+                    } else {
+                        "call.path_relay"
+                    },
+                )
+            })
+            .unwrap_or_default(),
+        _ => String::new(),
+    };
     let hide_avatar =
         matches!(&current, Phase::Active { cams, group, .. } if *group || !cams.is_empty());
     let class = if video_ui {
@@ -463,6 +499,9 @@ pub fn CallOverlay() -> Element {
                 }
                 div { class: "call-name", "{name}" }
                 div { class: "call-status", "{status}" }
+                if !path_note.is_empty() {
+                    div { class: "call-path", "{path_note}" }
+                }
             }
             div { class: "call-controls",
                 match current.clone() {

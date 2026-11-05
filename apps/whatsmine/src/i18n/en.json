@@ -727,5 +727,7 @@
   "devices.remove": "Remove the other device",
   "devices.remove_text": "It deletes everything of yours as soon as it is online. If you lost it, also reset your address, and keep in mind whoever has it holds your key until then.",
   "devices.remove_title": "Remove the other device?",
-  "devices.removing": "Being removed as soon as it is online"
+  "devices.removing": "Being removed as soon as it is online",
+  "call.path_direct": "Direct connection",
+  "call.path_relay": "Through a relay"
 }
