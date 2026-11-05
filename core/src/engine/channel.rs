@@ -120,6 +120,11 @@ impl Engine {
         });
     }
 
+    /// The DHT is there now.
+    pub(super) fn channels_can_go(&mut self) {
+        self.channel.check_at = Some(Instant::now());
+    }
+
     pub(super) fn next_channel_look(&self) -> Option<Instant> {
         self.channel.next_look
     }
@@ -203,21 +208,22 @@ impl Engine {
     /// We wrote something: it goes in the DHT now, and whoever comes for the rest can get it.
     pub(super) fn channel_out(&mut self, id: &str) {
         let Some(c) = self.db.channel(id) else { return };
+        // Whenever the DHT is there, not at some later check.
+        self.channel.check_at = Some(Instant::now());
+        self.channel.next_look = self.channel.check_at;
         let Some(records) = self.records.clone() else {
             return;
         };
         let newest = self.db.channel_newest_records(id, KEEP_ALIVE);
         let head = c.head.as_deref().and_then(SignedRecord::from_bytes);
-        tokio::spawn(async move {
-            if let Some(head) = head {
-                records.put_signed(&head).await;
-            }
-            for record in newest {
-                records.put_signed(&record).await;
-            }
-        });
-        self.channel.check_at = Some(Instant::now());
-        self.channel.next_look = self.channel.check_at;
+        // All at once: a write can take many seconds.
+        for record in head.into_iter().chain(newest) {
+            let records = records.clone();
+            tokio::spawn(async move {
+                let done = records.put_signed(&record).await;
+                tracing::debug!("a channel's post written: {done}");
+            });
+        }
         let pass_on = self.settings().channel_pass_on || c.runs_it();
         self.channel_swarm_if_needed(&c, pass_on);
     }
@@ -339,12 +345,16 @@ async fn look_at(records: &Records, db: &Database, c: &Channel, pass_on: bool) -
     }
     // Keeps them there while the author is away. Who wrote them can do so whenever.
     if pass_on || c.runs_it() {
-        if let Some(head) = c.head.as_deref().and_then(SignedRecord::from_bytes) {
-            records.put_signed(&head).await;
+        let head = c.head.as_deref().and_then(SignedRecord::from_bytes);
+        let mut writes = tokio::task::JoinSet::new();
+        for record in head
+            .into_iter()
+            .chain(db.channel_newest_records(&c.id, KEEP_ALIVE))
+        {
+            let records = records.clone();
+            writes.spawn(async move { records.put_signed(&record).await });
         }
-        for record in db.channel_newest_records(&c.id, KEEP_ALIVE) {
-            records.put_signed(&record).await;
-        }
+        while writes.join_next().await.is_some() {}
     }
     found
 }

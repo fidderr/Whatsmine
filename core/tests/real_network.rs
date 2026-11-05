@@ -106,8 +106,22 @@ async fn channel_run(only_relays: bool) {
         .unwrap();
     let long = "A longer story that does not fit in a record. ".repeat(40);
     author.channel_write(&c.id, &long, None).unwrap();
-    // Give the DHT a moment for the writes: they take seconds.
-    tokio::time::sleep(Duration::from_secs(12)).await;
+    // Someone looking from the outside: when can it be read at all?
+    let outside = whatsmine_core::records::Records::join().unwrap();
+    let (key, salt) = (c.key, whatsmine_core::channel::post_salt(1));
+    let seen = Instant::now();
+    loop {
+        let head = outside.get_signed(&key, None).await.is_some();
+        let post = outside.get_signed(&key, Some(&salt)).await.is_some();
+        println!(
+            "{} ms: newest {head}, post one {post}",
+            seen.elapsed().as_millis()
+        );
+        if (head && post) || seen.elapsed() > Duration::from_secs(150) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    }
     let _ = follower.channel_follow(&c.link()).unwrap();
     let followed = Instant::now();
     until("the short post", 180, || {

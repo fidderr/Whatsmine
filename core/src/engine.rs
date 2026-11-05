@@ -744,6 +744,7 @@ impl Engine {
                 };
                 self.published = None;
                 self.next_request_poll = Some(Instant::now());
+                self.channels_can_go();
             }
             Err(e) => {
                 tracing::warn!("bind failed: {e:#}");
