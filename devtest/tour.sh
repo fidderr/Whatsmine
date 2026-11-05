@@ -359,7 +359,7 @@ fi
 
 scenario status
 if wanted status; then
-    fresh "demo name=Roy theme=$THEME locale=$LOCALE"
+    fresh "$SEED"
     if on_screen .bottom-nav 60; then
         tap tab-people 0 0.3
         on_screen '[data-t="status-row"]' 6 && tap status-row 0 0.3
@@ -395,7 +395,7 @@ fi
 
 scenario channels
 if wanted channels; then
-    fresh "demo name=Roy theme=$THEME locale=$LOCALE"
+    fresh "$SEED"
     if on_screen .bottom-nav 60; then
         tap tab-people 0 0.3
         on_screen '[data-t="channels-row"]' 6 && tap channels-row 0 0.3
@@ -425,7 +425,7 @@ fi
 
 scenario space
 if wanted space; then
-    fresh "demo name=Roy theme=$THEME locale=$LOCALE"
+    fresh "$SEED"
     if on_screen .bottom-nav 60; then
         js "var r = [...document.querySelectorAll('.chat-row')].find(x => x.textContent.includes('Climbing club')); if (!r) return 'no'; r.click(); return 'ok'" > /dev/null
         if on_screen '[data-t="space"]' 6; then

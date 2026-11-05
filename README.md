@@ -17,13 +17,18 @@ It runs on Android 12 and newer (64-bit) and on Windows, from one Rust codebase.
 - **Chats:** replies, reactions, edits, taking back for everyone, mentions, bold, italic, code and spoilers, pinned messages, select many, search, export
 - **Rich messages:** polls, shared lists, plans with who is coming, places that open in your maps app, contact cards
 - **Files:** photos, videos, voice messages with the real sound shown and a speed button, any file. Original quality, no size limit other than what the receiver allows
-- **Calls:** voice and video, one to one and in groups
+- **Calls:** voice and video, one to one and in groups, with your screen shared on Windows and Android
+- **Help on a Windows PC:** let someone you know control it during a call, if you turned that on and say yes each time
+- **Status:** posts that last a day, for the people you choose
+- **Rooms:** a voice room people come in and out of, without ringing, up to 8 at once
+- **Spaces:** a group of groups, rooms and channels, where each decides for itself who gets in
+- **Channels:** one writes, many read, by a private link, with nobody running anything
 - **Groups:** up to 64 members, owner and admins, who may send, add and edit, slow mode, invite links with or without approval, and a group goes on when its owner leaves. Any member can pass on what someone missed
 - **Your devices:** link a phone and a PC. Everything shows up on both, also when the other was off
 - **Never silently stuck:** a message says where it is, why it waits and when the next try is. Past the time you set it says it did not get there, and can be tried again
 - **Battery:** nothing is held open on a sleeping phone on mobile data. Short texts wait sealed in the DHT
 - **Staying on top of things:** folders by rule, labels, archive, snooze, hidden chats, send later, send without sound, reminders, remind me if nobody answers, your own list, notes to self, quick replies
-- **Your look:** themes including pure black and colorblind, accent colours, text size, spacing, wallpapers and bubble colour per chat, flat layout
+- **Your look:** saved looks with your own colours, fonts, backgrounds and shapes, for the app or per chat, and a copy to share. Whatever you choose stays readable
 - **Privacy:** app lock, disappearing messages, per-person name and visibility, screenshot block, incognito keyboard, safety words, a filter and a quiet mode for requests
 - **Coming back:** recovery words, and encrypted backups only those words open
 - English, Nederlands, Español, Français, Deutsch
@@ -56,6 +61,11 @@ It runs on Android 12 and newer (64-bit) and on Windows, from one Rust codebase.
 - **Files stay on the device that has them.** Files of others can be fetched again from whoever sent them.
 - **What a copy of the app's folder shows.** Names, messages and keys cannot be read from it. Contact keys and times can, and so can photos and files, which lie as they are in the app's private folder.
 - **Photos lose their location, other files do not.** JPEG, PNG and WebP go out without metadata. Videos, HEIC and other files go exactly as they are.
+- **A status reaches someone only if both of you are around within the day.** There is nowhere for it to wait. Statuses and channels are per device: they do not move to a linked device or a new phone, and whoever loses the device a channel was made on can no longer write in it.
+- **Anyone with a channel's link can read it.** Removing someone takes a new link. Short posts come without any connection. Longer posts and photos come from a few other followers, who see your IP address on that connection unless you choose only through relays. If nobody who has a long post is around, only its short part is there. Follower and reaction counts are estimates, and anyone with the link can disturb them. Tested with 20 followers on one PC, and two people over the real internet: not at the scale of a public channel.
+- **A room holds 8 people,** because everyone connects to everyone. Tested on one PC, not over real connections with that many.
+- **Letting someone control a Windows PC is powerful.** It is off until you turn it on, never during a call, only for someone who has been a contact for a week, and you say yes each time. WhatsMine itself, admin prompts and the lock screen stay out of reach, and your own hand always wins. Sharing one window limits them to that window. With more than one screen, only a window can be shared for control. Android phones can share their screen but can never be controlled.
+- **Screen capture plus input is what remote access malware does too,** so unsigned builds may get antivirus warnings.
 - **Not audited.** Nothing here has had an outside security audit yet.
 
 ## Build
