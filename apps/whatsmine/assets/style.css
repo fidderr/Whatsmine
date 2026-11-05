@@ -35,6 +35,12 @@
   --read-tick: #7cb0ff;
   --quote: rgba(255, 255, 255, 0.09);
   --scrim: rgba(0, 0, 0, 0.6);
+  --font-app: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-msg: inherit;
+  --msg-scale: 1;
+  --bubble-r: 16px;
+  --bubble-r-tail: 6px;
+  --photo-r: 50%;
   --radius: 16px;
   --radius-md: 12px;
   --radius-sm: 8px;
@@ -135,6 +141,62 @@
   }
 }
 
+/* ===== Fonts: asked for only when a look uses them ===== */
+@font-face {
+  font-family: 'wm-inter';
+  src: url(/font/inter) format('woff2');
+  font-weight: 100 900;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'wm-atkinson';
+  src: url(/font/atkinson) format('woff2');
+  font-weight: 200 800;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'wm-lexend';
+  src: url(/font/lexend) format('woff2');
+  font-weight: 100 900;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'wm-nunito';
+  src: url(/font/nunito) format('woff2');
+  font-weight: 200 1000;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'wm-lora';
+  src: url(/font/lora) format('woff2');
+  font-weight: 400 700;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'wm-jetbrains';
+  src: url(/font/jetbrains) format('woff2');
+  font-weight: 100 800;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'wm-caveat';
+  src: url(/font/caveat) format('woff2');
+  font-weight: 400 700;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'wm-opendyslexic';
+  src: url(/font/opendyslexic) format('woff2');
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'wm-opendyslexic';
+  src: url(/font/opendyslexic-bold) format('woff2');
+  font-weight: 700;
+  font-display: swap;
+}
+
 /* ===== Reset & Base ===== */
 * {
   margin: 0;
@@ -149,7 +211,7 @@ body {
 }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-family: var(--font-app);
   color: var(--text);
   min-height: 100vh;
   font-size: 1rem;
@@ -168,6 +230,7 @@ select {
   min-height: 100vh;
   background: var(--bg);
   color: var(--text);
+  font-family: var(--font-app);
   transition: background 0.3s ease, color 0.3s ease;
 }
 
@@ -1117,6 +1180,18 @@ textarea::placeholder {
   flex-direction: column;
   max-width: 760px;
   margin: 0 auto;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-app);
+}
+.chat > :not(.chat-wall) {
+  position: relative;
+}
+.chat-wall {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
 }
 .chat-peer {
   flex: 1;
@@ -1156,7 +1231,6 @@ textarea::placeholder {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  background-size: auto;
 }
 .date-sep,
 .sys-line {
@@ -1190,23 +1264,25 @@ textarea::placeholder {
 .bubble {
   max-width: 100%;
   padding: 6px 12px;
-  font-size: 1rem;
+  font-family: var(--font-msg);
+  font-size: calc(1rem * var(--msg-scale));
   line-height: 1.375;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   user-select: text;
 }
 .bubble.in {
-  border-radius: 16px 16px 16px 6px;
-  background: var(--surface);
+  border-radius: var(--bubble-r) var(--bubble-r) var(--bubble-r) var(--bubble-r-tail);
+  background: var(--bubble-in, var(--surface));
+  color: var(--bubble-in-text, var(--text));
+}
+.bubble.in .bubble-meta {
+  color: var(--bubble-in-meta, var(--text-secondary));
 }
 .bubble.out {
-  border-radius: 16px 16px 6px 16px;
+  border-radius: var(--bubble-r) var(--bubble-r) var(--bubble-r-tail) var(--bubble-r);
   background: var(--bubble-out);
   color: var(--bubble-out-text);
-}
-.shape-square .bubble {
-  border-radius: 6px;
 }
 .bubble.has-media {
   padding: 4px;
@@ -1330,6 +1406,14 @@ textarea::placeholder {
   color: var(--text);
   border-radius: 0;
   padding: 2px 0;
+}
+/* Plain lines cannot lie on a picture without something under them. */
+.flat.has-wall .bubble,
+.flat.has-wall .bubble.in,
+.flat.has-wall .bubble.out {
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--surface);
 }
 .flat .bubble-meta,
 .flat .bubble.out .bubble-meta {
@@ -2658,4 +2742,240 @@ textarea::placeholder {
   font-size: 0.75rem;
   font-weight: 500;
   cursor: pointer;
+}
+
+/* ===== Looks ===== */
+.look-preview {
+  position: relative;
+  flex: none;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-app);
+  border: 1px solid var(--line);
+}
+.look-preview > :not(.chat-wall) {
+  position: relative;
+}
+.look-grid {
+  flex: none;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.look-grid.three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.look-tile {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border: none;
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.look-tile.new {
+  min-height: 132px;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  color: var(--primary);
+  font-weight: 500;
+}
+.look-tile-text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 8px 12px;
+}
+.look-tile.small .look-tile-text {
+  padding: 6px 8px;
+  font-size: 0.75rem;
+}
+.look-mini {
+  position: relative;
+  overflow: hidden;
+  height: 84px;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 4px;
+  padding: 8px;
+  background: var(--bg);
+}
+.look-tile.small .look-mini {
+  height: 48px;
+  padding: 6px;
+}
+.look-mini.tiny {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  padding: 4px;
+  border-radius: var(--radius-sm);
+}
+.mini-in,
+.mini-out {
+  position: relative;
+  height: 16px;
+  border-radius: 8px;
+}
+.mini-in {
+  align-self: flex-start;
+  width: 60%;
+  background: var(--bubble-in, var(--surface));
+}
+.mini-out {
+  align-self: flex-end;
+  width: 68%;
+  background: var(--bubble-out);
+}
+.look-tile.small .mini-in {
+  display: none;
+}
+.look-tile.small .mini-out,
+.look-mini.tiny .mini-out {
+  height: 12px;
+}
+.color-dot {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border-radius: 12px;
+  outline: 1px solid var(--line);
+}
+.picker {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.wheel {
+  position: relative;
+  flex: none;
+  align-self: center;
+  width: 208px;
+  height: 208px;
+  border-radius: 50%;
+  background: radial-gradient(closest-side, #fff, rgba(255, 255, 255, 0)), conic-gradient(#f00, #ff0, #0f0, #0ff, #00f, #f0f, #f00);
+  touch-action: none;
+  cursor: crosshair;
+}
+.wheel-dark {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: #000;
+  pointer-events: none;
+}
+.wheel-thumb {
+  position: absolute;
+  width: 24px;
+  height: 24px;
+  margin: -12px 0 0 -12px;
+  border: 3px solid #fff;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+}
+.picker-line {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.picker-line input {
+  flex: 1;
+  min-width: 0;
+}
+.picker-code {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.picker-code .pill {
+  flex: 1;
+  min-width: 0;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 16px;
+  border-radius: 22px;
+  background: var(--surface);
+}
+.picker-code input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: right;
+}
+.picker-now {
+  flex: none;
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius-md);
+  outline: 1px solid var(--line);
+}
+.soft-colors {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+  gap: 6px;
+}
+.soft {
+  height: 36px;
+  min-width: 36px;
+  border: none;
+  border-radius: 18px;
+  cursor: pointer;
+}
+.soft.on {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+input[type='range'] {
+  accent-color: var(--primary);
+}
+.unseen {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+.shared-look {
+  width: 272px;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.shared-look .btn {
+  flex: 1;
+  min-width: 0;
+  min-height: 44px;
+  font-size: 0.875rem;
+}
+.plain-input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 1rem;
+  text-align: right;
 }

@@ -50,6 +50,78 @@ fn on_the_list(c: &ChatSummary, now: i64) -> bool {
     !c.prefs.archived && !c.prefs.locked && c.prefs.snoozed_until.is_none_or(|until| until <= now)
 }
 
+/// Swiping a chat does what was chosen for that side. It follows the finger, and only counts when
+/// it clearly went sideways, far enough.
+fn use_swipes() {
+    let core = use_core();
+    let settings = crate::components::use_settings();
+    use_future(move || {
+        let core = core.clone();
+        async move {
+            let mut swipes = document::eval(
+                "let row = null, x0 = 0, y0 = 0, dx = 0, sideways = false;\n\
+                 const on = (name, fn) => document.addEventListener(name, fn, { passive: true });\n\
+                 on('touchstart', e => {\n\
+                   const r = e.target.closest && e.target.closest('.chat-row');\n\
+                   if (!r || e.touches.length !== 1) return;\n\
+                   row = r; x0 = e.touches[0].clientX; y0 = e.touches[0].clientY; dx = 0; sideways = false;\n\
+                 });\n\
+                 on('touchmove', e => {\n\
+                   if (!row) return;\n\
+                   dx = e.touches[0].clientX - x0;\n\
+                   const dy = e.touches[0].clientY - y0;\n\
+                   if (!sideways && Math.abs(dx) > 12 && Math.abs(dx) > Math.abs(dy) * 1.5) sideways = true;\n\
+                   if (!sideways) { if (Math.abs(dy) > 12) row = null; return; }\n\
+                   row.style.transform = 'translateX(' + dx + 'px)';\n\
+                 });\n\
+                 on('touchend', () => {\n\
+                   if (!row) return;\n\
+                   const r = row; row = null; r.style.transform = '';\n\
+                   if (sideways && Math.abs(dx) > 80) dioxus.send([r.dataset.chat, dx < 0 ? 'left' : 'right']);\n\
+                 });\n\
+                 on('touchcancel', () => { if (row) row.style.transform = ''; row = null; });\n\
+                 await new Promise(() => {});",
+            );
+            while let Ok((chat, side)) = swipes.recv::<(String, String)>().await {
+                let s = settings.peek();
+                let action = if side == "left" {
+                    s.swipe_left.clone()
+                } else {
+                    s.swipe_right.clone()
+                };
+                drop(s);
+                swipe_action(&core, &chat, &action);
+            }
+        }
+    });
+}
+
+fn swipe_action(core: &whatsmine_core::Core, chat: &str, action: &str) {
+    let Some(summary) = core.chats().into_iter().find(|c| c.contact.id == chat) else {
+        return;
+    };
+    let mut prefs = summary.prefs.clone();
+    match action {
+        "archive" => {
+            prefs.archived = !prefs.archived;
+            core.set_chat_prefs(chat, &prefs);
+        }
+        "read" => {
+            if summary.unread > 0 || prefs.marked_unread {
+                core.mark_read(chat);
+                crate::notify::mark_read(chat);
+                prefs.marked_unread = false;
+            } else {
+                prefs.marked_unread = true;
+            }
+            core.set_chat_prefs(chat, &prefs);
+        }
+        "pin" => core.set_pinned(chat, !summary.contact.pinned),
+        "mute" => core.set_muted(chat, !summary.contact.muted),
+        _ => {}
+    }
+}
+
 /// The chat list, with what goes on top of it.
 #[component]
 pub fn ChatList(current: Option<String>) -> Element {
@@ -59,6 +131,7 @@ pub fn ChatList(current: Option<String>) -> Element {
     let nav = use_navigator();
     let mut filter = use_signal(|| Filter::All);
     let mut menu: Signal<Option<ChatSummary>> = use_signal(|| None);
+    use_swipes();
 
     let _ = rev();
     let all = core.chats();
@@ -402,6 +475,7 @@ fn ChatRow(chat: ChatSummary, current: bool, on_menu: EventHandler<ChatSummary>)
     rsx! {
         button {
             class: if current { "chat-row current" } else { "chat-row" },
+            "data-chat": "{c.id}",
             onclick: move |_| {
                 if long_fired() {
                     long_fired.set(false);

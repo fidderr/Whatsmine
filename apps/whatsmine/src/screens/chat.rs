@@ -248,7 +248,10 @@ fn ChatView(id: String) -> Element {
     let s = settings();
     let show_last_seen = s.share_last_seen;
     let prefs = core.chat_prefs(&id);
-    let style = look::chat_style(&s, &prefs);
+    // Its own look brings its own colours. Without one, it has what the app has.
+    let own_look = core.chat_look(&id);
+    let has_own_look = own_look.is_some();
+    let style = look::look_style(&own_look.unwrap_or_else(|| core.app_look()), has_own_look);
     let scheduled: Vec<Message> = core
         .scheduled()
         .into_iter()
@@ -474,7 +477,10 @@ fn ChatView(id: String) -> Element {
         t(&tr, "chat.scheduled_count").replace("{n}", &scheduled.len().to_string());
 
     rsx! {
-        div { class: "chat{style.class}",
+        div { class: "chat{style.class}", style: "{style.vars}",
+            if !style.wall.is_empty() {
+                div { class: "chat-wall", style: "{style.wall}" }
+            }
             header { class: "hdr s",
                 button { class: "ib back-btn", aria_label: "{t(&tr, \"common.back\")}", onclick: move |_| nav.go_back(),
                     Icon { name: IconName::ArrowLeft }
@@ -626,7 +632,7 @@ fn ChatView(id: String) -> Element {
                     Icon { name: IconName::ChevronRight, size: 16 }
                 }
             }
-            div { id: "msgs", class: "messages", style: "{style.messages}",
+            div { id: "msgs", class: "messages",
                 if has_more {
                     button {
                         class: "btn small-btn",

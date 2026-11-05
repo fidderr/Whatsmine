@@ -133,13 +133,23 @@ pub fn system_dark() -> bool {
     }
 }
 
-/// Whether a saved theme comes out dark right now.
-pub fn is_dark(theme: &str, system_dark: bool) -> bool {
-    match theme {
-        "light" => false,
-        "dark" => true,
-        _ => system_dark,
+/// Whether a look comes out dark right now.
+pub fn is_dark(look: &whatsmine_core::look::Look, system_dark: bool) -> bool {
+    use whatsmine_core::look::{Base, palette};
+    if look.base == Base::System && look.colors.is_empty() {
+        return system_dark;
     }
+    palette(look).dark
+}
+
+/// The page's background as `0xAARRGGBB`.
+pub fn page_color(look: &whatsmine_core::look::Look, dark: bool) -> u32 {
+    use whatsmine_core::look::{Base, palette};
+    if look.base == Base::System && look.colors.is_empty() {
+        return background(dark);
+    }
+    let bg = palette(look).bg;
+    0xFF00_0000 | u32::from(bg.0) << 16 | u32::from(bg.1) << 8 | u32::from(bg.2)
 }
 
 /// The page's background as `0xAARRGGBB`: `--bg` in style.css.
@@ -152,23 +162,26 @@ pub fn background(dark: bool) -> u32 {
 pub fn start_background() -> (u8, u8, u8, u8) {
     #[cfg(target_os = "android")]
     crate::android::init_once();
-    let theme = crate::boot::core()
-        .map(|core| core.settings().theme)
-        .unwrap_or_default();
-    let [_, r, g, b] = background(is_dark(&theme, system_dark())).to_be_bytes();
+    let color = crate::boot::core()
+        .map(|core| {
+            let look = core.app_look();
+            page_color(&look, is_dark(&look, system_dark()))
+        })
+        .unwrap_or_else(|_| background(system_dark()));
+    let [_, r, g, b] = color.to_be_bytes();
     (r, g, b, 255)
 }
 
 /// The system bars go with the page: its colour where the app does not draw under them (up to
 /// Android 14), and icons that show on it.
-pub fn set_system_bars(dark: bool) {
+pub fn set_system_bars(dark: bool, color: u32) {
     #[cfg(target_os = "android")]
     {
         mobile_sentinel::display::set_light_system_bars(!dark);
-        mobile_sentinel::display::set_system_bar_color(background(dark));
+        mobile_sentinel::display::set_system_bar_color(color);
     }
     #[cfg(not(target_os = "android"))]
-    let _ = dark;
+    let _ = (dark, color);
 }
 
 /// A test run on this PC (see `debug_hooks`): out of the user's way. No window that takes the
@@ -209,11 +222,26 @@ mod tests {
 
     #[test]
     fn saved_theme_decides_unless_it_follows_the_system() {
-        assert!(!is_dark("light", true));
-        assert!(is_dark("dark", false));
-        assert!(is_dark("system", true));
-        assert!(!is_dark("system", false));
-        assert!(is_dark("", true));
+        use whatsmine_core::look::{Base, Colors, Look, Rgb};
+        let base = |base| Look {
+            base,
+            ..Look::default()
+        };
+        assert!(!is_dark(&base(Base::Light), true));
+        assert!(is_dark(&base(Base::Dark), false));
+        assert!(is_dark(&base(Base::System), true));
+        assert!(!is_dark(&base(Base::System), false));
+        // A look of someone's own is what its background makes it.
+        let own = Look {
+            base: Base::Dark,
+            colors: Colors {
+                background: Some(Rgb::new(0xfb_e0_cf)),
+                ..Colors::default()
+            },
+            ..Look::default()
+        };
+        assert!(!is_dark(&own, true));
+        assert_eq!(page_color(&own, false), 0xFFFB_E0CF);
     }
 
     /// The window's first colour has to be the page's, or it flashes.

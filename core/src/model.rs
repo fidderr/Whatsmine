@@ -274,8 +274,10 @@ pub struct Settings {
     pub share_last_seen: bool,
     /// Send typing indicators (and show the contact's).
     pub typing_indicators: bool,
-    /// UI theme: "system", "dark", "light", "black", "colorblind" or "colorblind-light".
-    pub theme: String,
+    /// How the app looks: a ready-made look's key, or the id of one of theirs.
+    pub app_look: String,
+    /// How chats look that have no look of their own. Empty: the same as the app.
+    pub chat_look: String,
     /// UI language code, for example "en".
     pub locale: String,
     /// Extra relay URLs on top of the defaults.
@@ -303,8 +305,6 @@ pub struct Settings {
     pub auto_download_wifi_mb: u64,
     /// The same on mobile data.
     pub auto_download_mobile_mb: u64,
-    /// "" for the theme's own, or "teal", "violet", "pink", "amber", "white".
-    pub accent: String,
     /// "small", "normal", "large" or "huge".
     pub text_size: String,
     /// "roomy", "normal", "compact" or "big" for the chat list.
@@ -323,12 +323,13 @@ pub struct Settings {
     pub incognito_keyboard: bool,
     /// What a new chat starts with. 0 means off.
     pub disappear_default_ms: i64,
-    /// How all chats look, unless one has its own look.
-    pub wallpaper: String,
-    pub wallpaper_dim: u8,
-    pub bubble_color: String,
-    pub bubble_square: bool,
-    pub flat_layout: bool,
+    /// Colours picked lately, the newest first.
+    pub recent_colors: Vec<crate::look::Rgb>,
+    /// The tabs in the order someone wants them. Empty: as they come.
+    pub tab_order: Vec<String>,
+    /// What swiping a chat does: "archive", "read", "pin", "mute", "hide" or "" for nothing.
+    pub swipe_left: String,
+    pub swipe_right: String,
     /// The reactions offered first.
     pub reactions: Vec<String>,
     /// Texts to send with one tap.
@@ -349,7 +350,8 @@ impl Default for Settings {
             read_receipts: true,
             share_last_seen: true,
             typing_indicators: true,
-            theme: "system".into(),
+            app_look: "system".into(),
+            chat_look: String::new(),
             locale: "en".into(),
             extra_relays: Vec::new(),
             avatar: None,
@@ -363,7 +365,6 @@ impl Default for Settings {
             keep_trying_days: 7,
             auto_download_wifi_mb: 2048,
             auto_download_mobile_mb: 16,
-            accent: String::new(),
             text_size: "normal".into(),
             density: "normal".into(),
             quiet_requests: false,
@@ -373,11 +374,10 @@ impl Default for Settings {
             block_screenshots: false,
             incognito_keyboard: false,
             disappear_default_ms: 0,
-            wallpaper: String::new(),
-            wallpaper_dim: 0,
-            bubble_color: String::new(),
-            bubble_square: false,
-            flat_layout: false,
+            recent_colors: Vec::new(),
+            tab_order: Vec::new(),
+            swipe_left: "archive".into(),
+            swipe_right: "read".into(),
             reactions: ["👍", "❤️", "😂", "😮", "😢", "🙏"]
                 .map(str::to_owned)
                 .to_vec(),

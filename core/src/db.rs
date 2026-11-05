@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
+use crate::look::Look;
 use crate::model::{
     Attachment, ChatSummary, Contact, ContactKind, ContactState, Message, MessageStatus, Millis,
     Settings, TransferState, now_ms,
@@ -18,6 +19,9 @@ use crate::rich::{CallRecord, ChatPrefs, MessageExtra};
 use crate::vault::Vault;
 
 const CURRENT_VERSION: u32 = 5;
+
+/// How much of a look's photo goes in one part: with what surrounds it, this fits a frame.
+pub const LOOK_PHOTO_PART: usize = 96 * 1024;
 
 /// The clean start of this generation removed everything older, so there is one schema. Sealed
 /// with the vault: names, message text, attachment details, drafts, settings, keys.
@@ -137,6 +141,18 @@ CREATE TABLE IF NOT EXISTS contact_keys (
     contact_id TEXT PRIMARY KEY REFERENCES contacts(id) ON DELETE CASCADE,
     sealed     BLOB NOT NULL
 );
+CREATE TABLE IF NOT EXISTS looks (
+    id     TEXT PRIMARY KEY,
+    at     INTEGER NOT NULL,
+    sealed BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS look_photos (
+    id     TEXT NOT NULL,
+    part   INTEGER NOT NULL,
+    parts  INTEGER NOT NULL,
+    sealed BLOB NOT NULL,
+    PRIMARY KEY (id, part)
+);
 CREATE TABLE IF NOT EXISTS invites (
     id         TEXT PRIMARY KEY,
     sealed     BLOB NOT NULL,
@@ -228,7 +244,7 @@ impl Database {
     /// Deletes every row and compacts the file so nothing lingers on disk.
     pub fn wipe(&self) -> rusqlite::Result<()> {
         self.lock().execute_batch(
-            "DELETE FROM sibling_out; DELETE FROM changes_out; DELETE FROM reminders; DELETE FROM chat_prefs; DELETE FROM calls; DELETE FROM tombstones; DELETE FROM secrets; DELETE FROM olm_sessions; DELETE FROM contact_keys; DELETE FROM invites; DELETE FROM seen_ids; DELETE FROM drafts; DELETE FROM group_acks; DELETE FROM messages; DELETE FROM group_members; DELETE FROM groups; DELETE FROM contacts;
+            "DELETE FROM look_photos; DELETE FROM looks; DELETE FROM sibling_out; DELETE FROM changes_out; DELETE FROM reminders; DELETE FROM chat_prefs; DELETE FROM calls; DELETE FROM tombstones; DELETE FROM secrets; DELETE FROM olm_sessions; DELETE FROM contact_keys; DELETE FROM invites; DELETE FROM seen_ids; DELETE FROM drafts; DELETE FROM group_acks; DELETE FROM messages; DELETE FROM group_members; DELETE FROM groups; DELETE FROM contacts;
              DELETE FROM settings; PRAGMA wal_checkpoint(TRUNCATE); VACUUM;",
         )
     }
@@ -760,6 +776,110 @@ impl Database {
                     .seal(&serde_json::to_vec(prefs).expect("prefs serialize"))
             ],
         );
+    }
+
+    // ---- looks ----
+
+    pub fn looks(&self) -> Vec<Look> {
+        let conn = self.lock();
+        let Ok(mut stmt) = conn.prepare("SELECT sealed FROM looks ORDER BY at, id") else {
+            return Vec::new();
+        };
+        stmt.query_map([], |r| r.get::<_, Vec<u8>>(0))
+            .map(|rows| {
+                rows.flatten()
+                    .filter_map(|sealed| self.vault.open(&sealed))
+                    .filter_map(|json| serde_json::from_slice(&json).ok())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn look(&self, id: &str) -> Option<Look> {
+        let sealed: Vec<u8> = self
+            .lock()
+            .query_row("SELECT sealed FROM looks WHERE id = ?1", params![id], |r| {
+                r.get(0)
+            })
+            .optional()
+            .ok()
+            .flatten()?;
+        serde_json::from_slice(&self.vault.open(&sealed)?).ok()
+    }
+
+    pub fn save_look(&self, look: &Look) {
+        let _ = self.lock().execute(
+            "INSERT INTO looks (id, at, sealed) VALUES (?1, ?2, ?3)
+             ON CONFLICT(id) DO UPDATE SET sealed = excluded.sealed",
+            params![
+                look.id,
+                now_ms(),
+                self.vault
+                    .seal(&serde_json::to_vec(look).expect("a look serializes"))
+            ],
+        );
+    }
+
+    pub fn delete_look(&self, id: &str) {
+        let _ = self
+            .lock()
+            .execute("DELETE FROM looks WHERE id = ?1", params![id]);
+    }
+
+    /// What the other device has: these and no others.
+    pub fn replace_looks(&self, looks: &[Look]) {
+        let keep: std::collections::HashSet<&str> = looks.iter().map(|l| l.id.as_str()).collect();
+        for old in self.looks() {
+            if !keep.contains(old.id.as_str()) {
+                self.delete_look(&old.id);
+            }
+        }
+        for look in looks {
+            self.save_look(&look.clone().in_bounds());
+        }
+    }
+
+    /// A photo goes in parts, because that is how it reaches another device.
+    pub fn set_look_photo(&self, id: &str, bytes: &[u8]) {
+        let chunks: Vec<&[u8]> = bytes.chunks(LOOK_PHOTO_PART).collect();
+        for (part, chunk) in chunks.iter().enumerate() {
+            self.set_look_photo_part(id, part as u32, chunks.len() as u32, chunk);
+        }
+    }
+
+    pub fn set_look_photo_part(&self, id: &str, part: u32, parts: u32, bytes: &[u8]) {
+        let _ = self.lock().execute(
+            "INSERT OR REPLACE INTO look_photos (id, part, parts, sealed) VALUES (?1, ?2, ?3, ?4)",
+            params![id, part, parts, self.vault.seal(bytes)],
+        );
+    }
+
+    /// The parts of a photo, if all of them are here.
+    pub fn look_photo_parts(&self, id: &str) -> Option<Vec<Vec<u8>>> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare("SELECT parts, sealed FROM look_photos WHERE id = ?1 ORDER BY part")
+            .ok()?;
+        let rows: Vec<(u32, Vec<u8>)> = stmt
+            .query_map(params![id], |r| Ok((r.get(0)?, r.get(1)?)))
+            .ok()?
+            .flatten()
+            .collect();
+        let parts = rows.first()?.0 as usize;
+        if rows.len() != parts {
+            return None;
+        }
+        rows.iter().map(|(_, s)| self.vault.open(s)).collect()
+    }
+
+    pub fn look_photo(&self, id: &str) -> Option<Vec<u8>> {
+        Some(self.look_photo_parts(id)?.concat())
+    }
+
+    pub fn delete_look_photo(&self, id: &str) {
+        let _ = self
+            .lock()
+            .execute("DELETE FROM look_photos WHERE id = ?1", params![id]);
     }
 
     /// Messages waiting for their moment, soonest first.

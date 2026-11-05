@@ -1075,6 +1075,21 @@ impl Engine {
                     emit(&self.events, CoreEvent::ContactsChanged);
                 }
             }
+            SyncEvent::Looks(looks) => {
+                self.db.replace_looks(&looks);
+                emit(&self.events, CoreEvent::ContactsChanged);
+            }
+            SyncEvent::LookPhoto {
+                id,
+                part,
+                parts,
+                bytes,
+            } => {
+                if let Ok(bytes) = data_encoding::BASE64.decode(bytes.as_bytes()) {
+                    self.db.set_look_photo_part(&id, part, parts, &bytes);
+                    emit(&self.events, CoreEvent::ContactsChanged);
+                }
+            }
             SyncEvent::Remove => {
                 self.this_device.linked = false;
                 self.linked

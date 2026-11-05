@@ -232,6 +232,83 @@ pub fn serve_avatar(core: &Core, path: &str) -> Served {
     }
 }
 
+/// A look's photo. It lies sealed in the database, and comes from there.
+pub fn serve_look_photo(core: &Core, path: &str) -> Served {
+    let id = path
+        .trim_start_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or("");
+    match core.look_photo(id) {
+        Some(body) => Served {
+            status: 200,
+            headers: vec![
+                ("Content-Type", "image/jpeg".to_string()),
+                ("X-Content-Type-Options", "nosniff".to_string()),
+                ("Cache-Control", "private, max-age=86400".to_string()),
+            ],
+            body,
+        },
+        None => Served::empty(404),
+    }
+}
+
+/// The fonts that come with the app, by name. Nothing else can be asked for.
+fn bundled_font(key: &str) -> Option<&'static [u8]> {
+    const FONTS: &[(&str, &[u8])] = &[
+        ("inter", include_bytes!("../assets/fonts/inter.woff2")),
+        ("atkinson", include_bytes!("../assets/fonts/atkinson.woff2")),
+        ("lexend", include_bytes!("../assets/fonts/lexend.woff2")),
+        ("nunito", include_bytes!("../assets/fonts/nunito.woff2")),
+        ("lora", include_bytes!("../assets/fonts/lora.woff2")),
+        (
+            "jetbrains",
+            include_bytes!("../assets/fonts/jetbrains.woff2"),
+        ),
+        ("caveat", include_bytes!("../assets/fonts/caveat.woff2")),
+        (
+            "opendyslexic",
+            include_bytes!("../assets/fonts/opendyslexic.woff2"),
+        ),
+        (
+            "opendyslexic-bold",
+            include_bytes!("../assets/fonts/opendyslexic-bold.woff2"),
+        ),
+    ];
+    FONTS.iter().find(|(k, _)| *k == key).map(|(_, b)| *b)
+}
+
+/// A font that came with the app, or one someone added: the WebView checks it before it uses it.
+pub fn serve_font(core: &Core, path: &str) -> Served {
+    let key = path
+        .trim_start_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or("");
+    let (body, mime) = if let Some(id) = key.strip_prefix("own-") {
+        let Some(file) = core.own_font_path(id) else {
+            return Served::empty(404);
+        };
+        let Ok(body) = std::fs::read(file) else {
+            return Served::empty(404);
+        };
+        (body, "font/ttf")
+    } else if let Some(body) = bundled_font(key) {
+        (body.to_vec(), "font/woff2")
+    } else {
+        return Served::empty(404);
+    };
+    Served {
+        status: 200,
+        headers: vec![
+            ("Content-Type", mime.to_string()),
+            ("X-Content-Type-Options", "nosniff".to_string()),
+            ("Cache-Control", "private, max-age=86400".to_string()),
+        ],
+        body,
+    }
+}
+
 /// Stores an upload from the in-app camera under `<media>/captures/`.
 pub fn store_capture(core: &Core, path: &str, method: &str, body: &[u8]) -> Served {
     if method != "POST" {
@@ -278,6 +355,14 @@ pub fn use_media_server(core: Core) {
             reply(responder, serve_media(&c, req.uri().path(), range));
         });
         let c = core.clone();
+        host::use_asset_handler("look-photo", move |req, responder| {
+            reply(responder, serve_look_photo(&c, req.uri().path()));
+        });
+        let c = core.clone();
+        host::use_asset_handler("font", move |req, responder| {
+            reply(responder, serve_font(&c, req.uri().path()));
+        });
+        let c = core.clone();
         host::use_asset_handler("avatar", move |req, responder| {
             reply(responder, serve_avatar(&c, req.uri().path()));
         });
@@ -293,6 +378,16 @@ pub fn use_media_server(core: Core) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_font_is_there_and_nothing_else_can_be_asked_for() {
+        for font in whatsmine_core::look::Font::ALL {
+            let bytes = bundled_font(font.key()).unwrap_or_else(|| panic!("{}", font.key()));
+            assert!(bytes.starts_with(b"wOF2"), "{}", font.key());
+        }
+        assert!(bundled_font("../../secret").is_none());
+        assert!(bundled_font("").is_none());
+    }
 
     #[test]
     fn range_parsing() {

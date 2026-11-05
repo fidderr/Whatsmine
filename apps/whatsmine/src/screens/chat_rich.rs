@@ -25,6 +25,16 @@ pub enum ComposeKind {
 #[component]
 pub fn RichView(message_id: String, rich: Rich) -> Element {
     match rich {
+        Rich::Look(look) => {
+            let core = use_core();
+            let m = core.message(&message_id);
+            let (outgoing, chat) = m
+                .map(|m| (m.outgoing, m.contact_id))
+                .unwrap_or((true, String::new()));
+            rsx! {
+                crate::screens::looks::SharedLookCard { message_id, look: *look, outgoing, chat }
+            }
+        }
         Rich::Poll {
             question,
             options,

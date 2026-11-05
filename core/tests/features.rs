@@ -288,6 +288,132 @@ async fn a_hidden_chat_shows_nowhere_until_asked_for() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn looks_are_kept_used_per_chat_and_shared_as_a_copy() {
+    use whatsmine_core::look::{Background, Base, Colors, Look, Rgb, palette};
+
+    let p = pair().await;
+    // Nothing is chosen: the app's look everywhere.
+    assert_eq!(p.a.app_look().id, "system");
+    assert_eq!(p.a.chat_look(&p.kb), None);
+
+    // One of her own, for the app.
+    let sage = Look {
+        id: p.a.new_look_id(),
+        name: "Soft sage".into(),
+        base: Base::Light,
+        colors: Colors {
+            my_bubble: Some(Rgb::new(0xa9_c4_a0)),
+            ..Colors::default()
+        },
+        background: Background::Gradient {
+            from: Rgb::new(0x10_20_30),
+            to: Rgb::new(0x30_40_50),
+            angle: 160,
+        },
+        ..Look::default()
+    };
+    p.a.save_look(&sage).unwrap();
+    assert_eq!(p.a.looks().len(), 1);
+    assert!(
+        p.a.save_look(&Look::ready_made()[1]).is_err(),
+        "not over a ready-made one"
+    );
+
+    // The default for chats, and one chat with its own.
+    let mut s = p.a.settings();
+    s.chat_look = sage.id.clone();
+    p.a.save_settings(&s).unwrap();
+    assert_eq!(p.a.chat_look(&p.kb).unwrap().name, "Soft sage");
+    let mut prefs = p.a.chat_prefs(&p.kb);
+    prefs.look = "black".into();
+    p.a.set_chat_prefs(&p.kb, &prefs);
+    assert_eq!(p.a.chat_look(&p.kb).unwrap().base, Base::Black);
+    assert_eq!(p.a.chats_using_look("black"), 1);
+
+    // A copy goes to Bob, and nothing changes on his side until he takes it.
+    let sent = p.a.share_look(&p.kb, &sage).unwrap();
+    until("the look", || p.b.message(&sent.id).is_some()).await;
+    assert!(p.b.looks().is_empty());
+    assert_eq!(p.b.chat_look(&p.ka), None);
+    assert_eq!(p.b.app_look().id, "system");
+
+    let mine = p.b.keep_shared_look(&sent.id).unwrap();
+    assert_ne!(mine.id, sage.id, "a new id, whatever it was over there");
+    assert_eq!(mine.name, "Soft sage");
+    assert_eq!(mine.from_message.as_deref(), Some(sent.id.as_str()));
+    let again = p.b.keep_shared_look(&sent.id).unwrap();
+    assert_eq!(again.id, mine.id);
+    assert_eq!(p.b.looks().len(), 1);
+    assert_eq!(palette(&mine).bubble_out, Rgb::new(0xa9_c4_a0));
+
+    // Gone: whoever used it goes back.
+    p.a.delete_look(&sage.id);
+    assert_eq!(p.a.chat_look(&p.ka), None);
+    assert!(p.a.settings().chat_look.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_look_with_a_photo_takes_the_photo_along() {
+    use whatsmine_core::look::{Background, Look};
+
+    let p = pair().await;
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("lake.png");
+    image::RgbImage::from_pixel(32, 32, image::Rgb([10, 90, 120]))
+        .save(&src)
+        .unwrap();
+    let photo = p.a.store_look_photo(&src).unwrap();
+    assert!(p.a.look_photo(&photo).is_some());
+    let lake = Look {
+        id: p.a.new_look_id(),
+        name: "Lake".into(),
+        background: Background::Photo(photo),
+        ..Look::default()
+    };
+    p.a.save_look(&lake).unwrap();
+    let sent = p.a.share_look(&p.kb, &lake).unwrap();
+    until("the photo", || {
+        p.b.message(&sent.id).is_some_and(|m| {
+            m.attachment
+                .as_ref()
+                .is_some_and(|a| a.state == whatsmine_core::TransferState::Done)
+        })
+    })
+    .await;
+    let mine = p.b.keep_shared_look(&sent.id).unwrap();
+    let Background::Photo(got) = &mine.background else {
+        panic!("no photo: {mine:?}");
+    };
+    assert!(p.b.look_photo(got).is_some());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_font_file_stays_here_and_something_else_is_refused() {
+    use whatsmine_core::look::{FontChoice, Look};
+
+    let p = pair().await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("My Font.ttf");
+    std::fs::write(&file, b"MZ this is a program").unwrap();
+    assert!(p.a.add_own_font(&file, "My Font.ttf").is_err());
+    assert!(p.a.own_fonts().is_empty());
+    std::fs::write(&file, b"\0\x01\0\0 a font").unwrap();
+    let font = p.a.add_own_font(&file, "My Font.ttf").unwrap();
+    assert_eq!(font.name, "My Font");
+    assert!(p.a.own_font_path(&font.id).unwrap().exists());
+    let look = Look {
+        id: p.a.new_look_id(),
+        name: "Mine".into(),
+        message_font: FontChoice::Own(font.id),
+        ..Look::default()
+    };
+    let sent = p.a.share_look(&p.kb, &look).unwrap();
+    until("the look", || p.b.message(&sent.id).is_some()).await;
+    let got = p.b.keep_shared_look(&sent.id).unwrap();
+    assert_eq!(got.message_font, FontChoice::System);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_wrong_clock_does_not_put_a_file_in_the_future() {
     let p = pair().await;
     let future = now_ms() + 24 * 3600 * 1000;

@@ -95,7 +95,7 @@ pub fn seed_if_asked(core: &whatsmine_core::Core) {
     for word in contents.split_whitespace() {
         match word.split_once('=') {
             Some(("name", value)) => settings.display_name = value.to_owned(),
-            Some(("theme", value)) => settings.theme = value.to_owned(),
+            Some(("theme", value)) => settings.app_look = value.to_owned(),
             Some(("locale", value)) => settings.locale = value.to_owned(),
             None if word == "demo" => {
                 if let Err(e) = core.seed_demo() {

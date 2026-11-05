@@ -76,6 +76,14 @@ pub enum SyncEvent {
     Location([u8; 32]),
     Name(String),
     Folders(Vec<Folder>),
+    Looks(Vec<crate::look::Look>),
+    /// One part of a look's photo, as text: small enough for one frame.
+    LookPhoto {
+        id: String,
+        part: u32,
+        parts: u32,
+        bytes: String,
+    },
     /// This device is to stop being you.
     Remove,
 }
@@ -126,6 +134,8 @@ struct Seen {
     location: [u8; 32],
     name: String,
     folders: [u8; 32],
+    looks: [u8; 32],
+    photos: HashSet<String>,
 }
 
 fn hash_of<T: Serialize>(value: &T) -> [u8; 32] {
@@ -224,6 +234,34 @@ fn look(db: &Database, seen: &mut Seen, first: bool) -> Vec<SyncEvent> {
             out.push(SyncEvent::Folders(folders));
         }
         seen.folders = hash;
+    }
+    let looks = db.looks();
+    let hash = hash_of(&looks);
+    if seen.looks != hash {
+        if !first {
+            out.push(SyncEvent::Looks(looks.clone()));
+        }
+        seen.looks = hash;
+    }
+    for look in &looks {
+        let crate::look::Background::Photo(id) = &look.background else {
+            continue;
+        };
+        if !seen.photos.insert(id.clone()) || first {
+            continue;
+        }
+        let Some(parts) = db.look_photo_parts(id) else {
+            seen.photos.remove(id);
+            continue;
+        };
+        for (part, bytes) in parts.iter().enumerate() {
+            out.push(SyncEvent::LookPhoto {
+                id: id.clone(),
+                part: part as u32,
+                parts: parts.len() as u32,
+                bytes: data_encoding::BASE64.encode(bytes),
+            });
+        }
     }
     out
 }

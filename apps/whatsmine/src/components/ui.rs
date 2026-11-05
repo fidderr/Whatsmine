@@ -238,29 +238,3 @@ pub fn Notice(
         },
     }
 }
-
-/// Colours to choose from, in a row.
-#[component]
-pub fn Swatches(
-    options: Vec<(String, String, String)>,
-    value: String,
-    on_change: EventHandler<String>,
-) -> Element {
-    rsx! {
-        div { class: "swatches",
-            for (key, color, label) in options {
-                button {
-                    key: "{key}",
-                    class: if key == value { "swatch on" } else { "swatch" },
-                    style: "background:{color}",
-                    aria_label: "{label}",
-                    aria_pressed: "{key == value}",
-                    onclick: move |_| on_change.call(key.clone()),
-                    if key == value {
-                        Icon { name: IconName::Check, size: 20 }
-                    }
-                }
-            }
-        }
-    }
-}

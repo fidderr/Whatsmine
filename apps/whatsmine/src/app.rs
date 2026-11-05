@@ -12,9 +12,9 @@ use crate::components::{Toast, ToastLevel, ToastMessage};
 use crate::i18n;
 use crate::screens::{
     AddContact, AddType, AppearanceScreen, Calls, Chat, ChatLook, Chats, ConnectionScreen,
-    ContactInfo, DevicesScreen, FoldersScreen, GroupInfoScreen, HelpScreen, NewGroup,
-    NotificationsScreen, People, PrivacyScreen, PublicAddress, Requests, SavedScreen, SearchScreen,
-    SettingsScreen, SharedMedia, SpeedScreen, Start, StorageScreen,
+    ContactInfo, DevicesScreen, FoldersScreen, GroupInfoScreen, HelpScreen, LookEdit, LooksScreen,
+    NewGroup, NotificationsScreen, People, PrivacyScreen, PublicAddress, Requests, SavedScreen,
+    SearchScreen, SettingsScreen, SharedMedia, SpeedScreen, Start, StorageScreen,
 };
 use crate::shell::Shell;
 
@@ -72,6 +72,10 @@ pub enum Route {
     NotificationsScreen {},
     #[route("/settings/appearance")]
     AppearanceScreen {},
+    #[route("/settings/looks")]
+    LooksScreen {},
+    #[route("/settings/looks/:id")]
+    LookEdit { id: String },
     #[route("/settings/connection")]
     ConnectionScreen {},
     #[route("/settings/speed")]
@@ -379,32 +383,51 @@ fn Main(core: AppCore) -> Element {
     });
 
     let s = settings.read();
-    let theme_class = match s.theme.as_str() {
-        "light" => "theme-light",
-        "dark" => "theme-dark",
-        "black" => "theme-black",
-        "colorblind" => "theme-colorblind",
-        "colorblind-light" => "theme-colorblind-light",
-        _ => "theme-system",
-    };
     let density_class = match s.density.as_str() {
         "roomy" => "density-roomy",
         "compact" => "density-compact",
         "big" => "density-big",
         _ => "",
     };
-    let accent = crate::look::accent_style(&s.accent);
     let onboarded = s.onboarded;
     let locked_app = s.app_lock;
     let text_size = s.text_size.clone();
     drop(s);
-    // Text follows the size chosen: everything is in rem.
-    use_effect(use_reactive!(|text_size| {
+    // How the app looks: when it is chosen, and when the look itself was changed.
+    let look_core = core.0.clone();
+    let app_look = use_memo(move || {
+        let _ = settings.read().app_look.len();
+        let _ = rev();
+        look_core.app_look()
+    });
+    let look = app_look();
+    let theme_class = crate::look::theme_class(look.base);
+    let look_style = crate::look::look_style(&look, false);
+    let app_font = look.app_font.clone();
+    // Text follows the size chosen, and the font: everything is in rem.
+    use_effect(use_reactive!(|text_size, app_font| {
         document::eval(&format!(
-            "document.documentElement.style.fontSize = '{}px';",
-            crate::look::root_font_px(&text_size)
+            "document.documentElement.style.fontSize = '{:.2}px';",
+            crate::look::root_font_px(&text_size, &app_font)
         ));
     }));
+    // Fonts someone added themselves.
+    let fonts_core = core.0.clone();
+    let own_fonts = use_memo(move || {
+        let _ = rev();
+        fonts_core
+            .own_fonts()
+            .iter()
+            .map(|f| {
+                let id: String = f
+                    .id
+                    .chars()
+                    .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+                    .collect();
+                format!("@font-face{{font-family:'wm-own-{id}';src:url(/font/own-{id});font-display:swap}}")
+            })
+            .collect::<String>()
+    });
     // System bars and keyboard: how far they overlap us (rotation and window changes alter it),
     // and the bars' colour.
     let mut safe_area = use_signal(crate::platform::safe_area_style);
@@ -437,8 +460,9 @@ fn Main(core: AppCore) -> Element {
             }
         });
         use_effect(move || {
-            let dark = crate::platform::is_dark(&settings.read().theme, *system_dark.read());
-            crate::platform::set_system_bars(dark);
+            let look = app_look();
+            let dark = crate::platform::is_dark(&look, *system_dark.read());
+            crate::platform::set_system_bars(dark, crate::platform::page_color(&look, dark));
         });
     }
     #[cfg(not(target_os = "android"))]
@@ -455,11 +479,12 @@ fn Main(core: AppCore) -> Element {
 
     rsx! {
         style { "{STYLESHEET}" }
+        style { "{own_fonts}" }
         document::Meta {
             name: "viewport",
             content: "width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content",
         }
-        div { class: "app-root {theme_class} {density_class}", style: "{safe_area.read()}{accent}",
+        div { class: "app-root {theme_class} {density_class}", style: "{safe_area.read()}{look_style.vars}",
             div { class: "status-bar-bg" }
             if onboarded {
                 Router::<Route> {}

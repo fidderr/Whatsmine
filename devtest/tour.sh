@@ -317,6 +317,80 @@ else
     skip
 fi
 
+scenario looks
+if wanted looks; then
+    tap tab-settings
+    on_screen '[data-t="appearance"]' 6
+    tap appearance 0 0.3
+    picture appearance_screen
+    if tap looks 0 0.3 && on_screen '[data-t="look-new"]' 6; then
+        look_through looks
+        tap look-tile 0 0.3 && picture look_actions
+        if tap look-change 0 0.4 && on_screen '[data-t="look-save"]' 6; then
+            look_through look_edit
+            tap c-my-bubble 0 0.3
+            on_screen '[data-t="color-wheel"]' 6
+            look_through look_color
+            tap soft-peach-1 0 0.2
+            picture look_color_chosen
+            tap color-done 0 0.3
+            tap look-fonts 0 0.3 && look_through look_fonts
+            press_back
+            sleep 0.2
+            tap look-background 0 0.3 && look_through look_background
+            press_back
+            sleep 0.2
+            tap look-shapes 0 0.3 && look_through look_shapes
+            press_back
+            sleep 0.2
+            tap look-save 0 0.4
+            on_screen '[data-t="look-new"]' 6 && pass || fail "the look was not saved"
+        else
+            fail "no look editor"
+        fi
+        press_back_or_up
+    else
+        fail "no looks"
+    fi
+    press_back_or_up
+else
+    skip
+fi
+
+scenario looks_used
+if wanted looks; then
+    tap tab-settings
+    on_screen '[data-t="appearance"]' 6
+    tap appearance 0 0.3
+    tap looks 0 0.3
+    on_screen '[data-t="look-new"]' 6
+    tap look-tile 1 0.3
+    tap look-use-app 0 0.5
+    picture look_used_for_app
+    press_back_or_up
+    press_back_or_up
+    # A chat with a look of its own, and a look someone sent.
+    tap tab-chats 0 0.4
+    chat_with Lieke
+    picture chat_with_own_look
+    press_back_or_up
+    chat_with Noor
+    picture chat_with_shared_look
+    press_back_or_up
+    # And back, for what comes after.
+    tap tab-settings 0 0.3
+    tap appearance 0 0.3
+    tap looks 0 0.3
+    on_screen '[data-t="look-new"]' 6
+    tap look-tile 3 0.3
+    tap look-use-app 0 0.5
+    press_back_or_up
+    press_back_or_up
+    pass
+else
+    skip
+fi
+
 scenario devices
 if wanted settings; then
     tap tab-settings

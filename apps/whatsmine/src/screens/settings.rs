@@ -5,13 +5,11 @@ use whatsmine_core::power::SpeedMode;
 use crate::app::{Net, Rev, Route, ToastSig, Translations, t, toast, use_core, use_tr};
 use crate::components::{
     Avatar, BottomNav, CameraMode, CameraOverlay, Chips, ConfirmDialog, Header, Icon, IconName,
-    Notice, Row, Sheet, SheetItem, Swatches, SwitchRow, Tab, Title, ToastLevel, change,
-    use_settings,
+    Notice, Row, Sheet, SheetItem, SwitchRow, Tab, Title, ToastLevel, change, use_settings,
 };
 use crate::health;
 use crate::i18n;
 use crate::js;
-use crate::look;
 use crate::media::{self, Picked};
 use crate::screens::contact::{disappear_label, disappear_options};
 
@@ -234,20 +232,14 @@ fn ProfileSheet(on_close: EventHandler<()>) -> Element {
 pub fn AppearanceScreen() -> Element {
     let mut tr = use_tr();
     crate::js::use_scroll_top();
+    let core = use_core();
+    let rev = use_context::<Rev>().0;
     let settings = use_settings();
     let mut languages = use_signal(|| false);
+    let mut tabs = use_signal(|| false);
+    let mut swipes = use_signal(|| false);
+    let _ = rev();
     let s = settings();
-    let themes = opt(
-        &tr,
-        &[
-            ("system", "settings.theme_system"),
-            ("dark", "settings.theme_dark"),
-            ("light", "settings.theme_light"),
-            ("black", "settings.theme_black"),
-            ("colorblind", "settings.theme_colorblind"),
-            ("colorblind-light", "settings.theme_colorblind_light"),
-        ],
-    );
     let sizes = opt(
         &tr,
         &[
@@ -266,46 +258,46 @@ pub fn AppearanceScreen() -> Element {
             ("big", "look.big_photos"),
         ],
     );
-    let accents: Vec<(String, String, String)> = look::ACCENTS
-        .iter()
-        .map(|(k, color, name)| {
-            (
-                (*k).to_owned(),
-                (*color).to_owned(),
-                t(&tr, &format!("look.{name}")),
-            )
-        })
-        .collect();
     let language = i18n::LANGUAGES
         .iter()
         .find(|(c, _)| *c == s.locale)
         .map(|(_, n)| (*n).to_owned())
         .unwrap_or_default();
-    let style = look::chat_style(&s, &Default::default());
+    let app_look = core.app_look();
+    let app_name = crate::screens::looks::look_name(&tr, &app_look);
+    let chat_name = core
+        .look(&s.chat_look)
+        .map(|l| crate::screens::looks::look_name(&tr, &l))
+        .unwrap_or_else(|| t(&tr, "look.same_as_app"));
+    let shown = core.look(&s.chat_look).unwrap_or(app_look);
 
     rsx! {
         div { class: "screen no-nav",
             Header { title: t(&tr, "settings.appearance") }
-            div { class: "body{style.class}",
-                section { class: "panel", style: "background:var(--surface2);{style.messages}",
-                    div { class: "bubble-wrap in",
-                        div { class: "bubble in", "{t(&tr, \"look.sample_in\")}" }
+            div { class: "body",
+                crate::screens::looks::LookPreview { look: shown }
+                div { class: "group",
+                    Row {
+                        icon: IconName::Palette,
+                        title: t(&tr, "look.yours"),
+                        note: t(&tr, "look.yours_note"),
+                        to: Route::LooksScreen {},
+                        tag: "looks",
                     }
-                    div { class: "bubble-wrap out",
-                        div { class: "bubble out", "{t(&tr, \"look.sample_out\")}" }
+                    Row {
+                        title: t(&tr, "look.of_app"),
+                        value: app_name,
+                        small: true,
+                        to: Route::LooksScreen {},
+                        tag: "look-of-app",
                     }
-                }
-                h2 { class: "gt", "{t(&tr, \"settings.theme\")}" }
-                Chips {
-                    options: themes,
-                    value: s.theme.clone(),
-                    on_change: move |v: String| change(settings, |s| s.theme = v),
-                }
-                h2 { class: "gt", "{t(&tr, \"look.accent\")}" }
-                Swatches {
-                    options: accents,
-                    value: s.accent.clone(),
-                    on_change: move |v: String| change(settings, |s| s.accent = v),
+                    Row {
+                        title: t(&tr, "look.default_for_chats"),
+                        value: chat_name,
+                        small: true,
+                        to: Route::LooksScreen {},
+                        tag: "look-default",
+                    }
                 }
                 h2 { class: "gt", "{t(&tr, \"look.text_size\")}" }
                 Chips {
@@ -319,14 +311,23 @@ pub fn AppearanceScreen() -> Element {
                     value: s.density.clone(),
                     on_change: move |v: String| change(settings, |s| s.density = v),
                 }
-                h2 { class: "gt", "{t(&tr, \"look.all_chats\")}" }
                 div { class: "group",
                     Row {
-                        icon: IconName::Palette,
-                        title: t(&tr, "look.title"),
+                        icon: IconName::Sliders,
+                        title: t(&tr, "look.tab_order"),
                         small: true,
-                        to: Route::ChatLook { id: "all".to_owned() },
-                        tag: "look",
+                        tag: "tab-order",
+                        on_tap: move |_| tabs.set(true),
+                    }
+                    // A mouse does not swipe.
+                    if cfg!(target_os = "android") {
+                        Row {
+                            icon: IconName::Chat,
+                            title: t(&tr, "look.swipes"),
+                            small: true,
+                            tag: "swipes",
+                            on_tap: move |_| swipes.set(true),
+                        }
                     }
                     Row {
                         icon: IconName::Chat,
@@ -337,6 +338,12 @@ pub fn AppearanceScreen() -> Element {
                         on_tap: move |_| languages.set(true),
                     }
                 }
+            }
+            if tabs() {
+                TabOrderSheet { on_close: move |_| tabs.set(false) }
+            }
+            if swipes() {
+                SwipesSheet { on_close: move |_| swipes.set(false) }
             }
             if languages() {
                 Sheet { on_close: move |_| languages.set(false), title: t(&tr, "settings.language"),
@@ -361,123 +368,73 @@ pub fn AppearanceScreen() -> Element {
     }
 }
 
-/// How a chat looks, or every chat: `id` is "all" for the latter.
+/// The order of the tabs, one step at a time.
 #[component]
-pub fn ChatLook(id: String) -> Element {
+fn TabOrderSheet(on_close: EventHandler<()>) -> Element {
     let tr = use_tr();
-    crate::js::use_scroll_top();
-    let core = use_core();
     let settings = use_settings();
-    let every = id == "all";
-    let mut prefs = {
-        let (core, id) = (core.clone(), id.clone());
-        use_signal(move || core.chat_prefs(&id))
-    };
-    let s = settings();
-    let p = prefs();
-    let (wall, bubble, dim) = if every {
-        (s.wallpaper.clone(), s.bubble_color.clone(), s.wallpaper_dim)
-    } else {
-        (p.wallpaper.clone(), p.bubble_color.clone(), p.wallpaper_dim)
-    };
-    let style = look::chat_style(&s, &p);
-    let swatches: Vec<(String, String, String)> = look::ACCENTS
-        .iter()
-        .map(|(k, color, name)| {
-            (
-                (*k).to_owned(),
-                (*color).to_owned(),
-                t(&tr, &format!("look.{name}")),
-            )
-        })
-        .collect();
-    let shapes = opt(&tr, &[("round", "look.round"), ("square", "look.square")]);
-    let layouts = opt(&tr, &[("bubbles", "look.bubbles"), ("flat", "look.flat")]);
-
-    let set_look = {
-        let (core, id) = (core.clone(), id.clone());
-        move |f: &dyn Fn(&mut whatsmine_core::rich::ChatPrefs), g: &dyn Fn(&mut Settings)| {
-            if id == "all" {
-                let mut next = settings.peek().clone();
-                g(&mut next);
-                change(settings, |s| *s = next);
-            } else {
-                let mut next = prefs.peek().clone();
-                f(&mut next);
-                core.set_chat_prefs(&id, &next);
-                prefs.set(next);
-            }
-        }
-    };
-    let (mut for_dim, mut for_bubble) = (set_look.clone(), set_look.clone());
-
+    let order = crate::components::tab_keys(&settings().tab_order);
     rsx! {
-        div { class: "screen no-nav",
-            Header { title: t(&tr, "look.title") }
-            div { class: "body{style.class}",
-                section { class: "panel", style: "background:var(--surface2);{style.messages}",
-                    div { class: "bubble-wrap in",
-                        div { class: "bubble in", "{t(&tr, \"look.sample_in\")}" }
-                    }
-                    div { class: "bubble-wrap out",
-                        div { class: "bubble out", "{t(&tr, \"look.sample_out\")}" }
-                    }
-                }
-                h2 { class: "gt", "{t(&tr, \"look.wallpaper\")}" }
-                div { style: "display:flex;gap:6px",
-                    for (key, css) in look::WALLPAPERS.iter().copied() {
-                        {
-                            let on = wall == key;
-                            let mut set = set_look.clone();
-                            rsx! {
+        Sheet { on_close: move |_| on_close.call(()), title: t(&tr, "look.tab_order"), tag: "tab-order-sheet",
+            div { class: "sheet-list",
+                for (i, key) in order.iter().enumerate() {
+                    {
+                        let label = t(&tr, &format!("nav.{key}"));
+                        let first = i == 0;
+                        let list = order.clone();
+                        rsx! {
+                            div { key: "{key}", class: "sheet-item",
+                                span { class: "stack", "{label}" }
                                 button {
-                                    key: "{key}",
-                                    class: if on { "wall on" } else { "wall" },
-                                    style: if css.is_empty() { "background:var(--surface)".to_owned() } else { css.to_owned() },
-                                    aria_pressed: "{on}",
-                                    "data-t": "wall-{key}",
-                                    onclick: move |_| set(&|p| p.wallpaper = key.to_owned(), &|s| s.wallpaper = key.to_owned()),
-                                    if css.is_empty() {
-                                        "{t(&tr, \"look.none\")}"
-                                    }
+                                    class: "ib",
+                                    disabled: first,
+                                    aria_label: "{t(&tr, \"look.move_up\")}",
+                                    "data-t": "tab-up",
+                                    onclick: move |_| {
+                                        let mut next = list.clone();
+                                        next.swap(i, i - 1);
+                                        change(settings, |s| s.tab_order = next);
+                                    },
+                                    Icon { name: IconName::ChevronUp, size: 20 }
                                 }
                             }
                         }
                     }
                 }
-                label { class: "row sm",
-                    span { class: "sub b", "{t(&tr, \"look.dim\")}" }
-                    input {
-                        r#type: "range",
-                        min: "0",
-                        max: "90",
-                        value: "{dim}",
-                        style: "flex:1;min-width:0;accent-color:var(--primary)",
-                        oninput: move |e| {
-                            let v = e.value().parse::<u8>().unwrap_or(0);
-                            for_dim(&|p| p.wallpaper_dim = v, &|s| s.wallpaper_dim = v);
-                        },
-                    }
-                }
-                h2 { class: "gt", "{t(&tr, \"look.bubble_color\")}" }
-                Swatches {
-                    options: swatches,
-                    value: bubble,
-                    on_change: move |v: String| for_bubble(&|p| p.bubble_color = v.clone(), &|s| s.bubble_color = v.clone()),
-                }
-                if every {
-                    h2 { class: "gt", "{t(&tr, \"look.shape\")}" }
-                    Chips {
-                        options: shapes,
-                        value: if s.bubble_square { "square".to_owned() } else { "round".to_owned() },
-                        on_change: move |v: String| change(settings, |s| s.bubble_square = v == "square"),
-                    }
-                    Chips {
-                        options: layouts,
-                        value: if s.flat_layout { "flat".to_owned() } else { "bubbles".to_owned() },
-                        on_change: move |v: String| change(settings, |s| s.flat_layout = v == "flat"),
-                    }
-                }
+            }
+        }
+    }
+}
+
+/// What swiping a chat does.
+#[component]
+fn SwipesSheet(on_close: EventHandler<()>) -> Element {
+    let tr = use_tr();
+    let settings = use_settings();
+    let s = settings();
+    let actions = opt(
+        &tr,
+        &[
+            ("", "look.swipe_nothing"),
+            ("archive", "look.swipe_archive"),
+            ("read", "look.swipe_read"),
+            ("pin", "look.swipe_pin"),
+            ("mute", "look.swipe_mute"),
+        ],
+    );
+    rsx! {
+        Sheet { on_close: move |_| on_close.call(()), title: t(&tr, "look.swipes"), tag: "swipes-sheet",
+            h3 { class: "gt", "{t(&tr, \"look.swipe_left\")}" }
+            Chips {
+                options: actions.clone(),
+                value: s.swipe_left.clone(),
+                on_change: move |v: String| change(settings, |s| s.swipe_left = v),
+            }
+            h3 { class: "gt", "{t(&tr, \"look.swipe_right\")}" }
+            Chips {
+                options: actions,
+                value: s.swipe_right.clone(),
+                on_change: move |v: String| change(settings, |s| s.swipe_right = v),
             }
         }
     }

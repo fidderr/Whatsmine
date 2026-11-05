@@ -192,6 +192,58 @@ pub fn make_avatar(src: &Path) -> anyhow::Result<Vec<u8>> {
     Ok(out)
 }
 
+/// Biggest side of a chat background. Plenty for a phone or a PC, and it stays small.
+const WALLPAPER_SIDE: u32 = 1600;
+const MAX_WALLPAPER: usize = 900 * 1024;
+
+/// A picture as a chat background: upright, not too big, and with nothing in it but the picture.
+pub fn wallpaper_jpeg(src: &Path) -> anyhow::Result<Vec<u8>> {
+    use image::ImageDecoder;
+    let mut decoder = image::ImageReader::open(src)?
+        .with_guessed_format()?
+        .into_decoder()?;
+    let orientation = decoder
+        .orientation()
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
+    let mut img = image::DynamicImage::from_decoder(decoder)?;
+    img.apply_orientation(orientation);
+    if img.width() > WALLPAPER_SIDE || img.height() > WALLPAPER_SIDE {
+        img = img.resize(
+            WALLPAPER_SIDE,
+            WALLPAPER_SIDE,
+            image::imageops::FilterType::Triangle,
+        );
+    }
+    let rgb = img.to_rgb8();
+    let mut out = Vec::new();
+    for quality in [82, 70, 55, 40] {
+        out.clear();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality).encode_image(&rgb)?;
+        if out.len() <= MAX_WALLPAPER {
+            break;
+        }
+    }
+    Ok(out)
+}
+
+/// The biggest font file someone can add.
+const MAX_FONT: u64 = 10 * 1024 * 1024;
+
+/// What kind of font this file really is, going by its first bytes. An error if it is none, or
+/// too big.
+pub fn font_kind(src: &Path) -> anyhow::Result<&'static str> {
+    anyhow::ensure!(std::fs::metadata(src)?.len() <= MAX_FONT, "font_too_big");
+    let mut head = [0u8; 4];
+    std::fs::File::open(src)?.read_exact(&mut head)?;
+    match &head {
+        b"wOF2" => Ok("woff2"),
+        b"wOFF" => Ok("woff"),
+        b"OTTO" => Ok("otf"),
+        [0, 1, 0, 0] | b"true" => Ok("ttf"),
+        _ => anyhow::bail!("not_a_font"),
+    }
+}
+
 /// Pictures larger than this are sent as they are.
 const MAX_CLEAN: u64 = 64 * 1024 * 1024;
 
@@ -795,6 +847,44 @@ mod tests {
             u32::from_le_bytes(out[4..8].try_into().unwrap()) as usize,
             out.len() - 8
         );
+    }
+
+    #[test]
+    fn a_big_picture_becomes_a_small_background_without_anything_else_in_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("big.png");
+        image::RgbImage::from_fn(3000, 1000, |x, y| image::Rgb([x as u8, y as u8, 99]))
+            .save(&src)
+            .unwrap();
+        let bytes = wallpaper_jpeg(&src).unwrap();
+        assert!(bytes.len() <= MAX_WALLPAPER);
+        assert!(bytes.starts_with(&[0xff, 0xd8]));
+        let img = image::load_from_memory(&bytes).unwrap();
+        assert_eq!((img.width(), img.height()), (1600, 533));
+        let scan = scan_jpeg(&bytes).unwrap();
+        assert!(scan.orientation.is_none());
+        std::fs::write(&src, b"no picture at all").unwrap();
+        assert!(wallpaper_jpeg(&src).is_err());
+    }
+
+    #[test]
+    fn a_font_is_known_by_what_it_is_not_what_it_is_called() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("font.ttf");
+        for (head, kind) in [
+            (&b"wOF2xxxx"[..], "woff2"),
+            (b"wOFFxxxx", "woff"),
+            (b"OTTOxxxx", "otf"),
+            (b"\0\x01\0\0xxxx", "ttf"),
+            (b"truexxxx", "ttf"),
+        ] {
+            std::fs::write(&path, head).unwrap();
+            assert_eq!(font_kind(&path).unwrap(), kind);
+        }
+        std::fs::write(&path, b"MZ\x90\0 not a font").unwrap();
+        assert!(font_kind(&path).is_err());
+        std::fs::write(&path, b"ab").unwrap();
+        assert!(font_kind(&path).is_err());
     }
 
     #[test]

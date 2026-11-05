@@ -43,6 +43,8 @@ pub enum Rich {
     },
     /// Someone's invitation, to pass them on.
     ContactCard { name: String, invite: String },
+    /// A copy of a look. Nothing changes for anyone until they choose to use it.
+    Look(Box<crate::look::Look>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -124,6 +126,7 @@ impl Rich {
             Rich::Checklist { title, .. } | Rich::Plan { title, .. } => title,
             Rich::Place { label, .. } => label,
             Rich::ContactCard { name, .. } => name,
+            Rich::Look(look) => &look.name,
         }
     }
 }
@@ -277,9 +280,8 @@ pub struct ChatPrefs {
     pub snoozed_until: Option<Millis>,
     /// New messages disappear after this long.
     pub disappear_ms: Option<i64>,
-    pub wallpaper: String,
-    pub wallpaper_dim: u8,
-    pub bubble_color: String,
+    /// This chat's own look. Empty: what all chats have.
+    pub look: String,
     pub sound: String,
     /// Name and photo shown to this person instead of the usual ones.
     pub my_name: Option<String>,

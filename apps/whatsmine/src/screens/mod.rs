@@ -7,6 +7,7 @@ mod chats;
 mod contact;
 mod finding;
 mod group;
+pub mod looks;
 mod people;
 mod requests;
 pub mod settings;
@@ -20,10 +21,11 @@ pub use chats::{ChatList, Chats};
 pub use contact::ContactInfo;
 pub use finding::{FoldersScreen, SavedScreen, SearchScreen, SharedMedia};
 pub use group::{GroupInfoScreen, NewGroup};
+pub use looks::{ChatLook, LookEdit, LooksScreen};
 pub use people::People;
 pub use requests::Requests;
 pub use settings::{
-    AppearanceScreen, ChatLook, ConnectionScreen, DevicesScreen, HelpScreen, NotificationsScreen,
+    AppearanceScreen, ConnectionScreen, DevicesScreen, HelpScreen, NotificationsScreen,
     PrivacyScreen, SettingsScreen, SpeedScreen, StorageScreen,
 };
 pub use start::Start;

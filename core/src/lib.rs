@@ -22,6 +22,7 @@ pub mod groups;
 pub mod identity;
 pub mod knocks;
 pub mod location;
+pub mod look;
 pub mod model;
 pub mod paths;
 pub mod power;
@@ -50,10 +51,13 @@ pub use model::*;
 
 use db::Database;
 use engine::{Cmd, Engine, Shared};
+use look::{Look, OwnFont};
 use rich::{
     CallRecord, ChatPrefs, Folder, MessageChange, MessageExtra, Rich, RichChange, SearchHit,
     SearchIn,
 };
+
+const OWN_FONTS: &str = "own_fonts";
 
 /// Whether a message fits a search. `query` in lower case, and empty for all of the kind.
 fn message_fits(m: &Message, query: &str, within: SearchIn) -> bool {
@@ -501,6 +505,215 @@ impl Core {
         let mut chats = self.inner.db.chat_summaries();
         chats.retain(|c| !c.prefs.locked);
         chats
+    }
+
+    // ---- looks ----
+
+    /// The looks someone made, or got from someone.
+    pub fn looks(&self) -> Vec<Look> {
+        self.inner.db.looks()
+    }
+
+    /// A ready-made look, or one of theirs.
+    pub fn look(&self, id: &str) -> Option<Look> {
+        Look::ready_made()
+            .into_iter()
+            .find(|l| l.id == id)
+            .or_else(|| self.inner.db.look(id))
+    }
+
+    /// How the app looks.
+    pub fn app_look(&self) -> Look {
+        self.look(&self.settings().app_look)
+            .unwrap_or_else(|| Look::ready_made().swap_remove(0))
+    }
+
+    /// How a chat looks: its own, or else what all chats have. `None`: the same as the app.
+    pub fn chat_look(&self, chat: &str) -> Option<Look> {
+        let own = self.inner.db.chat_prefs(chat).look;
+        if !own.is_empty()
+            && let Some(look) = self.look(&own)
+        {
+            return Some(look);
+        }
+        self.look(&self.settings().chat_look)
+    }
+
+    pub fn new_look_id(&self) -> String {
+        uuid::Uuid::now_v7().to_string()
+    }
+
+    pub fn save_look(&self, look: &Look) -> anyhow::Result<()> {
+        ensure!(
+            self.inner.db.look(&look.id).is_some() || self.looks().len() < look::MAX_LOOKS,
+            "too_many_looks"
+        );
+        ensure!(
+            !Look::ready_made().iter().any(|l| l.id == look.id),
+            "ready_made"
+        );
+        self.inner.db.save_look(&look.clone().in_bounds());
+        self.emit(CoreEvent::ContactsChanged);
+        Ok(())
+    }
+
+    /// Whoever used it goes back to what they would have without it.
+    pub fn delete_look(&self, id: &str) {
+        let Some(look) = self.inner.db.look(id) else {
+            return;
+        };
+        let mut settings = self.settings();
+        if settings.app_look == id {
+            settings.app_look = "system".into();
+        }
+        if settings.chat_look == id {
+            settings.chat_look = String::new();
+        }
+        let _ = self.save_settings(&settings);
+        for chat in self.inner.db.chat_summaries() {
+            if chat.prefs.look == id {
+                let mut prefs = chat.prefs;
+                prefs.look = String::new();
+                self.inner.db.set_chat_prefs(&chat.contact.id, &prefs);
+            }
+        }
+        self.inner.db.delete_look(id);
+        if let look::Background::Photo(photo) = &look.background
+            && !self.looks().iter().any(|l| l.background == look.background)
+        {
+            self.inner.db.delete_look_photo(photo);
+        }
+        self.emit(CoreEvent::ContactsChanged);
+    }
+
+    /// How many chats have this as their own look.
+    pub fn chats_using_look(&self, id: &str) -> usize {
+        self.inner
+            .db
+            .chat_summaries()
+            .iter()
+            .filter(|c| c.prefs.look == id)
+            .count()
+    }
+
+    /// Turns a picture into a chat background, and gives its id. Takes a moment: not on the UI
+    /// thread.
+    pub fn store_look_photo(&self, src: &Path) -> anyhow::Result<String> {
+        let jpeg = files::wallpaper_jpeg(src)?;
+        let id = uuid::Uuid::now_v7().to_string();
+        self.inner.db.set_look_photo(&id, &jpeg);
+        Ok(id)
+    }
+
+    pub fn look_photo(&self, id: &str) -> Option<Vec<u8>> {
+        self.inner.db.look_photo(id)
+    }
+
+    /// Sends a copy of a look to a chat. A photo goes along as a file, so it takes the road and
+    /// the rules files have. Fonts of their own stay here.
+    pub fn share_look(&self, chat: &str, look: &Look) -> anyhow::Result<Message> {
+        let shared = look.for_sharing();
+        let rich = Rich::Look(Box::new(shared.clone()));
+        if let look::Background::Photo(id) = &look.background
+            && let Some(jpeg) = self.look_photo(id)
+        {
+            let tmp = self
+                .media_dir()
+                .join(format!("{}.look.tmp", uuid::Uuid::now_v7()));
+            std::fs::create_dir_all(self.media_dir())?;
+            std::fs::write(&tmp, jpeg)?;
+            return self.send_file_inner(
+                chat,
+                &tmp,
+                "look.jpg",
+                "image/jpeg",
+                &shared.name,
+                None,
+                true,
+                false,
+                Some(rich),
+            );
+        }
+        self.send_rich(chat, rich)
+    }
+
+    /// Makes a look that came in a message one of ours. Taking the same one twice gives the same
+    /// one. It gets a new id, whatever the sender's said.
+    pub fn keep_shared_look(&self, message_id: &str) -> anyhow::Result<Look> {
+        let m = self.inner.db.message(message_id).context("gone")?;
+        let Some(Rich::Look(sent)) = &m.extra.rich else {
+            bail!("no_look");
+        };
+        if let Some(have) = self
+            .looks()
+            .into_iter()
+            .find(|l| l.from_message.as_deref() == Some(message_id))
+        {
+            return Ok(have);
+        }
+        ensure!(self.looks().len() < look::MAX_LOOKS, "too_many_looks");
+        let who = m.sender.as_deref().unwrap_or(&m.contact_id);
+        let name = if m.outgoing {
+            self.settings().display_name
+        } else {
+            self.name_of(who)
+        };
+        let mut look = sent.from_someone(self.new_look_id(), &name, message_id);
+        if let Some(a) = &m.attachment
+            && let Some(path) = &a.path
+            && a.state == TransferState::Done
+        {
+            look.background = look::Background::Photo(self.store_look_photo(Path::new(path))?);
+        }
+        self.save_look(&look)?;
+        Ok(look)
+    }
+
+    /// Fonts someone added from a file. They stay on this device.
+    pub fn own_fonts(&self) -> Vec<OwnFont> {
+        self.inner
+            .db
+            .secret(OWN_FONTS)
+            .and_then(|json| serde_json::from_slice(&json).ok())
+            .unwrap_or_default()
+    }
+
+    /// Takes a font file: TrueType, OpenType or WOFF, up to 10 MB. The WebView checks the rest
+    /// before it uses one, and refuses what is broken.
+    pub fn add_own_font(&self, src: &Path, name: &str) -> anyhow::Result<OwnFont> {
+        let ext = files::font_kind(src)?;
+        let id = uuid::Uuid::now_v7().to_string();
+        let dest = self.font_dir().join(format!("{id}.{ext}"));
+        std::fs::create_dir_all(self.font_dir())?;
+        std::fs::copy(src, &dest)?;
+        let stem = Path::new(name)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let font = OwnFont {
+            id,
+            name: files::clean_file_name(&stem)
+                .chars()
+                .take(look::MAX_NAME)
+                .collect(),
+            ext: ext.to_owned(),
+        };
+        let mut fonts = self.own_fonts();
+        fonts.push(font.clone());
+        self.inner
+            .db
+            .set_secret(OWN_FONTS, &serde_json::to_vec(&fonts)?)?;
+        self.emit(CoreEvent::ContactsChanged);
+        Ok(font)
+    }
+
+    pub fn own_font_path(&self, id: &str) -> Option<PathBuf> {
+        let font = self.own_fonts().into_iter().find(|f| f.id == id)?;
+        Some(self.font_dir().join(format!("{}.{}", font.id, font.ext)))
+    }
+
+    fn font_dir(&self) -> PathBuf {
+        self.media_dir().join("fonts")
     }
 
     /// The chats that show nowhere until they are asked for.
@@ -1526,7 +1739,7 @@ impl Core {
         name: &str,
         mime: &str,
     ) -> anyhow::Result<Message> {
-        self.send_file_inner(contact_id, src, name, mime, "", None, false, true)
+        self.send_file_inner(contact_id, src, name, mime, "", None, false, true, None)
     }
 
     /// It was opened: nothing of the file stays here.
@@ -1571,6 +1784,7 @@ impl Core {
             duration_ms,
             take_ownership,
             false,
+            None,
         )
     }
 
@@ -1585,6 +1799,7 @@ impl Core {
         duration_ms: Option<u64>,
         take_ownership: bool,
         view_once: bool,
+        rich: Option<Rich>,
     ) -> anyhow::Result<Message> {
         let caption = caption.trim();
         ensure!(caption.len() <= protocol::MAX_TEXT, "too_long");
@@ -1638,6 +1853,7 @@ impl Core {
             extra: MessageExtra {
                 disappear_ms: self.inner.db.chat_prefs(contact_id).disappear_ms,
                 view_once,
+                rich,
                 ..MessageExtra::default()
             },
         };

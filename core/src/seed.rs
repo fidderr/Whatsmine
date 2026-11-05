@@ -3,6 +3,7 @@
 
 use iroh::SecretKey;
 
+use crate::look::{Background, Base, Colors, Look, Rgb};
 use crate::model::{
     Attachment, ContactKeys, ContactState, Message, MessageStatus, TransferState, Trust, now_ms,
 };
@@ -93,6 +94,44 @@ impl Core {
             );
         }
         person("Pushy Pete", ContactState::Blocked)?;
+        let sage = Look {
+            id: "seed-sage".into(),
+            name: "Soft sage".into(),
+            base: Base::Light,
+            colors: Colors {
+                accent: Some(Rgb::new(0x5f_7f_5a)),
+                my_bubble: Some(Rgb::new(0xa9_c4_a0)),
+                ..Colors::default()
+            },
+            background: Background::Color(Rgb::new(0xdc_e8_d6)),
+            ..Look::default()
+        };
+        let sea = Look {
+            id: "seed-sea".into(),
+            name: "Sea evening".into(),
+            base: Base::Dark,
+            colors: Colors {
+                my_bubble: Some(Rgb::new(0x8c_c9_c1)),
+                accent: Some(Rgb::new(0x8c_c9_c1)),
+                ..Colors::default()
+            },
+            background: Background::Gradient {
+                from: Rgb::new(0x1f_5a_4d),
+                to: Rgb::new(0x3f_35_56),
+                angle: 160,
+            },
+            ..Look::default()
+        };
+        db.save_look(&sage);
+        db.save_look(&sea);
+        db.set_chat_prefs(
+            &lieke,
+            &ChatPrefs {
+                favourite: true,
+                look: sea.id.clone(),
+                ..ChatPrefs::default()
+            },
+        );
 
         let add = |m: Message| db.insert_message(&m);
         add(message(
@@ -221,6 +260,19 @@ impl Core {
             "I'll bake it tonight",
             Delivered,
         ))?;
+        let mut peach = message(&noor, false, 12 * MINUTE, "Noor's peach", Read);
+        peach.extra.rich = Some(Rich::Look(Box::new(Look {
+            id: "their-peach".into(),
+            name: "Noor's peach".into(),
+            base: Base::Light,
+            colors: Colors {
+                background: Some(Rgb::new(0xfb_e0_cf)),
+                my_bubble: Some(Rgb::new(0xf2_b0_8e)),
+                ..Colors::default()
+            },
+            ..Look::default()
+        })));
+        add(peach)?;
         let mut poll = from(&sam, 9 * MINUTE, "Which evening works best?", true);
         poll.extra.rich = Some(Rich::Poll {
             question: "Which evening works best?".into(),

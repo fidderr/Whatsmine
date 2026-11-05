@@ -22,6 +22,7 @@ pub enum IconName {
     Key,
     Lock,
     ChevronDown,
+    ChevronUp,
     ChevronRight,
     Server,
     Paperclip,
@@ -143,6 +144,7 @@ pub fn Icon(name: IconName, #[props(default = 20)] size: u32) -> Element {
             "M5 11h14a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2z",
             "M7 11V7a5 5 0 0 1 10 0v4",
         ],
+        IconName::ChevronUp => &["m6 15 6-6 6 6"],
         IconName::ChevronDown => &["M6 9l6 6 6-6"],
         IconName::ChevronRight => &["M9 18l6-6-6-6"],
         IconName::Server => &[
