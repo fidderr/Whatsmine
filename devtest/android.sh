@@ -75,12 +75,16 @@ open_shells() {
     DEV_PID=$DEV_SH_PID
     open_app_shell
 }
-# Right after an install or a clear, run-as can refuse for a moment.
+# Right after an install or a clear, run-as can refuse for a moment: on a phone for several seconds.
 open_app_shell() {
     local try
-    for try in 1 2 3 4 5 6 7 8 9 10; do
+    for try in $(seq 1 30); do
         { coproc APP_SH { "$ADB" -s "$SERIAL" shell -T "run-as $PKG sh" 2>&1; }; } 2> /dev/null
-        exec 7>&"${APP_SH[1]}" 8<&"${APP_SH[0]}"
+        # A shell that ended at once (run-as refusing) has nothing to hold on to: try again.
+        if ! { exec 7>&"${APP_SH[1]}" 8<&"${APP_SH[0]}"; } 2> /dev/null; then
+            sleep 0.5
+            continue
+        fi
         APP_PID=$APP_SH_PID
         [ "$(ask "$APP_PID" 7 8 'echo ok' 2> /dev/null)" = ok ] && return 0
         kill "$APP_PID" 2> /dev/null

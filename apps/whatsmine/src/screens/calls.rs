@@ -85,7 +85,9 @@ fn CallRow(call: CallRecord) -> Element {
     } else if call.missed {
         t(&tr, "calls.no_answer").replace("{when}", &when)
     } else {
-        format!("{when}, {}", fmt::duration(call.duration_ms))
+        t(&tr, "calls.lasted")
+            .replace("{when}", &when)
+            .replace("{length}", &fmt::length(&tr, call.duration_ms))
     };
     let (open_id, call_id) = (call.contact_id.clone(), call.contact_id.clone());
     let video = call.video;

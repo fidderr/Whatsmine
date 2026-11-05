@@ -528,9 +528,13 @@ pub fn PrivacyScreen() -> Element {
                 .map(|c| c.display_name())
                 .unwrap_or_default();
             let line = format!(
-                "{name}: {}, {}",
-                crate::fmt::list_time(&tr, entry.from),
-                crate::fmt::duration((entry.to - entry.from).max(0) as u64)
+                "{name}: {}",
+                t(&tr, "calls.lasted")
+                    .replace("{when}", &crate::fmt::list_time(&tr, entry.from))
+                    .replace(
+                        "{length}",
+                        &crate::fmt::length(&tr, (entry.to - entry.from).max(0) as u64)
+                    )
             );
             (format!("{}-{}", entry.who, entry.from), line)
         })

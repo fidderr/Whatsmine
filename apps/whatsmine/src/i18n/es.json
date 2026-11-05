@@ -1002,5 +1002,9 @@
   "channel.follow": "Seguir",
   "channel.follow_failed": "No ha funcionado",
   "chat.once_get": "Una foto que se puede ver una vez. Toca para obtenerla",
-  "chat.err.own_chat": "Eso no se podría volver a abrir en tus notas"
+  "chat.err.own_chat": "Eso no se podría volver a abrir en tus notas",
+  "calls.lasted": "{when} · {length}",
+  "length.seconds": "{n} s",
+  "length.minutes": "{n} min",
+  "length.hours": "{h} h {m} min"
 }

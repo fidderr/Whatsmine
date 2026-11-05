@@ -127,9 +127,10 @@ if wanted chat; then
         sleep 0.3
         picture chat_typing
         tap attach 0 0.3 && picture chat_attach
+        # Send later is in that sheet, while there is text to send.
+        tap send-later 0 0.3 && picture send_later
         press_back
         sleep 0.2
-        tap send-later 0 0.2
         type_in '#composer' ''
         tap chat-more 0 0.3 && picture chat_more
         press_back
@@ -432,6 +433,9 @@ if wanted space; then
             look_through space
             tap space-add 0 0.3
             on_screen '[data-t="space-add-sheet"]' 4 && picture space_add
+            press_back
+            sleep 0.2
+            press_back_or_up
             pass
         else
             fail "no space"

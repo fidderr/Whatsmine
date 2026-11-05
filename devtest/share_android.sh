@@ -79,14 +79,15 @@ note "adding: $(a_core "add $LINK_W" | cut -c1-30)"
 has_request_w() { [ -n "$(w_core requests)" ]; }
 has_request_a() { [ -n "$(a_core requests)" ]; }
 online() { [ "$(a_core "online $KEY_W")" = true ]; }
-if wait_for 90 has_request_w; then
-    note "the window saw the request of the emulator"
+# Over the real DHT a request can take more than a minute: the app looks once a minute in front.
+if wait_for 150 has_request_w; then
+    note "the window saw the request of the device"
     w_core "accept $KEY_A" > /dev/null
 else
-    note "90 s and the window saw nothing: the other way around"
+    note "150 s and the window saw nothing: the other way around"
     note "adding: $(w_core "add $LINK_A" | cut -c1-30)"
-    if wait_for 120 has_request_a; then
-        note "the emulator saw the request of the window"
+    if wait_for 180 has_request_a; then
+        note "the device saw the request of the window"
         a_core "accept $KEY_W" > /dev/null
     else
         note "nobody saw anything"
@@ -128,6 +129,14 @@ fi
 adb_ shell am start -n "$PKG/$ACTIVITY" > /dev/null
 on_screen '[data-t="call-share"]' 20
 
+# On a phone Android asks its owner before the screen is shown, and its shell may not answer for
+# them: that part is for an emulator, unless the owner is there to tap it (SHARE_ON_PHONE=1).
+if ! on_emulator && [ -z "${SHARE_ON_PHONE:-}" ]; then
+    for what in the_screen_is_shown it_goes_on_from_another_app stopping; do
+        scenario "$what"
+        skip "a phone asks its owner first: run with SHARE_ON_PHONE=1 while someone is there"
+    done
+else
 scenario the_screen_is_shown
 adb_ shell appops set "$PKG" PROJECT_MEDIA allow > /dev/null 2>&1
 click '[data-t="call-share"]' 0 0.4
@@ -162,6 +171,7 @@ on_screen '[data-t="call-share"]' 20
 click '[data-t="call-share"]' 0 0.5
 gone_on_window() { [ "$(w_js "return document.querySelector('.wm-screen') ? 'y' : 'n'")" = n ]; }
 wait_for 20 gone_on_window && pass || fail "the picture stayed"
+fi
 
 scenario hanging_up
 click '[data-t="call-hangup"]' 0 0.5

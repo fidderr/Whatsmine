@@ -66,6 +66,10 @@ const OWN_FONTS: &str = "own_fonts";
 fn message_fits(m: &Message, query: &str, within: SearchIn) -> bool {
     let media = |a: &Attachment| a.mime.starts_with("image/") || a.mime.starts_with("video/");
     let has_link = m.body.contains("http://") || m.body.contains("https://");
+    // Seen once is seen in the chat only: never again in a list of photos or files.
+    if m.extra.view_once && matches!(within, SearchIn::Media | SearchIn::Files) {
+        return false;
+    }
     let kind = match within {
         SearchIn::All => !query.is_empty(),
         SearchIn::People => false,

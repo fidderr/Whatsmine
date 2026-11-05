@@ -1002,5 +1002,9 @@
   "channel.follow": "Folgen",
   "channel.follow_failed": "Das hat nicht geklappt",
   "chat.once_get": "Ein Foto, das einmal sichtbar ist. Zum Laden tippen",
-  "chat.err.own_chat": "Das ließe sich in deinen Notizen nicht mehr öffnen"
+  "chat.err.own_chat": "Das ließe sich in deinen Notizen nicht mehr öffnen",
+  "calls.lasted": "{when} · {length}",
+  "length.seconds": "{n} Sek.",
+  "length.minutes": "{n} Min.",
+  "length.hours": "{h} Std. {m} Min."
 }

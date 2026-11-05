@@ -1002,5 +1002,9 @@
   "channel.follow": "Volgen",
   "channel.follow_failed": "Dat lukte niet",
   "chat.once_get": "Een foto die één keer te zien is. Tik om op te halen",
-  "chat.err.own_chat": "Dat kan in je eigen notities niet meer geopend worden"
+  "chat.err.own_chat": "Dat kan in je eigen notities niet meer geopend worden",
+  "calls.lasted": "{when} · {length}",
+  "length.seconds": "{n} s",
+  "length.minutes": "{n} min",
+  "length.hours": "{h} u {m} min"
 }

@@ -6,7 +6,8 @@ use whatsmine_core::rich::{Folder, SearchHit, SearchIn};
 
 use crate::app::{Rev, Route, t, use_core, use_tr};
 use crate::components::{
-    Avatar, BackButton, Chips, Header, Icon, IconName, Row, Sheet, SwitchRow, change, use_settings,
+    Avatar, BackButton, Chips, Header, Icon, IconName, ImageViewer, Row, Sheet, SwitchRow, change,
+    use_settings,
 };
 use crate::fmt;
 
@@ -272,6 +273,30 @@ pub fn SharedMedia(id: String) -> Element {
         _ => SearchIn::Media,
     };
     let items = core.search_chat(&id, &query(), kind);
+    let mut viewer = use_signal(|| None::<String>);
+    // Photos and videos that are here whole, as a grid; the rest as rows.
+    let whole = |m: &Message| {
+        m.attachment.as_ref().is_some_and(|a| {
+            a.path.is_some()
+                && a.state == whatsmine_core::TransferState::Done
+                && crate::media_server::inline_ok(a.size)
+        })
+    };
+    let is_image = |m: &Message| {
+        m.attachment
+            .as_ref()
+            .is_some_and(|a| a.kind() == whatsmine_core::MediaKind::Image)
+    };
+    let (tiles, rows): (Vec<Message>, Vec<Message>) = if kind == SearchIn::Media {
+        items.iter().cloned().partition(|m| whole(m))
+    } else {
+        (Vec::new(), items.clone())
+    };
+    let image_ids: Vec<String> = tiles
+        .iter()
+        .filter(|m| is_image(m))
+        .map(|m| m.id.clone())
+        .collect();
     rsx! {
         div { class: "screen no-nav",
             Header { title: t(&tr, "contact.shared") }
@@ -295,11 +320,52 @@ pub fn SharedMedia(id: String) -> Element {
                         p { class: "empty-subtitle", "{t(&tr, \"chats.no_match\")}" }
                     }
                 } else {
-                    div { class: "group",
-                        for m in items {
-                            SavedRow { key: "{m.id}", note: String::new(), message: m }
+                    if !tiles.is_empty() {
+                        div { class: "media-grid", "data-t": "media-grid",
+                            for m in tiles {
+                                {
+                                    let src = format!("/media/{}", m.id);
+                                    let name = m.attachment.as_ref().map(|a| a.name.clone()).unwrap_or_default();
+                                    if is_image(&m) {
+                                        let open = m.id.clone();
+                                        rsx! {
+                                            img {
+                                                key: "{m.id}",
+                                                class: "media-tile",
+                                                src: "{src}",
+                                                alt: "{name}",
+                                                onclick: move |_| viewer.set(Some(open.clone())),
+                                            }
+                                        }
+                                    } else {
+                                        rsx! {
+                                            Link {
+                                                key: "{m.id}",
+                                                class: "media-tile video",
+                                                to: Route::Chat { id: m.contact_id.clone() },
+                                                video { src: "{src}", preload: "metadata", muted: true }
+                                                span { class: "media-play", Icon { name: IconName::Video, size: 22 } }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
+                    if !rows.is_empty() {
+                        div { class: "group",
+                            for m in rows {
+                                SavedRow { key: "{m.id}", note: String::new(), message: m }
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(start) = viewer() {
+                ImageViewer {
+                    ids: image_ids.clone(),
+                    start,
+                    on_close: move |_| viewer.set(None),
                 }
             }
         }

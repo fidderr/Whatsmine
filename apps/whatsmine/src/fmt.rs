@@ -100,6 +100,34 @@ pub fn duration(ms: u64) -> String {
     }
 }
 
+/// How long something lasted, next to when it was: "45 s", "12 min", "1 h 5 min". A clock-like
+/// "12:00" right after a time of day reads as a second time.
+pub fn length(tr: &Translations, ms: u64) -> String {
+    length_in(
+        [
+            &t(tr, "length.seconds"),
+            &t(tr, "length.minutes"),
+            &t(tr, "length.hours"),
+        ],
+        ms,
+    )
+}
+
+/// [`length`] with the three ways of saying it given: seconds, minutes, hours and minutes.
+fn length_in(say: [&str; 3], ms: u64) -> String {
+    let s = (ms + 500) / 1000;
+    if s < 60 {
+        return say[0].replace("{n}", &s.to_string());
+    }
+    let m = (s + 30) / 60;
+    if m < 60 {
+        return say[1].replace("{n}", &m.to_string());
+    }
+    say[2]
+        .replace("{h}", &(m / 60).to_string())
+        .replace("{m}", &(m % 60).to_string())
+}
+
 /// Percentage 0..=100 for a progress pair.
 pub fn percent(done: u64, total: u64) -> u64 {
     (done.min(total) * 100).checked_div(total).unwrap_or(0)
@@ -277,8 +305,20 @@ pub fn with_mentions(text: &str, names: &[String]) -> Vec<(String, bool)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Piece, Styled, bytes, duration, grouped_key, percent, pieces, styled, with_mentions,
+        Piece, Styled, bytes, duration, grouped_key, length_in, percent, pieces, styled,
+        with_mentions,
     };
+
+    #[test]
+    fn how_long_reads_as_a_length() {
+        let say = ["{n} s", "{n} min", "{h} h {m} min"];
+        assert_eq!(length_in(say, 0), "0 s");
+        assert_eq!(length_in(say, 45_400), "45 s");
+        assert_eq!(length_in(say, 59_600), "1 min");
+        assert_eq!(length_in(say, 12 * 60_000 + 10_000), "12 min");
+        assert_eq!(length_in(say, 25 * 60_000), "25 min");
+        assert_eq!(length_in(say, 65 * 60_000), "1 h 5 min");
+    }
 
     #[test]
     fn marks_only_count_at_the_edge_of_a_word() {
