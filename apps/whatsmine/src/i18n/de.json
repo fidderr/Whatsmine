@@ -729,5 +729,12 @@
   "devices.remove_title": "Das andere Gerät entfernen?",
   "devices.removing": "Wird entfernt, sobald es online ist",
   "call.path_direct": "Direkte Verbindung",
-  "call.path_relay": "Über ein Relay"
+  "call.path_relay": "Über ein Relay",
+  "attach.once": "Einmal ansehen",
+  "chat.once_coming": "Ein Foto zum einmaligen Ansehen kommt",
+  "chat.once_open": "Foto, nur einmal zu sehen. Zum Öffnen tippen",
+  "chat.once_seen": "Foto gesehen",
+  "chat.once_sent": "Foto, nur einmal zu sehen",
+  "chat.to_newest": "Zur neuesten Nachricht",
+  "devices.link_ready": "Code wird vorbereitet..."
 }

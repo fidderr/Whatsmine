@@ -729,5 +729,12 @@
   "devices.remove_title": "Het andere apparaat verwijderen?",
   "devices.removing": "Wordt verwijderd zodra het online is",
   "call.path_direct": "Directe verbinding",
-  "call.path_relay": "Via een relay"
+  "call.path_relay": "Via een relay",
+  "attach.once": "Eén keer zien",
+  "chat.once_coming": "Een foto die één keer te zien is komt eraan",
+  "chat.once_open": "Foto, één keer te zien. Tik om te openen",
+  "chat.once_seen": "Foto gezien",
+  "chat.once_sent": "Foto, één keer te zien",
+  "chat.to_newest": "Naar het nieuwste bericht",
+  "devices.link_ready": "Code wordt klaargezet..."
 }

@@ -160,6 +160,19 @@ fn ChatView(id: String) -> Element {
     let mut typed_simple = use_signal(|| false);
     let mut query = use_signal(String::new);
     let mut selection: Signal<Option<Vec<String>>> = use_signal(|| None);
+    let mut away_from_newest = use_signal(|| false);
+    use_future(move || async move {
+        let mut eval = document::eval(
+            "const m = document.getElementById('msgs');\n\
+             if (m) m.addEventListener('scroll', () => dioxus.send(m.scrollHeight - m.scrollTop - m.clientHeight > 400));\n\
+             await new Promise(() => {});",
+        );
+        while let Ok(away) = eval.recv::<bool>().await {
+            if away != *away_from_newest.peek() {
+                away_from_newest.set(away);
+            }
+        }
+    });
 
     // Read while open: on mount and whenever messages change.
     {
@@ -425,6 +438,7 @@ fn ChatView(id: String) -> Element {
         .filter(|m| {
             m.attachment.as_ref().is_some_and(|a| {
                 a.path.is_some()
+                    && !m.extra.view_once
                     && a.state != whatsmine_core::TransferState::Declined
                     && a.kind() == whatsmine_core::MediaKind::Image
             })
@@ -694,6 +708,15 @@ fn ChatView(id: String) -> Element {
                     }
                 }
             }
+            if away_from_newest() {
+                button {
+                    class: "round jump-newest",
+                    "data-t": "jump-newest",
+                    aria_label: "{t(&tr, \"chat.to_newest\")}",
+                    onclick: move |_| js::scroll_to_bottom("msgs"),
+                    Icon { name: IconName::ChevronDown, size: 24 }
+                }
+            }
             if let Some(chosen) = selection() {
                 SelectBar {
                     chosen,
@@ -887,6 +910,32 @@ fn ChatView(id: String) -> Element {
                             let mut a = attach_file;
                             move |_| a(Attach::File)
                         } }
+                        AttachTile { label: t(&tr, "attach.once"), icon: IconName::Lock, tag: "new-once", on_tap: {
+                            let (core, id) = (core.clone(), id.clone());
+                            move |_| {
+                                sheet.set(false);
+                                let (core, id) = (core.clone(), id.clone());
+                                spawn(async move {
+                                    let Some(mut files) = media::pick(media::IMAGES, false).await else {
+                                        return;
+                                    };
+                                    if files.is_empty() {
+                                        return;
+                                    }
+                                    let file = files.remove(0);
+                                    let done = media::blocking(move || {
+                                        core.send_view_once(&id, &file.path, &file.name, &file.mime)
+                                            .map(|_| ())
+                                            .map_err(|e| e.to_string())
+                                    })
+                                    .await;
+                                    if let Some(Err(e)) = done {
+                                        let mut sig = toast_sig;
+                                        toast(&mut sig, t(&tr, &format!("chat.err.{e}")), ToastLevel::Error);
+                                    }
+                                });
+                            }
+                        } }
                         AttachTile { label: t(&tr, "rich.poll"), icon: IconName::Poll, tag: "new-poll", on_tap: move |_| {
                             sheet.set(false);
                             compose.set(Some(ComposeKind::Poll));
@@ -1042,10 +1091,22 @@ fn ChatView(id: String) -> Element {
                 }
             }
             if let Some(start) = viewer() {
-                ImageViewer {
-                    ids: image_ids.clone(),
-                    start,
-                    on_close: move |_| viewer.set(None),
+                {
+                    let once = core.message(&start).is_some_and(|m| m.extra.view_once);
+                    let ids = if once { vec![start.clone()] } else { image_ids.clone() };
+                    let (seen_core, seen_id) = (core.clone(), start.clone());
+                    rsx! {
+                        ImageViewer {
+                            ids,
+                            start,
+                            on_close: move |_| {
+                                viewer.set(None);
+                                if once {
+                                    seen_core.viewed_once(&seen_id);
+                                }
+                            },
+                        }
+                    }
                 }
             }
             if let Some(m) = menu() {
@@ -1303,6 +1364,8 @@ fn Bubble(
                     span { class: "gone-text", "{t(&tr, \"chat.unsent\")}" }
                 } else if let Some(rich) = e.rich.clone() {
                     RichView { message_id: message.id.clone(), rich }
+                } else if e.view_once {
+                    OnceCard { message: message.clone(), on_view }
                 } else if has_media {
                     AttachmentView { message: message.clone(), on_view }
                     if !message.body.is_empty() {
@@ -1384,6 +1447,38 @@ fn Bubble(
                     }
                 }
             }
+        }
+    }
+}
+
+/// A photo that can be opened once: nothing shows until then, and nothing stays after.
+#[component]
+fn OnceCard(message: Message, on_view: EventHandler<String>) -> Element {
+    let tr = use_tr();
+    let can_open = !message.outgoing
+        && !message.extra.viewed
+        && message
+            .attachment
+            .as_ref()
+            .is_some_and(|a| a.path.is_some());
+    let key = if message.outgoing {
+        "chat.once_sent"
+    } else if message.extra.viewed {
+        "chat.once_seen"
+    } else if can_open {
+        "chat.once_open"
+    } else {
+        "chat.once_coming"
+    };
+    let id = message.id.clone();
+    rsx! {
+        button {
+            class: "place-card",
+            "data-t": "once",
+            disabled: !can_open,
+            onclick: move |_| on_view.call(id.clone()),
+            span { class: "place-pin", Icon { name: IconName::Image, size: 24 } }
+            span { class: "row-t", "{t(&tr, key)}" }
         }
     }
 }
@@ -1486,10 +1581,11 @@ fn MessageMenu(
     let mut remind = use_signal(|| false);
     let body = message.body.clone();
     let id = message.id.clone();
-    let has_file = message
-        .attachment
-        .as_ref()
-        .is_some_and(|a| a.path.is_some());
+    let has_file = !message.extra.view_once
+        && message
+            .attachment
+            .as_ref()
+            .is_some_and(|a| a.path.is_some());
     let unsent = message.extra.unsent;
     let can_forward = (!body.is_empty() || has_file) && !unsent;
     let can_edit =

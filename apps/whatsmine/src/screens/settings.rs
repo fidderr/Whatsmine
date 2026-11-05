@@ -1275,7 +1275,7 @@ fn LinkSheet(on_close: EventHandler<()>) -> Element {
                     "{t(&tr, \"common.copy\")}"
                 }
             } else {
-                p { class: "note", "{t(&tr, \"add.looking\")}" }
+                p { class: "note", "{t(&tr, \"devices.link_ready\")}" }
             }
             p { class: "note", "{t(&tr, \"devices.link_files\")}" }
         }

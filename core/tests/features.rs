@@ -454,3 +454,59 @@ async fn someone_who_hides_is_not_shown_online_and_gets_another_name() {
     assert!(!p.a.is_online(&kb));
     b.shutdown();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_photo_seen_once_is_gone_after_that() {
+    let p = pair().await;
+    let dir = tempfile::tempdir().unwrap();
+    let photo = dir.path().join("p.png");
+    std::fs::write(&photo, b"not much of a picture, but it is a file").unwrap();
+    let m =
+        p.a.send_view_once(&p.kb, &photo, "p.png", "image/png")
+            .unwrap();
+    until("it to arrive with its file", || {
+        p.b.message(&m.id)
+            .and_then(|x| x.attachment)
+            .is_some_and(|a| a.path.is_some())
+    })
+    .await;
+    let got = p.b.message(&m.id).unwrap();
+    assert!(got.extra.view_once);
+    let path = got.attachment.unwrap().path.unwrap();
+    assert!(std::path::Path::new(&path).exists());
+    p.b.viewed_once(&m.id);
+    assert!(!std::path::Path::new(&path).exists(), "the file is gone");
+    let after = p.b.message(&m.id).unwrap();
+    assert!(after.extra.viewed);
+    assert!(after.attachment.unwrap().path.is_none());
+}
+
+/// Big chats stay quick: budgets from the plan, with room for a slow test machine.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chat_of_ten_thousand_messages_opens_quickly() {
+    let p = pair().await;
+    let dir = tempfile::tempdir().unwrap();
+    let many = Core::start(dir.path(), NetMode::Local(p.net.clone())).unwrap();
+    let notes = many.notes_chat("Notes");
+    for i in 0..10_000 {
+        many.send(&notes, &format!("message number {i} about nothing much"))
+            .unwrap();
+    }
+    let started = std::time::Instant::now();
+    assert_eq!(many.messages(&notes, None, 100).len(), 100);
+    let opening = started.elapsed();
+    let started = std::time::Instant::now();
+    let found = many.search("number 9999", SearchIn::All);
+    let searching = started.elapsed();
+    println!("opening: {opening:?}, searching 10000: {searching:?}");
+    assert_eq!(found.len(), 1);
+    assert!(
+        opening < Duration::from_millis(200),
+        "opening took {opening:?}"
+    );
+    assert!(
+        searching < Duration::from_secs(3),
+        "search took {searching:?}"
+    );
+    many.shutdown();
+}

@@ -1102,7 +1102,15 @@ textarea::placeholder {
 }
 
 /* ===== Chat ===== */
+.jump-newest {
+  position: absolute;
+  right: calc(12px + var(--safe-right));
+  bottom: calc(72px + var(--safe-bottom));
+  z-index: 5;
+  border: 1px solid var(--line);
+}
 .chat {
+  position: relative;
   height: 100vh;
   height: 100dvh;
   display: flex;
@@ -2462,25 +2470,6 @@ textarea::placeholder {
   transform: translate(-50%, -50%) scaleX(-1);
 }
 
-.call-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 1100;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: space-between;
-  padding: calc(48px + var(--safe-top, 0px)) 24px calc(40px + var(--safe-bottom, 0px));
-  background: linear-gradient(160deg, #1b2a3a, #0c1118);
-  color: white;
-  text-align: center;
-}
-
-.call-overlay.video-live {
-  background: transparent;
-  pointer-events: none;
-}
-
 .call-overlay.video-live .call-controls,
 .call-overlay.video-live .call-top {
   pointer-events: auto;
@@ -2495,51 +2484,6 @@ textarea::placeholder {
 
 .call-avatar {
   margin-bottom: 16px;
-}
-
-.call-name {
-  font-size: 1.75rem;
-  font-weight: 700;
-  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
-}
-
-.call-status {
-  font-size: 1rem;
-  opacity: 0.85;
-  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
-}
-
-.call-controls {
-  display: flex;
-  gap: 28px;
-  align-items: center;
-  justify-content: center;
-}
-
-.call-btn {
-  width: 68px;
-  height: 68px;
-  border-radius: 50%;
-  border: none;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: white;
-  cursor: pointer;
-  background: rgba(255, 255, 255, 0.18);
-}
-
-.call-btn.toggle.on {
-  background: white;
-  color: #111;
-}
-
-.call-btn.decline {
-  background: #e5484d;
-}
-
-.call-btn.accept {
-  background: #2fb344;
 }
 
 @media (orientation: portrait) {
@@ -2675,12 +2619,23 @@ textarea::placeholder {
 
 /* ===== The call screen on the design ===== */
 .call-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+  padding: calc(48px + var(--safe-top, 0px)) 24px calc(40px + var(--safe-bottom, 0px));
   background: var(--bg);
   color: var(--text);
+  text-align: center;
   padding-top: calc(96px + var(--safe-top, 0px));
   padding-bottom: calc(48px + var(--safe-bottom, 0px));
 }
 .call-overlay.video-live {
+  background: transparent;
+  pointer-events: none;
   color: #f2f3f7;
 }
 .call-avatar .avatar {
@@ -2689,6 +2644,8 @@ textarea::placeholder {
   font-size: 1.75rem;
 }
 .call-name {
+  font-size: 1.75rem;
+  font-weight: 700;
   text-shadow: none;
 }
 .call-status {
@@ -2701,16 +2658,25 @@ textarea::placeholder {
   font-size: 0.875rem;
 }
 .call-controls {
+  display: flex;
   gap: 16px;
+  align-items: center;
+  justify-content: center;
   flex-wrap: wrap;
 }
 .call-btn {
-  position: relative;
   width: 56px;
   height: 56px;
-  margin-bottom: 24px;
-  background: var(--surface2);
+  border-radius: 50%;
+  border: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   color: var(--text);
+  cursor: pointer;
+  background: var(--surface2);
+  position: relative;
+  margin-bottom: 24px;
 }
 .call-btn::after {
   content: attr(aria-label);
@@ -2732,9 +2698,9 @@ textarea::placeholder {
   color: var(--bg);
 }
 .call-btn.decline {
+  background: var(--error);
   width: 72px;
   height: 72px;
-  background: var(--error);
   color: var(--on-error);
 }
 .call-btn.decline::after,
@@ -2742,9 +2708,9 @@ textarea::placeholder {
   top: 76px;
 }
 .call-btn.accept {
+  background: var(--success);
   width: 72px;
   height: 72px;
-  background: var(--success);
   color: var(--on-success);
 }
 

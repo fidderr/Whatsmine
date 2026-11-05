@@ -2,85 +2,95 @@
 
 **Chat without servers, accounts or phone numbers. What's yours stays yours.**
 
-WhatsMine is a free, open-source 1:1 messenger with no company in the middle:
+WhatsMine is a free, open-source messenger with no company in the middle:
 
-- **No account and no phone number.** On first launch your device creates a key that only you have. Your key is your address: share it (copy or QR code) with people you want to talk to.
-- **No servers.** Your device connects straight to theirs, end-to-end encrypted (QUIC + TLS 1.3 via [iroh](https://iroh.computer)). Nothing is stored anywhere except on your own devices.
-- **You decide who can reach you.** Someone who adds your key sends a request, and nothing gets through until you accept. Blocking is silent.
-- **Nobody can take it away.** No account can be banned and no database can leak, be sold or be subpoenaed. If you delete the app, your data is gone.
+- **No account and no phone number.** Your device makes a key only you have, from 12 words that bring you back if you lose it.
+- **Nothing to run.** Phones and PCs find each other through the BitTorrent DHT, which nobody owns, and connect directly. You and the people you talk to set up nothing.
+- **Who you are is not where you are.** Strangers only get a link, a name code or a QR code, and those only let them leave a sealed request. They never reach your phone and never learn its address.
+- **Being bothered?** One button makes all your links stop working. Your contacts keep talking to you and notice nothing.
+- **Encrypted end to end,** per device, with Olm. Everything on disk is sealed with a key the system holds (Android Keystore, Windows DPAPI).
 
-It runs on Windows and Android from one Rust codebase (the code is portable to macOS, Linux and iOS, which haven't been tried). Device features (file picker, camera, microphone, open and save) come from [mobile-sentinel](https://github.com/fidderr/mobile-sentinel).
+It runs on Android 12 and newer (64-bit) and on Windows, from one Rust codebase.
 
-## Features
+## What it does
 
-- 1:1 chats with history saved on your device
-- **Photos, videos, voice messages and any file**, shown inline (images and GIFs, video and audio players) or as a file card. Take a photo, record a video or a voice note right in the chat, or pick from the gallery. Files up to 2 GB by default; each person sets the largest file they accept, and bigger ones are declined with a message to the sender. Transfers resume where they stopped and are checked with a SHA-256 hash.
-- **Voice and video calls**, peer to peer like everything else: audio (Opus) goes as datagrams and video (VP8) as one short stream per frame, straight between the two devices, encrypted by the same connection. No call servers. Mute, camera on/off, and a call screen with ringing, accept and decline. Only contacts who are online can be called.
-- **Group chats and group calls**, still with no server: a group is a list of members signed by whoever made it (its admin), and every member talks directly to every other member, so a message is simply sent to each of them and confirmed by each. Members can be added or removed by the admin, anyone can leave, files work, and a group call is a full mesh (up to 16 people in a chat; calls are meant for a handful). People you only know through a group are never added to your contacts.
-- **Runs in the background, so messages arrive at once.** The connection lives in the process, not the window. On Windows, closing the window hides WhatsMine in the tray (optionally starting with the PC), and a second launch just shows the running copy. On Android a quiet foreground service (lowest-importance notification, no status-bar icon) keeps the connection open, restarts after a reboot, and Back sends the app to the background instead of closing it. New messages, requests and calls show a notification (text can be switched off); tapping one opens that chat. Everything is switchable in Settings. On Android, allow unrestricted battery use for the most reliable connection.
-- **Profile pictures** that your contacts see
-- Contact requests: accept, decline or block
-- Sent ✓, delivered ✓✓ and read ✓✓ (blue) ticks
-- Online, last seen and typing indicators; each can be switched off, and then you don't see other people's either
-- Messages you write while the other person is offline are queued and sent automatically when you're both online
-- Nicknames, a safety key to compare in person, clear chat, delete contact
-- Dark, light or follow-the-device theme
+- **Chats:** replies, reactions, edits, taking back for everyone, mentions, bold, italic, code and spoilers, pinned messages, select many, search, export
+- **Rich messages:** polls, shared lists, plans with who is coming, places that open in your maps app, contact cards
+- **Files:** photos, videos, voice messages with the real sound shown and a speed button, any file. Original quality, no size limit other than what the receiver allows
+- **Calls:** voice and video, one to one and in groups
+- **Groups:** up to 64 members, owner and admins, who may send, add and edit, slow mode, invite links with or without approval, and a group goes on when its owner leaves. Any member can pass on what someone missed
+- **Your devices:** link a phone and a PC. Everything shows up on both, also when the other was off
+- **Never silently stuck:** a message says where it is, why it waits and when the next try is. Past the time you set it says it did not get there, and can be tried again
+- **Battery:** nothing is held open on a sleeping phone on mobile data. Short texts wait sealed in the DHT
+- **Staying on top of things:** folders by rule, labels, archive, snooze, hidden chats, send later, send without sound, reminders, remind me if nobody answers, your own list, notes to self, quick replies
+- **Your look:** themes including pure black and colorblind, accent colours, text size, spacing, wallpapers and bubble colour per chat, flat layout
+- **Simple mode:** big buttons and your people, chosen at first run, for whoever wants nothing else in the way
+- **Privacy:** app lock, disappearing messages, per-person name and visibility, screenshot block, incognito keyboard, safety words, a filter and a quiet mode for requests
+- **Coming back:** recovery words, and encrypted backups only those words open
 - English, Nederlands, Español, Français, Deutsch
-- "Delete everything" wipes your identity and all chats
 
 ## How it works
 
 ```
- your device                                          their device
-┌──────────────┐   direct QUIC, end-to-end encrypted ┌──────────────┐
-│ WhatsMine    │◄───────────────────────────────────►│ WhatsMine    │
-│ key + SQLite │        (hole-punched through        │ key + SQLite │
-└──────────────┘         home routers / 5G)          └──────────────┘
-        │  "where is key X right now?"                       │
-        └──────► DHT / DNS / local network ◄─────────────────┘
+ Phone or PC                                       Phone or PC
+┌──────────────┐   direct QUIC, sealed end to end ┌──────────────┐
+│ WhatsMine    │◄────────────────────────────────►│ WhatsMine    │
+└──────┬───────┘                                  └──────┬───────┘
+       │      sealed "where am I", requests, knocks      │
+       └───────────────►  BitTorrent DHT  ◄──────────────┘
 ```
 
-- **Identity:** an Ed25519 keypair generated on the device. The public key (52 characters, z-base-32) is your address. It's unique by math, so nothing has to register it.
-- **Finding each other:** a device publishes "key X is reachable here", signed with its key. It publishes to the BitTorrent Mainline DHT (millions of nodes, owned by no one), to n0's public DNS, and to the local network (mDNS). Peers look you up by key.
-- **Connecting:** iroh hole-punches a direct connection. About 10% of networks can't be punched through. Then traffic goes through a relay, which only ever sees encrypted bytes.
-- **Protocol:** small length-prefixed messages on one QUIC stream. A message counts as delivered only when the other device acknowledges it, and anything unacknowledged is re-sent on the next connection. Duplicates are ignored, so nothing is lost or doubled.
-- **Storage:** one SQLite file in the app's private folder.
+- **Person key:** who you are. Contacts know it. A leaked one says nothing about where you are.
+- **Network key:** your address on a connection. Rotates weekly and on reset.
+- **Location secret:** only accepted contacts have it. With it they find your sealed, signed address in the DHT, under a key that changes daily.
+- **Invites:** a link, QR code or name code like `roy-7kq4x2`. Each lets someone leave a sealed request in a few slots of the DHT, read when you look. A flood costs you nothing.
+- **A connection:** each side signs over this very connection who it is, then everything is sealed with Olm. Whoever is no contact is refused right after that.
+- **Delivery:** each message has its own retry state on disk: at once when something changes, then 30 seconds, 2, 5, 15, 30 minutes, then hourly, for as long as you set.
 
-## Honest limits (v1)
+## Honest limits
 
-- **Both devices must be online at the same time** for a message to move. Messages wait on your device until then. There's no offline mailbox yet.
-- **No background delivery or notifications.** The app has to be open.
-- **One device per identity.** Linking a phone and a laptop is planned.
-- **Relays and discovery defaults:** the fallback relays and the DNS discovery service are run by n0. They can't read messages, and the DHT and local discovery work without them. Running your own relay will be supported.
-- **Your contacts see your IP address**, because you connect to them directly.
-- **The local database isn't encrypted at rest.** It relies on the OS's app sandbox.
-- No groups yet. Large files need both of you online (they resume if the connection drops).
+- **A sleeping phone on mobile data is not instant by default.** Messages arrive within minutes. A setting makes it instant for more battery.
+- **Contacts you accepted see your IP address** on a direct connection. Nobody else does.
+- **Public relays run by n0** help when a direct connection is impossible. They carry sealed traffic and see IP addresses, n0 offers them without a guarantee, and one switch turns them off.
+- **Links** go through a static page (`site/`) because chat apps do not make `whatsmine://` clickable. The part after the # never reaches any server.
+- **Two devices per person.** A lost linked device holds your key until it is removed.
+- **Files stay on the device that has them.** Files of others can be fetched again from whoever sent them.
+- **Not audited.** Nothing here has had an outside security audit yet.
 
 ## Build
 
-Requirements: Rust (stable), [`dx`](https://dioxuslabs.com/learn/0.7/getting_started) 0.7 (`cargo install dioxus-cli`), a checkout of [mobile-sentinel](https://github.com/fidderr/mobile-sentinel) next to this repo (until 0.2.2 is published), and for Android, the Android SDK, NDK 28 and JDK 17.
+Requirements: Rust (stable), [`dx`](https://dioxuslabs.com/learn/0.7/getting_started) 0.7, a checkout of [mobile-sentinel](https://github.com/fidderr/mobile-sentinel) next to this repo, and for Android its SDK and NDK.
 
 ```sh
-./build.sh                    # desktop app (release)
-./build.sh android install    # Android debug APK, installed over adb (keeps chats on update)
-./build.sh cli                # headless peer for testing
+./build.sh desktop            # the Windows app
+./build.sh android install    # Android debug APK, installed over adb
+./build.sh aab                # what goes to Play; sign it with ./sign-aab.sh
+./build.sh cli                # a terminal peer for testing
 ./build.sh test               # fmt, clippy, tests
 ```
 
-To run two instances on one computer, give each its own profile:
+## Tests
 
-```sh
-WHATSMINE_PROFILE=alice target/dx/whatsmine/release/windows/app/whatsmine.exe
-WHATSMINE_PROFILE=bob   target/dx/whatsmine/release/windows/app/whatsmine.exe
-```
+| What | How |
+|---|---|
+| Unit and two-peer tests | `cargo test --workspace`. Real cores over loopback QUIC, with kills and restarts |
+| The real internet | `cargo test -p whatsmine-core --test real_network -- --ignored` |
+| Every screen, with pictures | `PLATFORM=windows bash devtest/tour.sh`, `PLATFORM=android bash devtest/tour.sh`. Variants with `THEME=light LANG_=nl` |
+| The real Android signals | `bash devtest/connection.sh`, on an emulator |
+| Networks measured | `tools/netlab` |
+
+Test windows stay off-screen and never take the focus, and test builds have their own app id and data.
 
 ## Project layout
 
 | Folder | What |
 |---|---|
-| `core/` | `whatsmine-core`: identity, iroh networking, protocol, SQLite storage. No UI. Integration tests run two real peers over loopback. |
-| `apps/whatsmine/` | `whatsmine`: the Dioxus UI. Design and patterns are shared with [AlarmFree](https://github.com/fidderr/alarmfree). |
-| `cli/` | `whatsmine-cli`: a terminal peer on the same core, for testing and scripting. |
+| `core/` | Identity, connections, encryption, delivery, groups, linked devices, storage. No UI |
+| `apps/whatsmine/` | The Dioxus UI for Android and Windows |
+| `cli/` | `whatsmine-cli`, a terminal peer on the same core |
+| `devtest/` | The app scenarios, one library for Android and Windows |
+| `tools/netlab/` | Measures NAT type, IPv6, relays, DHT and connecting |
+| `site/` | The static page behind `https` links |
 
 ## License
 

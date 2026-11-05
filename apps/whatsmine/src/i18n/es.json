@@ -729,5 +729,12 @@
   "devices.remove_title": "¿Quitar el otro dispositivo?",
   "devices.removing": "Se quitará en cuanto esté en línea",
   "call.path_direct": "Conexión directa",
-  "call.path_relay": "A través de un relé"
+  "call.path_relay": "A través de un relé",
+  "attach.once": "Ver una vez",
+  "chat.once_coming": "Viene una foto que se puede ver una vez",
+  "chat.once_open": "Foto, se puede ver una vez. Toca para abrir",
+  "chat.once_seen": "Foto vista",
+  "chat.once_sent": "Foto, se puede ver una vez",
+  "chat.to_newest": "Al mensaje más reciente",
+  "devices.link_ready": "Preparando el código..."
 }

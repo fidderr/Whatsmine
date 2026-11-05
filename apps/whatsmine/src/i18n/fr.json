@@ -729,5 +729,12 @@
   "devices.remove_title": "Retirer l'autre appareil ?",
   "devices.removing": "Sera retiré dès qu'il sera en ligne",
   "call.path_direct": "Connexion directe",
-  "call.path_relay": "Via un relais"
+  "call.path_relay": "Via un relais",
+  "attach.once": "Voir une fois",
+  "chat.once_coming": "Une photo à voir une fois arrive",
+  "chat.once_open": "Photo à voir une fois. Touchez pour ouvrir",
+  "chat.once_seen": "Photo vue",
+  "chat.once_sent": "Photo à voir une fois",
+  "chat.to_newest": "Au message le plus récent",
+  "devices.link_ready": "Préparation du code..."
 }

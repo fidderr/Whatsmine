@@ -323,6 +323,56 @@ else
     skip
 fi
 
+scenario devices
+if wanted settings; then
+    tap tab-settings
+    on_screen '[data-t="devices"]' 6
+    if tap devices; then
+        tap words 0 0.3 && picture devices_words
+        press_back
+        sleep 0.2
+        tap restore 0 0.3 && picture devices_restore
+        tap use-other-device 0 0.3 && picture devices_join
+        press_back
+        sleep 0.2
+        press_back
+        sleep 0.2
+        tap link-device 0 1.5 && picture devices_link
+        press_back
+        sleep 0.2
+        press_back_or_up
+        pass
+    else
+        fail "no devices screen"
+    fi
+else
+    skip
+fi
+
+scenario group_rules
+if wanted group; then
+    tap tab-chats
+    chat_with Family
+    if tap chat-peer; then
+        tap group-rules 0 0.3 && picture group_rules
+        press_back
+        sleep 0.2
+        tap group-link 0 0.3 && picture group_link
+        press_back
+        sleep 0.2
+        tap member-menu 0 0.3 && picture group_member
+        press_back
+        sleep 0.2
+        press_back_or_up
+        pass
+    else
+        fail "no group info"
+    fi
+    press_back_or_up
+else
+    skip
+fi
+
 scenario simple
 if wanted simple; then
     tap tab-settings

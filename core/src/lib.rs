@@ -1447,6 +1447,34 @@ impl Core {
         self.send_file_from(contact_id, src, name, mime, caption, duration_ms, false)
     }
 
+    /// A photo the other side can open once. After that it is gone there.
+    pub fn send_view_once(
+        &self,
+        contact_id: &str,
+        src: &Path,
+        name: &str,
+        mime: &str,
+    ) -> anyhow::Result<Message> {
+        self.send_file_inner(contact_id, src, name, mime, "", None, false, true)
+    }
+
+    /// It was opened: nothing of the file stays here.
+    pub fn viewed_once(&self, message_id: &str) {
+        let Some(mut m) = self.inner.db.message(message_id) else {
+            return;
+        };
+        if !m.extra.view_once || m.outgoing {
+            return;
+        }
+        self.remove_files(&m);
+        if let Some(a) = &mut m.attachment {
+            a.path = None;
+            a.state = TransferState::Done;
+        }
+        m.extra.viewed = true;
+        self.changed(m);
+    }
+
     /// Like [`send_file`](Self::send_file), but when `take_ownership` is set
     /// the file is *moved* into WhatsMine's storage when possible (same
     /// filesystem) instead of copied. Use it for scratch files the caller
@@ -1462,6 +1490,30 @@ impl Core {
         caption: &str,
         duration_ms: Option<u64>,
         take_ownership: bool,
+    ) -> anyhow::Result<Message> {
+        self.send_file_inner(
+            contact_id,
+            src,
+            name,
+            mime,
+            caption,
+            duration_ms,
+            take_ownership,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn send_file_inner(
+        &self,
+        contact_id: &str,
+        src: &Path,
+        name: &str,
+        mime: &str,
+        caption: &str,
+        duration_ms: Option<u64>,
+        take_ownership: bool,
+        view_once: bool,
     ) -> anyhow::Result<Message> {
         let caption = caption.trim();
         ensure!(caption.len() <= protocol::MAX_TEXT, "too_long");
@@ -1519,6 +1571,7 @@ impl Core {
             sender: None,
             extra: MessageExtra {
                 disappear_ms: self.inner.db.chat_prefs(contact_id).disappear_ms,
+                view_once,
                 ..MessageExtra::default()
             },
         };
