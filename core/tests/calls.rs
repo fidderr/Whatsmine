@@ -186,7 +186,7 @@ async fn a_screen_arrives_in_order_and_a_viewer_can_ask_for_a_whole_picture() {
     // Nothing goes out before it is switched on.
     a.call_screen_frame(1, true, ScreenCodec::Vp9, vec![1; 100]);
 
-    a.call_screen_on(true, 1920, 1080);
+    a.call_screen_on(true, 1920, 1080, false);
     let shown = call_event(&mut rb, "the screen", |e| {
         matches!(e, CallEvent::PeerScreen { on: true, .. })
     })
@@ -244,7 +244,7 @@ async fn a_screen_arrives_in_order_and_a_viewer_can_ask_for_a_whole_picture() {
     .await;
 
     // Stopped, and whoever watched knows.
-    a.call_screen_on(false, 0, 0);
+    a.call_screen_on(false, 0, 0, false);
     call_event(&mut rb, "the end of the screen", |e| {
         matches!(e, CallEvent::PeerScreen { on: false, .. })
     })
@@ -270,6 +270,7 @@ async fn nobody_outside_the_call_shows_a_screen() {
             on: true,
             width: 1,
             height: 1,
+            can_control: false,
         },
     );
     let marker = a.send(&b.my_key(), "after it").unwrap();

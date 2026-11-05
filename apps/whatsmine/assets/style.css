@@ -3038,6 +3038,95 @@ input[type='range'] {
 .call-overlay.video-live .call-path {
   color: #6fd6a0;
 }
+.call-in-control {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  padding: 8px 16px;
+  border-radius: 20px;
+  background: var(--warning-soft);
+  color: var(--warning);
+  font-weight: 500;
+}
+.chat-note {
+  align-self: center;
+  margin: 8px auto;
+  padding: 4px 12px;
+  max-width: 90%;
+  border-radius: 12px;
+  background: var(--surface2);
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+  text-align: center;
+}
+.control-warning {
+  padding: 12px 16px;
+  border-radius: var(--radius-md);
+  background: var(--warning-soft);
+  color: var(--warning);
+  font-weight: 500;
+}
+.control-tick {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 48px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.control-tick input {
+  width: 22px;
+  height: 22px;
+  flex: none;
+  accent-color: var(--primary);
+}
+/* In control of someone's screen: that screen, and a way out. */
+body.call-driving .call-top,
+body.call-driving #wm-call-media .wm-tiles,
+body.call-driving #wm-call-media .wm-local {
+  display: none !important;
+}
+body.call-driving .call-overlay.video-live .call-controls {
+  position: absolute;
+  top: calc(8px + var(--safe-top, 0px));
+  right: 8px;
+  margin: 0;
+  padding: 0;
+  background: none;
+  align-self: auto;
+  gap: 8px;
+  flex-wrap: nowrap;
+}
+body.call-driving .call-btn {
+  width: 44px;
+  height: 44px;
+  margin: 0;
+}
+body.call-driving .call-btn::after {
+  content: none;
+}
+.wm-keys {
+  position: fixed;
+  z-index: 60;
+  left: 8px;
+  top: calc(8px + var(--safe-top, 0px));
+  min-height: 44px;
+  padding: 0 16px;
+  border: none;
+  border-radius: 22px;
+  background: var(--surface2);
+  color: var(--text);
+}
+.wm-keys-field {
+  position: fixed;
+  left: -100px;
+  bottom: 0;
+  width: 10px;
+  height: 10px;
+  opacity: 0;
+}
 /* A tap on the screen someone shows puts everything else out of the way. */
 body.call-chrome-off .call-top,
 body.call-chrome-off .call-controls {

@@ -129,6 +129,37 @@ pub enum CallEvent {
         on: bool,
         width: u32,
         height: u32,
+        /// They could be controlled, if they agree.
+        can_control: bool,
+    },
+    /// Someone asks to control this PC, and all the rules are met: time to ask the owner.
+    ControlAsked { call_id: String, from: String },
+    /// Someone asked, and the rules say no. The owner hears why.
+    ControlAskedAnyway {
+        call_id: String,
+        from: String,
+        why: crate::control::Refusal,
+    },
+    /// We asked to control someone's screen, and they will not have it.
+    ControlRefused {
+        call_id: String,
+        from: String,
+        why: crate::control::Refusal,
+    },
+    /// Someone is in control. `driving`: that is us. `until`: when it ends, for the owner.
+    ControlOn {
+        call_id: String,
+        who: String,
+        driving: bool,
+        scope: crate::control::Scope,
+        until: Option<crate::model::Millis>,
+    },
+    /// It is over, or the question is. Whatever anyone held down is to be let go now.
+    ControlOff {
+        call_id: String,
+        who: String,
+        driving: bool,
+        why: crate::control::Ended,
     },
     /// Someone watching our screen needs a whole picture.
     ScreenKeyWanted { call_id: String },
@@ -157,7 +188,13 @@ pub(crate) type MediaSink = Arc<Mutex<Option<mpsc::Sender<CallMedia>>>>;
 pub(crate) struct MediaIn {
     pub active: ActiveCall,
     pub sink: MediaSink,
+    /// The one session of input we take right now, and from whom.
+    pub control: ControlGate,
 }
+
+pub(crate) type ControlGate = Arc<Mutex<Option<([u8; 16], PublicKey)>>>;
+/// Where input that passed every rule goes.
+pub(crate) type ControlSink = Arc<Mutex<Option<mpsc::Sender<Vec<crate::control::Input>>>>>;
 
 /// Where a call stands, for a screen that was not there when it began.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

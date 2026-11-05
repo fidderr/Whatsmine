@@ -55,6 +55,7 @@ pub fn RichView(message_id: String, rich: Rich) -> Element {
             live_until,
         } => rsx! { PlaceView { lat, lon, label, live_until } },
         Rich::ContactCard { name, invite } => rsx! { CardView { name, invite } },
+        Rich::Note(text) => rsx! { div { class: "chat-note", "{text}" } },
     }
 }
 

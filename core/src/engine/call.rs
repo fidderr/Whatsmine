@@ -138,6 +138,8 @@ impl Engine {
 
     /// Ends whatever call there is and tells the UI why.
     pub(super) fn end_call(&mut self, reason: CallEndReason) {
+        self.control_call_or_sharing_over();
+        self.control.can_be_controlled = false;
         let Some(c) = self.call.take() else { return };
         self.set_active_call(None);
         self.publish_call_state();
@@ -426,7 +428,12 @@ impl Engine {
     }
 
     /// We started or stopped showing our screen. Closing the streams is what ends them.
-    pub(super) fn call_screen_on(&mut self, on: bool, width: u32, height: u32) {
+    pub(super) fn call_screen_on(&mut self, on: bool, width: u32, height: u32, can_control: bool) {
+        if !on {
+            self.control_call_or_sharing_over();
+        }
+        self.control.can_be_controlled = on && can_control;
+        let can_control = self.control.can_be_controlled;
         let Some(c) = self.call.as_mut().filter(|c| c.connected.is_some()) else {
             return;
         };
@@ -445,6 +452,7 @@ impl Engine {
                     on,
                     width,
                     height,
+                    can_control,
                 },
             );
         }
@@ -526,12 +534,14 @@ impl Engine {
         if c.sharer == Some(peer) {
             c.sharer = None;
             let call_id = id_from_bytes(&c.id);
+            self.control_stop_driving_if(peer);
             self.emit_call(CallEvent::PeerScreen {
                 call_id,
                 from: key_to_string(&peer),
                 on: false,
                 width: 0,
                 height: 0,
+                can_control: false,
             });
         }
         if was_peer {
@@ -681,6 +691,7 @@ impl Engine {
                             .as_ref()
                             .and_then(|c| c.showing.as_ref().map(|s| (c.id, s.width, s.height)))
                         {
+                            let can_control = self.control.can_be_controlled;
                             self.send(
                                 peer,
                                 Frame::CallScreen {
@@ -688,6 +699,7 @@ impl Engine {
                                     on: true,
                                     width,
                                     height,
+                                    can_control,
                                 },
                             );
                         }
@@ -744,6 +756,7 @@ impl Engine {
                 on,
                 width,
                 height,
+                can_control,
             } => {
                 let Some(c) = self
                     .call
@@ -753,6 +766,9 @@ impl Engine {
                     return;
                 };
                 c.sharer = on.then_some(peer);
+                if !on {
+                    self.control_stop_driving_if(peer);
+                }
                 self.publish_call_state();
                 self.emit_call(CallEvent::PeerScreen {
                     call_id: id_from_bytes(&call),
@@ -760,6 +776,7 @@ impl Engine {
                     on,
                     width,
                     height,
+                    can_control,
                 });
             }
             Frame::CallKeyRequest { call }

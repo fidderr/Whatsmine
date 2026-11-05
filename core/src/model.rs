@@ -88,6 +88,8 @@ pub struct Contact {
     pub state: ContactState,
     /// When their last session with us ended. `None` if never seen or hidden.
     pub last_seen: Option<Millis>,
+    /// When they became a contact: for a request left waiting, or someone from a group, not when
+    /// we first heard of them.
     pub created_at: Millis,
     /// Local path of their profile picture, if they shared one.
     pub avatar: Option<String>,
@@ -317,6 +319,10 @@ pub struct Settings {
     pub app_lock: bool,
     /// How long the app may be away before it asks again, in seconds. 0 means at once.
     pub lock_after_s: u32,
+    /// Since when someone may ask to control this PC, if anyone. Never set during a call: what was
+    /// turned on while a call runs does not count for that call.
+    #[serde(default)]
+    pub control_on_since: Option<Millis>,
     /// No screenshots, and a blank picture in the list of recent apps.
     pub block_screenshots: bool,
     /// Asks the keyboard not to learn from what is typed.
@@ -369,6 +375,7 @@ impl Default for Settings {
             density: "normal".into(),
             quiet_requests: false,
             request_filter: Vec::new(),
+            control_on_since: None,
             app_lock: false,
             lock_after_s: 60,
             block_screenshots: false,

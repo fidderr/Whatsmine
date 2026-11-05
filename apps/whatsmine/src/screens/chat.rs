@@ -1215,6 +1215,11 @@ fn Bubble(
     let more = message.clone();
     let held = message.clone();
     let e = &message.extra;
+    if let Some(whatsmine_core::rich::Rich::Note(text)) = &e.rich {
+        return rsx! {
+            div { class: "chat-note", "data-t": "chat-note", "{text}" }
+        };
+    }
     let has_media = message.attachment.is_some();
     let dir = if message.outgoing { "out" } else { "in" };
     let class = if has_media {

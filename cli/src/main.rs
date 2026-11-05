@@ -443,7 +443,12 @@ fn print_event(core: &Core, ev: &CoreEvent) {
                     label(core, from),
                     if *on { "is" } else { "stopped" }
                 ),
-                CallEvent::ScreenKeyWanted { .. } => {}
+                CallEvent::ScreenKeyWanted { .. }
+                | CallEvent::ControlAsked { .. }
+                | CallEvent::ControlAskedAnyway { .. }
+                | CallEvent::ControlRefused { .. }
+                | CallEvent::ControlOn { .. }
+                | CallEvent::ControlOff { .. } => {}
                 CallEvent::Ended {
                     reason,
                     duration_ms,

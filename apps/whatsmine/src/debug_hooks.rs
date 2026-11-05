@@ -137,6 +137,30 @@ fn core_action(core: &whatsmine_core::Core, what: &str) -> String {
             .accept(rest)
             .map_or_else(|e| format!("error: {e}"), |()| "ok".to_owned()),
         "online" => core.is_online(rest).to_string(),
+        // Turned on some time ago, and this person has been known for a long time.
+        "control_on" => {
+            let mut settings = core.settings();
+            settings.control_on_since = Some(whatsmine_core::now_ms() - 60_000);
+            core.save_settings(&settings)
+                .map_or_else(|e| format!("error: {e}"), |()| "ok".to_owned())
+        }
+        "known_long" => {
+            core.known_since_as_is(
+                rest,
+                whatsmine_core::now_ms() - whatsmine_core::control::KNOWN_FOR - 60_000,
+            );
+            "ok".to_owned()
+        }
+        // The owner's own hand on the mouse, in a test run where nothing looks at the real one.
+        "control_busy" => {
+            core.control_owner_busy();
+            "ok".to_owned()
+        }
+        "control_stop" => {
+            core.control_stop();
+            "ok".to_owned()
+        }
+        "control_log" => core.control_log().len().to_string(),
         "requests" => core
             .requests()
             .iter()

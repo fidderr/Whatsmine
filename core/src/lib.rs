@@ -15,6 +15,7 @@
 pub mod backup;
 pub mod calls;
 pub mod codes;
+pub mod control;
 pub mod db;
 mod engine;
 pub mod files;
@@ -119,6 +120,7 @@ struct Inner {
     runtime: Mutex<Option<tokio::runtime::Runtime>>,
     /// Where incoming call media goes (whoever called `call_media` last).
     media_sink: calls::MediaSink,
+    control_sink: calls::ControlSink,
 }
 
 impl Drop for Inner {
@@ -194,6 +196,7 @@ impl Core {
             echoes.clone(),
         ));
         let media_sink: calls::MediaSink = Arc::new(Mutex::new(None));
+        let control_sink: calls::ControlSink = Arc::new(Mutex::new(None));
         let shared = Shared {
             online: Arc::new(Mutex::new(HashSet::new())),
             net: Arc::new(Mutex::new(NetStatus::Connecting)),
@@ -209,6 +212,7 @@ impl Core {
             shared.clone(),
             files::media_dir(dir),
             media_sink.clone(),
+            control_sink.clone(),
             linked,
             echoes,
             cmd_rx,
@@ -227,6 +231,7 @@ impl Core {
                 shared,
                 runtime: Mutex::new(Some(runtime)),
                 media_sink,
+                control_sink,
             }),
         })
     }
@@ -308,8 +313,13 @@ impl Core {
     }
 
     /// We started or stopped showing our screen in the connected call.
-    pub fn call_screen_on(&self, on: bool, width: u32, height: u32) {
-        self.cmd(Cmd::CallScreenOn { on, width, height });
+    pub fn call_screen_on(&self, on: bool, width: u32, height: u32, can_control: bool) {
+        self.cmd(Cmd::CallScreenOn {
+            on,
+            width,
+            height,
+            can_control,
+        });
     }
 
     /// Sends one encoded frame of the screen we are showing.
@@ -334,6 +344,98 @@ impl Core {
 
     /// The stream of incoming call media. Only the latest caller of this
     /// receives it, so a new screen can take over from one that went away.
+    /// Ask to control the screen the other side is showing.
+    pub fn control_ask(&self) {
+        self.cmd(Cmd::ControlAsk);
+    }
+
+    /// The owner's answer. Only for this device's own consent screen.
+    pub fn control_answer(&self, yes: bool, scope: control::Scope) {
+        self.cmd(Cmd::ControlAnswer { yes, scope });
+    }
+
+    /// Stops it, on whichever side we are.
+    pub fn control_stop(&self) {
+        self.cmd(Cmd::ControlStop);
+    }
+
+    /// The owner's own hand on the mouse or keyboard: whoever is in control waits.
+    pub fn control_owner_busy(&self) {
+        self.cmd(Cmd::ControlOwnerBusy);
+    }
+
+    /// More time. Only from the owner's own hand.
+    pub fn control_extend(&self) {
+        self.cmd(Cmd::ControlExtend);
+    }
+
+    /// The screen locked, or what is shown went away.
+    pub fn control_not_safe(&self) {
+        self.cmd(Cmd::ControlNotSafe);
+    }
+
+    /// What we do on the screen we control.
+    pub fn control_send(&self, events: Vec<control::Input>) {
+        self.cmd(Cmd::ControlSend(events));
+    }
+
+    /// Input that passed every rule, for whoever puts it on the desktop.
+    pub fn control_input(&self) -> mpsc::Receiver<Vec<control::Input>> {
+        let (tx, rx) = mpsc::channel(256);
+        *self
+            .inner
+            .control_sink
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = Some(tx);
+        rx
+    }
+
+    /// A line in a chat, on this device only, in the words of whoever writes it.
+    pub fn add_chat_note(&self, contact_id: &str, text: &str) {
+        let now = now_ms();
+        let message = Message {
+            id: uuid::Uuid::now_v7().to_string(),
+            contact_id: contact_id.to_owned(),
+            outgoing: true,
+            body: String::new(),
+            sent_at: now,
+            received_at: now,
+            status: MessageStatus::Read,
+            read: true,
+            attachment: None,
+            sender: None,
+            extra: rich::MessageExtra {
+                rich: Some(Rich::Note(text.to_owned())),
+                ..rich::MessageExtra::default()
+            },
+        };
+        if matches!(self.inner.db.insert_message(&message), Ok(true)) {
+            self.emit(CoreEvent::MessageAdded(message));
+            self.emit(CoreEvent::ContactsChanged);
+        }
+    }
+
+    /// Who controlled this PC, newest first.
+    pub fn control_log(&self) -> Vec<control::LogEntry> {
+        self.inner.db.control_log()
+    }
+
+    /// Puts something on a stream of input as it is. For tests that play someone who does not
+    /// follow the rules, like [`Self::send_as_is`].
+    #[doc(hidden)]
+    pub fn control_raw_as_is(&self, right_session: bool, frames: Vec<control::RawFrame>) {
+        self.cmd(Cmd::ControlRaw {
+            right_session,
+            frames,
+        });
+    }
+
+    /// Set back when someone became a contact. For tests of what takes a week.
+    #[doc(hidden)]
+    pub fn known_since_as_is(&self, id: &str, at: Millis) {
+        self.inner.db.set_contact_since(id, at);
+    }
+
     pub fn call_media(&self) -> mpsc::Receiver<calls::CallMedia> {
         let (tx, rx) = mpsc::channel(256);
         *self

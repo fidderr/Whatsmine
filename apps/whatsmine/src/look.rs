@@ -206,7 +206,7 @@ mod tests {
     #[test]
     fn the_ready_made_looks_are_what_the_stylesheet_says() {
         let dark = block(":root");
-        let light = block(".theme-light,\r\n.theme-colorblind-light");
+        let light = block(".theme-light,");
         let black = block(".theme-black");
         for (base, own) in [
             (Base::Dark, &dark),

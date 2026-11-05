@@ -141,6 +141,14 @@ CREATE TABLE IF NOT EXISTS contact_keys (
     contact_id TEXT PRIMARY KEY REFERENCES contacts(id) ON DELETE CASCADE,
     sealed     BLOB NOT NULL
 );
+CREATE TABLE IF NOT EXISTS control_log (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    who          TEXT NOT NULL,
+    whole_screen INTEGER NOT NULL,
+    since        INTEGER NOT NULL,
+    until        INTEGER NOT NULL,
+    why          TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS looks (
     id     TEXT PRIMARY KEY,
     at     INTEGER NOT NULL,
@@ -330,6 +338,9 @@ impl Database {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?5)
                  ON CONFLICT(id) DO UPDATE SET
                     state = excluded.state,
+                    created_at = CASE
+                        WHEN excluded.state = 'accepted' AND contacts.state <> 'accepted'
+                        THEN excluded.created_at ELSE contacts.created_at END,
                     their_name = COALESCE(?2, contacts.their_name),
                     nickname = COALESCE(?3, contacts.nickname),
                     last_activity = excluded.last_activity,
@@ -1030,6 +1041,51 @@ impl Database {
         if let Ok(json) = serde_json::to_vec(folders) {
             let _ = self.set_secret("folders", &json);
         }
+    }
+
+    pub fn add_control_log(&self, entry: &crate::control::LogEntry) {
+        let result = self.lock().execute(
+            "INSERT INTO control_log (who, whole_screen, since, until, why)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                entry.who,
+                entry.whole_screen,
+                entry.from,
+                entry.to,
+                entry.why.as_str()
+            ],
+        );
+        if let Err(e) = result {
+            tracing::warn!("could not write down who was in control: {e}");
+        }
+    }
+
+    pub fn control_log(&self) -> Vec<crate::control::LogEntry> {
+        let conn = self.lock();
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT who, whole_screen, since, until, why FROM control_log ORDER BY id DESC LIMIT 200",
+        ) else {
+            return Vec::new();
+        };
+        stmt.query_map([], |row| {
+            Ok(crate::control::LogEntry {
+                who: row.get(0)?,
+                whole_screen: row.get(1)?,
+                from: row.get(2)?,
+                to: row.get(3)?,
+                why: crate::control::Ended::from_word(&row.get::<_, String>(4)?),
+            })
+        })
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default()
+    }
+
+    /// Only for tests of what takes a week.
+    pub fn set_contact_since(&self, id: &str, at: Millis) {
+        let _ = self.lock().execute(
+            "UPDATE contacts SET created_at = ?2 WHERE id = ?1",
+            params![id, at],
+        );
     }
 
     pub fn add_call_record(&self, c: &CallRecord) {

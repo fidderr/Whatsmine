@@ -45,6 +45,8 @@ pub enum Rich {
     ContactCard { name: String, invite: String },
     /// A copy of a look. Nothing changes for anyone until they choose to use it.
     Look(Box<crate::look::Look>),
+    /// A line this device wrote in the chat itself. Never leaves this device.
+    Note(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,6 +129,7 @@ impl Rich {
             Rich::Place { label, .. } => label,
             Rich::ContactCard { name, .. } => name,
             Rich::Look(look) => &look.name,
+            Rich::Note(text) => text,
         }
     }
 }

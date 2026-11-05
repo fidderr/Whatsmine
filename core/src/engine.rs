@@ -48,6 +48,7 @@ use crate::sealing::{OpenError, Sealing};
 use crate::sibling::{DeviceState, SyncEvent};
 
 mod call;
+mod control;
 mod group;
 pub(crate) use group::{group_link_state, join_asked_name, save_group_link_state};
 
@@ -228,6 +229,7 @@ pub(crate) enum Cmd {
         on: bool,
         width: u32,
         height: u32,
+        can_control: bool,
     },
     /// One encoded frame of our screen.
     CallScreenFrame {
@@ -238,11 +240,33 @@ pub(crate) enum Cmd {
     },
     /// We need a whole picture of the screen we are watching.
     CallScreenKey,
+    ControlAsk,
+    ControlAnswer {
+        yes: bool,
+        scope: crate::control::Scope,
+    },
+    ControlStop,
+    ControlOwnerBusy,
+    ControlExtend,
+    ControlNotSafe,
+    ControlSend(Vec<crate::control::Input>),
+    ControlRaw {
+        right_session: bool,
+        frames: Vec<crate::control::RawFrame>,
+    },
     Shutdown(std::sync::mpsc::Sender<()>),
 }
 
 /// Events from the connection tasks back into the engine.
 enum Internal {
+    /// Input off the wire, not opened yet.
+    ControlBatch {
+        peer: PublicKey,
+        session: [u8; 16],
+        sealed: Vec<u8>,
+    },
+    /// Something that cannot be a batch of input.
+    ControlStrike,
     /// Someone came in to become our other device.
     LinkConn(Connection),
     /// They have everything now.
@@ -406,6 +430,9 @@ pub(crate) struct Engine {
     /// How often a download failed its hash check (retried once).
     corrupt_retries: HashMap<String, u8>,
     call: Option<CallState>,
+    control: control::ControlSide,
+    control_sink: calls::ControlSink,
+    control_scope_was_whole: bool,
     /// What this device is, next to another one of the same person.
     this_device: DeviceState,
     echoes: crate::sibling::Echoes,
@@ -440,6 +467,7 @@ impl Engine {
         shared: Shared,
         media: PathBuf,
         media_sink: MediaSink,
+        control_sink: calls::ControlSink,
         linked: Arc<AtomicBool>,
         echoes: crate::sibling::Echoes,
         mut cmds: mpsc::UnboundedReceiver<Cmd>,
@@ -476,10 +504,14 @@ impl Engine {
             downloads: Arc::new(Mutex::new(HashSet::new())),
             corrupt_retries: HashMap::new(),
             call: None,
+            control: control::ControlSide::new(),
+            control_sink,
+            control_scope_was_whole: false,
             group_calls: HashMap::new(),
             media_in: MediaIn {
                 active: ActiveCall::default(),
                 sink: media_sink,
+                control: Arc::new(Mutex::new(None)),
             },
             video_inflight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             db,
@@ -581,6 +613,7 @@ impl Engine {
     /// Makes what is so match what should be so. Runs after everything that happens.
     fn reconcile(&mut self) {
         self.run_timers();
+        self.control_tick();
         let now = Instant::now();
         if self.wanted_dirty {
             self.refresh_wanted();
@@ -800,6 +833,10 @@ impl Engine {
                 next = at;
             }
         };
+        // Someone in control: that it ends in time must not wait for anything else to happen.
+        if self.control_is_on() {
+            sooner(now + Duration::from_millis(500));
+        }
         if self.call.is_some() {
             sooner(now + CALL_TICK);
         }
@@ -2365,7 +2402,26 @@ impl Engine {
                 }
             }
             Cmd::CallVideoOn(on) => self.call_video_on(on),
-            Cmd::CallScreenOn { on, width, height } => self.call_screen_on(on, width, height),
+            Cmd::CallScreenOn {
+                on,
+                width,
+                height,
+                can_control,
+            } => self.call_screen_on(on, width, height, can_control),
+            Cmd::ControlAsk => self.control_ask(),
+            Cmd::ControlAnswer { yes, scope } => {
+                self.control_scope_was_whole = scope == crate::control::Scope::WholeScreen;
+                self.control_answer(yes, scope);
+            }
+            Cmd::ControlStop => self.control_stop(),
+            Cmd::ControlOwnerBusy => self.control_owner_busy(),
+            Cmd::ControlExtend => self.control_extend(),
+            Cmd::ControlNotSafe => self.control_not_safe(),
+            Cmd::ControlSend(events) => self.control_send(events),
+            Cmd::ControlRaw {
+                right_session,
+                frames,
+            } => self.control_raw(right_session, frames),
             Cmd::CallScreenFrame {
                 ts,
                 key,
@@ -2583,6 +2639,12 @@ impl Engine {
 
     fn handle_internal(&mut self, ev: Internal) {
         match ev {
+            Internal::ControlBatch {
+                peer,
+                session,
+                sealed,
+            } => self.on_control_batch(peer, session, &sealed),
+            Internal::ControlStrike => self.control_strike(),
             Internal::Connected {
                 conn,
                 send,
@@ -3312,6 +3374,9 @@ impl Engine {
             | Frame::CallVideo { .. }
             | Frame::CallScreen { .. }
             | Frame::CallKeyRequest { .. }) => self.on_call_frame(peer, f),
+            f @ (Frame::ControlAsk { .. }
+            | Frame::ControlAnswer { .. }
+            | Frame::ControlStop { .. }) => self.on_control_frame(peer, f),
             Frame::FileDecline { id: mid } => {
                 if self.group_declined(peer, &mid) {
                     return;
@@ -3849,6 +3914,10 @@ fn spawn_file_acceptor(
                 }
                 if &header[..4] == crate::protocol::SCREEN_STREAM_MAGIC {
                     calls::receive_screen(recv, header, peer, &media_in).await;
+                    return;
+                }
+                if &header[..4] == crate::protocol::CONTROL_STREAM_MAGIC {
+                    control::receive_control(recv, header, peer, &media_in, tx).await;
                     return;
                 }
                 let progress_tx = tx.clone();

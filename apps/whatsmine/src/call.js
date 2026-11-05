@@ -38,6 +38,7 @@
     sSent: 0, sBytes: 0, sRecv: 0, sDec: 0, sGaps: 0, sKeys: 0
   }
   // For tests: a painted picture instead of what is really on screen.
+  let driving = null
   let paintedScreen = false
   let dx = null
   let run = null
@@ -413,7 +414,7 @@
     const reader = new MediaStreamTrackProcessor({ track }).readable.getReader()
     const set = track.getSettings()
     r.share = { stream, track, reader, enc: null, w: 0, h: 0, forceKey: true, lastKey: 0, busy: false }
-    send({ t: 'screen', on: true, w: set.width || 0, h: set.height || 0 })
+    send({ t: 'screen', on: true, w: set.width || 0, h: set.height || 0, label: track.label || '', surface: set.displaySurface || '' })
     ;(async () => {
       for (;;) {
         let res
@@ -455,10 +456,16 @@
       const p = Array.from(points.values())
       return p.length < 2 ? 0 : Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y)
     }
-    tile.addEventListener('wheel', e => { e.preventDefault(); z *= e.deltaY < 0 ? 1.15 : 0.87; show() }, { passive: false })
+    tile.addEventListener('wheel', e => {
+      if (driving) return
+      e.preventDefault()
+      z *= e.deltaY < 0 ? 1.15 : 0.87
+      show()
+    }, { passive: false })
     let moved = 0
     let downAt = 0
     tile.addEventListener('pointerdown', e => {
+      if (driving) return
       tile.setPointerCapture(e.pointerId)
       points.set(e.pointerId, { x: e.clientX, y: e.clientY })
       spread = apart()
@@ -467,7 +474,7 @@
     })
     tile.addEventListener('pointermove', e => {
       const p = points.get(e.pointerId)
-      if (!p) return
+      if (!p || driving) return
       moved += Math.abs(e.clientX - p.x) + Math.abs(e.clientY - p.y)
       if (points.size === 1 && z > 1) { x += e.clientX - p.x; y += e.clientY - p.y }
       p.x = e.clientX
@@ -482,11 +489,16 @@
     const lift = e => { points.delete(e.pointerId); spread = apart() }
     tile.addEventListener('pointerup', e => {
       lift(e)
+      if (driving) return
       // A tap, not a drag: the rest of the call screen goes away, or comes back.
       if (moved < 12 && performance.now() - downAt < 350) document.body.classList.toggle('call-chrome-off')
     })
     tile.addEventListener('pointercancel', lift)
-    tile.addEventListener('dblclick', () => { z = z > 1 ? 1 : 2.5; show() })
+    tile.addEventListener('dblclick', () => {
+      if (driving) return
+      z = z > 1 ? 1 : 2.5
+      show()
+    })
   }
 
   function screenTile (p) {
@@ -566,6 +578,251 @@
     } catch (e) { note('screen-decode', e); p.sDec = null; p.sLost = true; askKey(p) }
   }
 
+  // ---- controlling the screen someone shows ----
+  // Keys by their place on the keyboard: [scan code, extended]. What is not in here stays here, like
+  // the Windows key.
+  const SCAN = (() => {
+    const m = { Escape: [1, 0], IntlBackslash: [0x56, 0], F11: [0x57, 0], F12: [0x58, 0] }
+    ;('Digit1 Digit2 Digit3 Digit4 Digit5 Digit6 Digit7 Digit8 Digit9 Digit0 Minus Equal Backspace Tab ' +
+      'KeyQ KeyW KeyE KeyR KeyT KeyY KeyU KeyI KeyO KeyP BracketLeft BracketRight Enter ControlLeft ' +
+      'KeyA KeyS KeyD KeyF KeyG KeyH KeyJ KeyK KeyL Semicolon Quote Backquote ShiftLeft Backslash ' +
+      'KeyZ KeyX KeyC KeyV KeyB KeyN KeyM Comma Period Slash ShiftRight NumpadMultiply AltLeft Space CapsLock ' +
+      'F1 F2 F3 F4 F5 F6 F7 F8 F9 F10 NumLock ScrollLock Numpad7 Numpad8 Numpad9 NumpadSubtract ' +
+      'Numpad4 Numpad5 Numpad6 NumpadAdd Numpad1 Numpad2 Numpad3 Numpad0 NumpadDecimal')
+      .split(' ').forEach((name, i) => { m[name] = [2 + i, 0] })
+    const ext = {
+      NumpadEnter: 0x1C, ControlRight: 0x1D, NumpadDivide: 0x35, PrintScreen: 0x37, AltRight: 0x38,
+      Home: 0x47, ArrowUp: 0x48, PageUp: 0x49, ArrowLeft: 0x4B, ArrowRight: 0x4D, End: 0x4F,
+      ArrowDown: 0x50, PageDown: 0x51, Insert: 0x52, Delete: 0x53, ContextMenu: 0x5D
+    }
+    Object.keys(ext).forEach(name => { m[name] = [ext[name], 1] })
+    return m
+  })()
+
+  function driveOn (m) {
+    if (!m.on) {
+      if (driving) driving.stop()
+      driving = null
+      return
+    }
+    const r = run
+    if (!r || driving) return
+    const peer = Array.from(r.peers.values()).find(p => p.sTile)
+    if (!peer) return
+    const tile = peer.sTile
+    const video = peer.sVideo
+    // All of it, at the size it is: what is pointed at is what gets clicked.
+    video.style.transform = ''
+    document.body.classList.remove('call-chrome-off')
+    document.body.classList.add('call-driving')
+    let queue = []
+    const put = e => {
+      const last = queue[queue.length - 1]
+      if (e[0] === 'm' && last && last[0] === 'm') queue[queue.length - 1] = e
+      else queue.push(e)
+    }
+    const flush = setInterval(() => {
+      if (queue.length) {
+        send({ t: 'ctl', e: queue })
+        queue = []
+      }
+    }, 33)
+    // A place on the picture, from 0 to 65535. Nothing for the black bars around it.
+    const spot = e => {
+      const box = video.getBoundingClientRect()
+      const vw = video.videoWidth
+      const vh = video.videoHeight
+      if (!vw || !vh || !box.width || !box.height) return null
+      const scale = Math.min(box.width / vw, box.height / vh)
+      const w = vw * scale
+      const h = vh * scale
+      const x = (e.clientX - box.left - (box.width - w) / 2) / w
+      const y = (e.clientY - box.top - (box.height - h) / 2) / h
+      if (x < 0 || x > 1 || y < 0 || y > 1) return null
+      return ['m', Math.round(x * 65535), Math.round(y * 65535)]
+    }
+    const fingers = new Map()
+    let press = null
+    let scroll = 0
+    const onDown = e => {
+      e.preventDefault()
+      quiet(() => tile.setPointerCapture(e.pointerId))
+      const at = spot(e)
+      if (e.pointerType !== 'touch') {
+        if (!at) return
+        put(at)
+        put(['b', e.button, 1])
+        return
+      }
+      fingers.set(e.pointerId, { x: e.clientX, y: e.clientY })
+      if (fingers.size === 1) {
+        press = { at, x: e.clientX, y: e.clientY, moved: 0, dragging: false, done: false, when: performance.now() }
+        press.timer = setTimeout(() => {
+          // Held still: the right button.
+          if (press && !press.dragging && press.at) {
+            put(press.at)
+            put(['b', 2, 1])
+            put(['b', 2, 0])
+            press.done = true
+          }
+        }, 600)
+      } else if (press) {
+        // A second finger: scrolling, whatever the first was about to do.
+        clearTimeout(press.timer)
+        if (press.dragging) put(['b', 0, 0])
+        press.dragging = false
+        press.done = true
+      }
+    }
+    const onMove = e => {
+      e.preventDefault()
+      if (e.pointerType !== 'touch') {
+        const at = spot(e)
+        if (at) put(at)
+        return
+      }
+      const f = fingers.get(e.pointerId)
+      if (!f) return
+      const dy = e.clientY - f.y
+      const dist = Math.abs(e.clientX - f.x) + Math.abs(dy)
+      f.x = e.clientX
+      f.y = e.clientY
+      if (fingers.size >= 2) {
+        scroll += dy
+        while (Math.abs(scroll) >= 24) {
+          put(['w', 0, scroll > 0 ? 120 : -120])
+          scroll -= scroll > 0 ? 24 : -24
+        }
+        return
+      }
+      if (!press || press.done) return
+      press.moved += dist
+      if (!press.dragging && press.moved > 12 && press.at) {
+        clearTimeout(press.timer)
+        press.dragging = true
+        put(press.at)
+        put(['b', 0, 1])
+      }
+      if (press.dragging) {
+        const at = spot(e)
+        if (at) put(at)
+      }
+    }
+    const onUp = e => {
+      e.preventDefault()
+      if (e.pointerType !== 'touch') {
+        put(['b', e.button, 0])
+        return
+      }
+      fingers.delete(e.pointerId)
+      if (!press) return
+      clearTimeout(press.timer)
+      if (press.dragging) put(['b', 0, 0])
+      else if (!press.done && press.at && performance.now() - press.when < 600) {
+        put(press.at)
+        put(['b', 0, 1])
+        put(['b', 0, 0])
+      }
+      if (!fingers.size) {
+        press = null
+        scroll = 0
+      }
+    }
+    const onCancel = e => {
+      fingers.delete(e.pointerId)
+      if (press) {
+        clearTimeout(press.timer)
+        if (press.dragging) put(['b', 0, 0])
+        press = null
+      }
+    }
+    const onWheel = e => {
+      e.preventDefault()
+      const notch = v => (v === 0 ? 0 : v > 0 ? -120 : 120)
+      put(['w', notch(e.deltaX), notch(e.deltaY)])
+    }
+    const noMenu = e => e.preventDefault()
+    const down = new Set()
+    const onKey = e => {
+      if (e.target === keys) return
+      const s = SCAN[e.code]
+      if (!s) return
+      e.preventDefault()
+      e.stopPropagation()
+      const isDown = e.type === 'keydown'
+      if (isDown) down.add(e.code)
+      else down.delete(e.code)
+      put(['k', s[0], s[1], isDown ? 1 : 0])
+    }
+    // Looking away: nothing stays held down over there.
+    const letGo = () => {
+      down.forEach(code => put(['k', SCAN[code][0], SCAN[code][1], 0]))
+      down.clear()
+    }
+    // A phone's keyboard, in a field with one space in it: gone means Backspace was pressed.
+    let keys = null
+    let keysButton = null
+    if (window.matchMedia && matchMedia('(pointer: coarse)').matches) {
+      const tap = (code) => {
+        put(['k', code, 0, 1])
+        put(['k', code, 0, 0])
+      }
+      keys = document.createElement('input')
+      keys.className = 'wm-keys-field'
+      keys.setAttribute('autocapitalize', 'off')
+      keys.setAttribute('autocomplete', 'off')
+      keys.setAttribute('autocorrect', 'off')
+      keys.value = ' '
+      keys.addEventListener('input', () => {
+        const v = keys.value
+        if (v.length === 0) tap(0x0E)
+        else if (v.length > 1) put(['t', v.slice(1)])
+        keys.value = ' '
+      })
+      keys.addEventListener('keydown', e => {
+        if (e.key === 'Enter') {
+          e.preventDefault()
+          tap(0x1C)
+        }
+      })
+      keysButton = document.createElement('button')
+      keysButton.className = 'wm-keys'
+      keysButton.textContent = m.keys || ''
+      keysButton.setAttribute('data-t', 'control-keys')
+      keysButton.addEventListener('click', () => { keys.value = ' '; keys.focus() })
+      document.body.append(keys, keysButton)
+    }
+    tile.addEventListener('pointerdown', onDown)
+    tile.addEventListener('pointermove', onMove)
+    tile.addEventListener('pointerup', onUp)
+    tile.addEventListener('pointercancel', onCancel)
+    tile.addEventListener('wheel', onWheel, { passive: false })
+    tile.addEventListener('contextmenu', noMenu)
+    document.addEventListener('keydown', onKey, true)
+    document.addEventListener('keyup', onKey, true)
+    window.addEventListener('blur', letGo)
+    driving = {
+      stop: () => {
+        letGo()
+        if (queue.length) send({ t: 'ctl', e: queue })
+        clearInterval(flush)
+        if (press) clearTimeout(press.timer)
+        tile.removeEventListener('pointerdown', onDown)
+        tile.removeEventListener('pointermove', onMove)
+        tile.removeEventListener('pointerup', onUp)
+        tile.removeEventListener('pointercancel', onCancel)
+        tile.removeEventListener('wheel', onWheel)
+        tile.removeEventListener('contextmenu', noMenu)
+        document.removeEventListener('keydown', onKey, true)
+        document.removeEventListener('keyup', onKey, true)
+        window.removeEventListener('blur', letGo)
+        if (keys) keys.remove()
+        if (keysButton) keysButton.remove()
+        document.body.classList.remove('call-driving')
+      }
+    }
+  }
+
   // ---- call lifecycle ----
   async function start (m) {
     stop()
@@ -599,6 +856,10 @@
     quiet(() => r.micReader && r.micReader.cancel())
     quiet(() => r.camReader && r.camReader.cancel())
     stopShowing(r)
+    if (driving) {
+      driving.stop()
+      driving = null
+    }
     ;[r.mic, r.cam].forEach(s => s && s.getTracks().forEach(t => t.stop()))
     for (const c of [r.aenc, r.venc]) quiet(() => c && c.close())
     for (const id of Array.from(r.peers.keys())) removePeer(r, id)
@@ -637,6 +898,7 @@
       case 'v': return onVideo(m)
       case 's': return onScreen(m)
       case 'share': return shareOn(!!m.on)
+      case 'control': return driveOn(m)
       case 'screenKey':
         if (run && run.share) run.share.forceKey = true
         return
@@ -649,6 +911,10 @@
           p.sLost = true
           askKey(p)
         } else {
+          if (driving) {
+            driving.stop()
+            driving = null
+          }
           closeScreen(p)
         }
         return

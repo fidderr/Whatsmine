@@ -165,6 +165,9 @@ pub enum Frame {
         on: bool,
         width: u32,
         height: u32,
+        /// This device could be controlled, if its owner agrees. Says nothing about whether they
+        /// turned that on: that is for them to know.
+        can_control: bool,
     },
     /// "Send a whole picture": someone just started watching, or lost their place.
     CallKeyRequest {
@@ -177,6 +180,18 @@ pub enum Frame {
     },
     SiblingAck {
         seq: i64,
+    },
+    /// May I control the screen you are showing?
+    ControlAsk {
+        call: [u8; 16],
+    },
+    ControlAnswer {
+        call: [u8; 16],
+        answer: ControlReply,
+    },
+    /// Whoever sends this is done with it.
+    ControlStop {
+        call: [u8; 16],
     },
 }
 
@@ -248,11 +263,37 @@ pub const AUDIO_DATAGRAM_MAGIC: u8 = 0xA1;
 /// then one encoded frame until the stream ends. Flag bit 0 = key frame.
 pub const VIDEO_STREAM_MAGIC: &[u8; 4] = b"WMV1";
 
+/// What the one being asked says.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ControlReply {
+    Yes(ControlKey),
+    No(crate::control::Refusal),
+}
+
+/// What it takes to send input for one session. Made for this session, and it dies with it.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlKey {
+    pub session: [u8; 16],
+    pub key: [u8; 32],
+    pub scope: crate::control::Scope,
+}
+
+/// Frames can end up in logs. This one does not take its key along.
+impl std::fmt::Debug for ControlKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ControlKey")
+            .field("scope", &self.scope)
+            .finish_non_exhaustive()
+    }
+}
+
 /// First bytes of a shown screen's uni stream, in the same 28-byte header shape: `"WMS1"`, the call
 /// id and 8 unused bytes. Then frame after frame: length (u32 BE), number (u32 BE), time (u32 BE),
 /// flags (one byte: bit 0 a whole picture, bits 1 and 2 the codec), and the frame. A screen is text
 /// more often than not: late is better than wrong, so it comes in order on one stream.
 pub const SCREEN_STREAM_MAGIC: &[u8; 4] = b"WMS1";
+/// Starts a stream of input for someone who was let in, see `control.rs`.
+pub const CONTROL_STREAM_MAGIC: &[u8; 4] = b"WMI1";
 
 /// Largest encoded video frame we accept.
 pub const MAX_VIDEO_FRAME: usize = 1024 * 1024;

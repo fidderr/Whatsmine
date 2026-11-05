@@ -8,6 +8,7 @@ pub mod boot;
 pub mod call;
 pub mod clipboard;
 pub mod components;
+pub mod control_win;
 #[cfg(feature = "test-hooks")]
 pub mod debug_hooks;
 #[cfg(feature = "desktop")]

@@ -517,6 +517,24 @@ pub fn PrivacyScreen() -> Element {
     let blocked = core.blocked();
     let hidden = core.hidden_chats().len();
     let can_lock = crate::lock::can_lock();
+    let control_core = core.clone();
+    let mut control_toast = use_context::<ToastSig>();
+    let control_log: Vec<(String, String)> = core
+        .control_log()
+        .iter()
+        .map(|entry| {
+            let name = core
+                .contact(&entry.who)
+                .map(|c| c.display_name())
+                .unwrap_or_default();
+            let line = format!(
+                "{name}: {}, {}",
+                crate::fmt::list_time(&tr, entry.from),
+                crate::fmt::duration((entry.to - entry.from).max(0) as u64)
+            );
+            (format!("{}-{}", entry.who, entry.from), line)
+        })
+        .collect();
     let lock_after = opt(
         &tr,
         &[
@@ -553,6 +571,46 @@ pub fn PrivacyScreen() -> Element {
                         note: t(&tr, "settings.typing_hint"),
                         checked: s.typing_indicators,
                         on_change: move |v| change(settings, |s| s.typing_indicators = v),
+                    }
+                }
+                if cfg!(windows) {
+                    h2 { class: "gt", "{t(&tr, \"privacy.control\")}" }
+                    div { class: "group",
+                        SwitchRow {
+                            title: t(&tr, "privacy.control_row"),
+                            note: t(&tr, "privacy.control_note"),
+                            checked: s.control_on_since.is_some(),
+                            tag: "control-allow-setting",
+                            on_change: move |v: bool| {
+                                if !v {
+                                    change(settings, |s| s.control_on_since = None);
+                                    return;
+                                }
+                                // Not while someone is on the line: that is when people get talked
+                                // into things.
+                                if control_core.call_snapshot().is_some() {
+                                    toast(&mut control_toast, t(&tr, "privacy.control_in_call"), ToastLevel::Info);
+                                    return;
+                                }
+                                spawn(async move {
+                                    if crate::lock::prove(&t(&tr, "lock.reason")).await {
+                                        change(settings, |s| {
+                                            s.control_on_since = Some(whatsmine_core::now_ms());
+                                        });
+                                    }
+                                });
+                            },
+                        }
+                        if !control_log.is_empty() {
+                            div { class: "row sm still", "data-t": "control-log",
+                                div { class: "stack",
+                                    span { class: "sub", "{t(&tr, \"privacy.control_log\")}" }
+                                    for (key, line) in control_log.iter().cloned() {
+                                        span { key: "{key}", class: "note", "{line}" }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 h2 { class: "gt", "{t(&tr, \"privacy.on_device\")}" }
