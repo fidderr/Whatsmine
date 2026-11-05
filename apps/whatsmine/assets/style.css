@@ -394,14 +394,18 @@ div.row[role="button"]:hover {
   font-size: 0.75rem;
   line-height: 1.33;
 }
+/* What a row is set to. On a narrow screen a long one takes a second line, not an ellipsis. */
 .val {
   flex: none;
-  max-width: 45%;
+  max-width: 50%;
   color: var(--text-secondary);
   font-size: 0.875rem;
-  white-space: nowrap;
+  text-align: right;
+  overflow-wrap: break-word;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
   overflow: hidden;
-  text-overflow: ellipsis;
 }
 .stack {
   flex: 1;

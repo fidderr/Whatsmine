@@ -418,6 +418,22 @@ fn Main(core: AppCore) -> Element {
         look_core.app_look()
     });
     let look = app_look();
+    // Whether the device is dark, as Android says it: the WebView's prefers-color-scheme follows
+    // the app's own Android theme instead, so a phone in dark mode got a light page with light
+    // status bar icons on it.
+    #[cfg(target_os = "android")]
+    let mut system_dark = use_signal(crate::platform::system_dark);
+    #[cfg(target_os = "android")]
+    let theme_class = if look.base == whatsmine_core::look::Base::System && look.colors.is_empty() {
+        if *system_dark.read() {
+            "theme-dark"
+        } else {
+            "theme-light"
+        }
+    } else {
+        crate::look::theme_class(look.base)
+    };
+    #[cfg(not(target_os = "android"))]
     let theme_class = crate::look::theme_class(look.base);
     let look_style = crate::look::look_style(&look, false);
     let app_font = look.app_font.clone();
@@ -450,7 +466,6 @@ fn Main(core: AppCore) -> Element {
     let mut safe_area = use_signal(crate::platform::safe_area_style);
     #[cfg(target_os = "android")]
     {
-        let mut system_dark = use_signal(crate::platform::system_dark);
         let read_window = move || {
             let now = crate::platform::safe_area_style();
             if now != *safe_area.peek() {

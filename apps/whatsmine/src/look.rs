@@ -132,7 +132,9 @@ pub struct LookStyle {
 /// `own_colors`: this look brings its colours itself, because the ones around it are another
 /// look's. Otherwise the theme class on the page's root has them already, if it can.
 pub fn look_style(look: &Look, own_colors: bool) -> LookStyle {
-    let mut vars = String::new();
+    // Never empty: going from a look with colours of its own to one without has to replace what
+    // the element had, and an empty style left the old colours in place (seen on Windows).
+    let mut vars = String::from("--look:1;");
     // A look that follows the device can only say so with the classes of the root.
     let follows_device = look.base == Base::System && look.colors.is_empty();
     if !follows_device && (own_colors || !look.colors.is_empty()) {
@@ -230,10 +232,16 @@ mod tests {
 
     #[test]
     fn a_look_without_changes_leaves_the_page_alone() {
+        // Nothing of its own, and still never empty: an empty style kept the colours of the look
+        // before it.
+        let nothing = LookStyle {
+            vars: "--look:1;".to_owned(),
+            ..LookStyle::default()
+        };
         let style = look_style(&Look::ready_made()[0], true);
-        assert_eq!(style, LookStyle::default());
+        assert_eq!(style, nothing);
         let dark = Look::ready_made()[1].clone();
-        assert_eq!(look_style(&dark, false), LookStyle::default());
+        assert_eq!(look_style(&dark, false), nothing);
         assert!(look_style(&dark, true).vars.contains("--bg:#101218"));
     }
 
