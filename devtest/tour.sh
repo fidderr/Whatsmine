@@ -470,7 +470,8 @@ if wanted looks; then
     tap appearance 0 0.3
     tap looks 0 0.3
     on_screen '[data-t="look-new"]' 6
-    tap look-tile 3 0.3
+    # The tour's own theme again: after the two of the demo come Same as device, Dark, Light.
+    if [ "$THEME" = light ]; then tap look-tile 4 0.3; else tap look-tile 3 0.3; fi
     tap look-use-app 0 0.5
     press_back_or_up
     press_back_or_up

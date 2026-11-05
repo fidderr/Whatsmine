@@ -2886,6 +2886,14 @@ textarea::placeholder {
   padding: 6px 8px;
   font-size: 0.75rem;
 }
+/* Three across leaves little room: a name like "Zelfde als apparaat" takes two lines. */
+.look-tile.small .look-tile-text .one-line {
+  white-space: normal;
+  overflow-wrap: break-word;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
 .look-mini {
   position: relative;
   overflow: hidden;
@@ -2900,6 +2908,15 @@ textarea::placeholder {
 .look-tile.small .look-mini {
   height: 48px;
   padding: 6px;
+}
+/* An edge of its own: a look the colour of the page around it would not show otherwise. */
+.look-mini::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border: 1px solid rgba(128, 128, 128, 0.35);
+  border-radius: inherit;
+  pointer-events: none;
 }
 .look-mini.tiny {
   flex: none;

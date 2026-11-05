@@ -59,13 +59,7 @@ pub fn LookPreview(look: Look) -> Element {
     let tr = use_tr();
     let style = look_style(&as_shown(look), true);
     // Its own name, for a rule that follows every change while the look is made.
-    let id = use_hook(|| {
-        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        format!(
-            "lp{}",
-            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        )
-    });
+    let id = use_hook(|| own_id("lp"));
     let preview_rule = format!(
         "{}{}",
         crate::look::rule(&format!("#{id}.look-preview"), &style.vars),
@@ -91,24 +85,53 @@ pub fn LookPreview(look: Look) -> Element {
     }
 }
 
+/// A name of its own for an element that gets a rule of its own.
+fn own_id(prefix: &str) -> String {
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    format!(
+        "{prefix}{}",
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )
+}
+
+/// A look in small: a corner of chat with a bubble or two.
+#[component]
+fn LookMini(look: Look, tiny: bool) -> Element {
+    let style = look_style(&as_shown(look), true);
+    let id = use_hook(|| own_id("lm"));
+    let mini_rule = format!(
+        "{}{}",
+        crate::look::rule(&format!("#{id}.look-mini"), &style.vars),
+        crate::look::rule(&format!("#{id} > .chat-wall"), &style.wall)
+    );
+    rsx! {
+        span {
+            id: "{id}",
+            class: if tiny { "look-mini tiny{style.class}" } else { "look-mini{style.class}" },
+            aria_hidden: "true",
+            style { "{mini_rule}" }
+            if !style.wall.is_empty() {
+                span { class: "chat-wall" }
+            }
+            if !tiny {
+                span { class: "mini-in" }
+            }
+            span { class: "mini-out" }
+        }
+    }
+}
+
 /// A look as a small picture and its name.
 #[component]
 fn LookTile(look: Look, note: String, small: bool, on_tap: EventHandler<()>) -> Element {
     let tr = use_tr();
     let name = look_name(&tr, &look);
-    let style = look_style(&as_shown(look), true);
     rsx! {
         button {
             class: if small { "look-tile small" } else { "look-tile" },
             "data-t": "look-tile",
             onclick: move |_| on_tap.call(()),
-            span { class: "look-mini{style.class}", style: "{style.vars}", aria_hidden: "true",
-                if !style.wall.is_empty() {
-                    span { class: "chat-wall", style: "{style.wall}" }
-                }
-                span { class: "mini-in" }
-                span { class: "mini-out" }
-            }
+            LookMini { look, tiny: false }
             span { class: "look-tile-text",
                 span { class: "b one-line", "{name}" }
                 if !note.is_empty() {
@@ -1198,7 +1221,6 @@ pub fn ChatLook(id: String) -> Element {
                         {
                             let on = own == look.id;
                             let label = look_name(&tr, &look);
-                            let style = look_style(&as_shown(look.clone()), true);
                             let mut set = set.clone();
                             let choose = look.id.clone();
                             rsx! {
@@ -1209,12 +1231,7 @@ pub fn ChatLook(id: String) -> Element {
                                     aria_checked: "{on}",
                                     "data-t": "chat-look-choice",
                                     onclick: move |_| set(choose.clone()),
-                                    span { class: "look-mini tiny{style.class}", style: "{style.vars}", aria_hidden: "true",
-                                        if !style.wall.is_empty() {
-                                            span { class: "chat-wall", style: "{style.wall}" }
-                                        }
-                                        span { class: "mini-out" }
-                                    }
+                                    LookMini { look: look.clone(), tiny: true }
                                     span { class: "row-t stack one-line", "{label}" }
                                     if on {
                                         span { class: "accent-text", style: "display:flex",
