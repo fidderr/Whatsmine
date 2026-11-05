@@ -24,12 +24,52 @@ use iroh::endpoint::{Connection, RecvStream};
 use tokio::sync::mpsc;
 
 use crate::identity::key_to_string;
-use crate::protocol::{AUDIO_DATAGRAM_MAGIC, MAX_VIDEO_FRAME, VIDEO_STREAM_MAGIC, id_from_bytes};
+use crate::protocol::{
+    AUDIO_DATAGRAM_MAGIC, MAX_VIDEO_FRAME, SCREEN_STREAM_MAGIC, VIDEO_STREAM_MAGIC, id_from_bytes,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaKind {
     Audio,
     Video,
+    /// A shown screen.
+    Screen,
+}
+
+/// How a shown screen is encoded. The sender knows what it can do, every viewer can read these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScreenCodec {
+    #[default]
+    Vp8,
+    Vp9,
+    H264,
+}
+
+impl ScreenCodec {
+    fn bits(self) -> u8 {
+        match self {
+            Self::Vp8 => 0,
+            Self::Vp9 => 1,
+            Self::H264 => 2,
+        }
+    }
+
+    pub fn from_bits(bits: u8) -> Self {
+        match bits & 0b11 {
+            1 => Self::Vp9,
+            2 => Self::H264,
+            _ => Self::Vp8,
+        }
+    }
+
+    /// As the page's decoder asks for it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Vp8 => "vp8",
+            Self::Vp9 => "vp09.00.10.08",
+            Self::H264 => "avc1.42E01F",
+        }
+    }
 }
 
 /// One packet of call media, in either direction.
@@ -44,6 +84,9 @@ pub struct CallMedia {
     pub ts: u32,
     pub key: bool,
     pub data: Vec<u8>,
+    /// For a shown screen: which frame this is, so a missing one shows.
+    pub number: u32,
+    pub codec: ScreenCodec,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +122,16 @@ pub enum CallEvent {
         from: String,
         on: bool,
     },
+    /// Someone started or stopped showing their screen.
+    PeerScreen {
+        call_id: String,
+        from: String,
+        on: bool,
+        width: u32,
+        height: u32,
+    },
+    /// Someone watching our screen needs a whole picture.
+    ScreenKeyWanted { call_id: String },
     /// A group call is going on that we could join (or it has ended).
     GroupCall {
         group_id: String,
@@ -130,6 +183,8 @@ pub struct CallSnapshot {
     pub connected_since: Option<i64>,
     /// Everyone else who is in the call.
     pub peers: Vec<String>,
+    /// Who is showing their screen.
+    pub sharer: Option<String>,
 }
 
 impl MediaIn {
@@ -169,6 +224,8 @@ pub(crate) fn spawn_datagram_reader(conn: Connection, peer: PublicKey, media: Me
                 ts,
                 key: false,
                 data: d[21..].to_vec(),
+                number: 0,
+                codec: ScreenCodec::default(),
             });
         }
     });
@@ -202,7 +259,95 @@ pub(crate) async fn receive_video(
         ts,
         key: flags & 1 != 0,
         data,
+        number: 0,
+        codec: ScreenCodec::default(),
     });
+}
+
+/// How many frames of a screen may wait for one viewer. What does not fit is skipped: the viewer
+/// sees the number jump and asks for a whole picture, which brings it up to date.
+const SCREEN_WAITING: usize = 8;
+
+/// What a frame of a screen looks like on its stream.
+pub(crate) fn screen_frame(
+    number: u32,
+    ts: u32,
+    key: bool,
+    codec: ScreenCodec,
+    data: &[u8],
+) -> Bytes {
+    let mut out = Vec::with_capacity(13 + data.len());
+    out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    out.extend_from_slice(&number.to_be_bytes());
+    out.extend_from_slice(&ts.to_be_bytes());
+    out.push(u8::from(key) | (codec.bits() << 1));
+    out.extend_from_slice(data);
+    Bytes::from(out)
+}
+
+/// Opens the stream of a shown screen to one viewer. It ends when the sender is dropped.
+pub(crate) fn open_screen_stream(conn: Connection, call: [u8; 16]) -> mpsc::Sender<Bytes> {
+    let (tx, mut rx) = mpsc::channel::<Bytes>(SCREEN_WAITING);
+    tokio::spawn(async move {
+        let result = async {
+            let mut send = conn.open_uni().await?;
+            let mut header = Vec::with_capacity(28);
+            header.extend_from_slice(SCREEN_STREAM_MAGIC);
+            header.extend_from_slice(&call);
+            header.extend_from_slice(&[0; 8]);
+            send.write_all(&header).await?;
+            while let Some(frame) = rx.recv().await {
+                send.write_all(&frame).await?;
+            }
+            send.finish()?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::debug!("the stream of a screen ended: {e:#}");
+        }
+    });
+    tx
+}
+
+/// Reads a shown screen, frame by frame, for as long as this person is in this call.
+pub(crate) async fn receive_screen(
+    mut recv: RecvStream,
+    header: [u8; 28],
+    peer: PublicKey,
+    media: &MediaIn,
+) {
+    debug_assert_eq!(&header[..4], SCREEN_STREAM_MAGIC);
+    let call: [u8; 16] = header[4..20].try_into().expect("16 bytes");
+    loop {
+        if !media.accepts(&call, peer) {
+            let _ = recv.stop(1u32.into());
+            return;
+        }
+        let mut head = [0u8; 13];
+        if recv.read_exact(&mut head).await.is_err() {
+            return;
+        }
+        let len = u32::from_be_bytes(head[..4].try_into().expect("4 bytes")) as usize;
+        if len > MAX_VIDEO_FRAME {
+            let _ = recv.stop(1u32.into());
+            return;
+        }
+        let mut data = vec![0u8; len];
+        if recv.read_exact(&mut data).await.is_err() {
+            return;
+        }
+        media.deliver(CallMedia {
+            call_id: id_from_bytes(&call),
+            from: key_to_string(&peer),
+            kind: MediaKind::Screen,
+            ts: u32::from_be_bytes(head[8..12].try_into().expect("4 bytes")),
+            key: head[12] & 1 != 0,
+            data,
+            number: u32::from_be_bytes(head[4..8].try_into().expect("4 bytes")),
+            codec: ScreenCodec::from_bits(head[12] >> 1),
+        });
+    }
 }
 
 pub(crate) fn send_audio(conn: &Connection, call: [u8; 16], ts: u32, data: &[u8]) {

@@ -79,6 +79,8 @@ async fn main() -> anyhow::Result<()> {
                             echo.call_video(m.ts, m.key, m.data);
                         }
                     }
+                    // A terminal has nothing to show it on.
+                    MediaKind::Screen => {}
                 }
                 if last.elapsed() >= std::time::Duration::from_secs(2) {
                     let line: Vec<String> = counts
@@ -436,6 +438,12 @@ fn print_event(core: &Core, ev: &CoreEvent) {
                     label(core, from),
                     if *on { "on" } else { "off" }
                 ),
+                CallEvent::PeerScreen { on, from, .. } => println!(
+                    "☎ {} {} showing their screen",
+                    label(core, from),
+                    if *on { "is" } else { "stopped" }
+                ),
+                CallEvent::ScreenKeyWanted { .. } => {}
                 CallEvent::Ended {
                     reason,
                     duration_ms,

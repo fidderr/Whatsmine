@@ -513,6 +513,7 @@ fn ChatView(id: String) -> Element {
                 if call_ready {
                     button {
                         class: "ib call-start-video",
+                        "data-t": "call-video",
                         aria_label: "{t(&tr, \"call.video\")}",
                         onclick: {
                             let (core, id, bridge) = (core.clone(), id.clone(), bridge.clone());
@@ -524,6 +525,7 @@ fn ChatView(id: String) -> Element {
                     }
                     button {
                         class: "ib call-start",
+                        "data-t": "call-voice",
                         aria_label: "{t(&tr, \"call.voice\")}",
                         onclick: {
                             let (core, id, bridge) = (core.clone(), id.clone(), bridge.clone());

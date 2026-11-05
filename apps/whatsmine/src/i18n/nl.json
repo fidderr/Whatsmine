@@ -836,5 +836,18 @@
   "soft.lilac": "lila",
   "soft.slate": "leisteen",
   "look.in_one_chat": "In 1 chat",
-  "look.background": "Chatachtergrond"
+  "look.background": "Chatachtergrond",
+  "call.share": "Je scherm laten zien",
+  "call.share_stop": "Stoppen met je scherm laten zien",
+  "call.share_title": "Je scherm laten zien aan {name}?",
+  "call.share_text": "Ze zien wat er op je scherm staat tot je stopt, ook meldingen. WhatsMine zelf blijft verborgen, dus je chats en je 12 woorden zijn niet te zien. Hierna kies je wat je laat zien.",
+  "call.share_go": "Kiezen wat je laat zien",
+  "call.sharing": "Je laat je scherm zien",
+  "call.peer_sharing": "{name} laat het scherm zien",
+  "call.share_busy": "{name} laat nu het scherm zien",
+  "call.err_screen": "Je scherm kon niet worden getoond",
+  "call.l_camera": "Camera",
+  "call.l_screen": "Scherm",
+  "call.in_call": "In gesprek",
+  "call.speaker": "Luidspreker"
 }

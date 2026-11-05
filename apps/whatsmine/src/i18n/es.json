@@ -836,5 +836,18 @@
   "soft.lilac": "lila",
   "soft.slate": "pizarra",
   "look.in_one_chat": "En 1 chat",
-  "look.background": "Fondo del chat"
+  "look.background": "Fondo del chat",
+  "call.share": "Mostrar tu pantalla",
+  "call.share_stop": "Dejar de mostrar tu pantalla",
+  "call.share_title": "¿Mostrar tu pantalla a {name}?",
+  "call.share_text": "Ve lo que hay en tu pantalla hasta que pares, también las notificaciones. WhatsMine queda oculto, así que tus chats y tus 12 palabras no se ven. Después eliges qué mostrar.",
+  "call.share_go": "Elegir qué mostrar",
+  "call.sharing": "Estás mostrando tu pantalla",
+  "call.peer_sharing": "{name} está mostrando su pantalla",
+  "call.share_busy": "{name} está mostrando su pantalla ahora",
+  "call.err_screen": "No se pudo mostrar tu pantalla",
+  "call.l_camera": "Cámara",
+  "call.l_screen": "Pantalla",
+  "call.in_call": "En una llamada",
+  "call.speaker": "Altavoz"
 }

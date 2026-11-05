@@ -9,7 +9,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use dioxus::document::Eval;
 use dioxus::prelude::*;
 use serde_json::{Value, json};
-use whatsmine_core::calls::{CallEndReason, CallEvent, MediaKind};
+use whatsmine_core::calls::{CallEndReason, CallEvent, MediaKind, ScreenCodec};
 use whatsmine_core::{Core, now_ms};
 
 use crate::app::{ToastSig, Translations, t, toast, use_core, use_tr};
@@ -40,6 +40,10 @@ pub enum Phase {
         cams: Vec<String>,
         muted: bool,
         group: bool,
+        /// We are showing our screen.
+        sharing: bool,
+        /// Who is showing theirs.
+        sharer: Option<String>,
     },
 }
 
@@ -91,6 +95,21 @@ pub fn use_call_bridge(
                         let key = m.get("key").and_then(Value::as_bool).unwrap_or(false);
                         core.call_video(ts, key, bytes());
                     }
+                    "s" => {
+                        let key = m.get("key").and_then(Value::as_bool).unwrap_or(false);
+                        let codec = m.get("c").and_then(Value::as_u64).unwrap_or(0) as u8;
+                        core.call_screen_frame(ts, key, ScreenCodec::from_bits(codec), bytes());
+                    }
+                    "screen" => {
+                        let on = m.get("on").and_then(Value::as_bool).unwrap_or(false);
+                        let size = |name| m.get(name).and_then(Value::as_u64).unwrap_or(0) as u32;
+                        if let Phase::Active { sharing, .. } = &mut *phase.write() {
+                            *sharing = on;
+                        }
+                        crate::guard::set(crate::guard::Reason::Sharing, on);
+                        core.call_screen_on(on, size("w"), size("h"));
+                    }
+                    "askKey" => core.call_screen_key(),
                     "cam" => {
                         let on = m.get("on").and_then(Value::as_bool).unwrap_or(false);
                         if let Phase::Active { my_cam, .. } = &mut *phase.write() {
@@ -107,6 +126,7 @@ pub fn use_call_bridge(
                         let key = match what {
                             "microphone" => "call.err.mic",
                             "camera" => "call.err.cam",
+                            "screen" | "screen-encoder" => "call.err_screen",
                             _ => "call.err.media",
                         };
                         toast(&mut toast_sig, t(&tr, key), ToastLevel::Error);
@@ -130,6 +150,18 @@ pub fn use_call_bridge(
                 let t = match m.kind {
                     MediaKind::Audio => "a",
                     MediaKind::Video => "v",
+                    MediaKind::Screen => {
+                        let codec = match m.codec {
+                            ScreenCodec::Vp8 => 0,
+                            ScreenCodec::Vp9 => 1,
+                            ScreenCodec::H264 => 2,
+                        };
+                        bridge.send(json!({
+                            "t": "s", "from": m.from, "n": m.number, "ts": m.ts, "key": m.key,
+                            "c": codec, "d": B64.encode(&m.data)
+                        }));
+                        continue;
+                    }
                 };
                 bridge.send(json!({
                     "t": t, "from": m.from, "ts": m.ts, "key": m.key, "d": B64.encode(&m.data)
@@ -139,6 +171,66 @@ pub fn use_call_bridge(
     });
 
     bridge
+}
+
+/// On Android: the call goes on while the app is not in front. Only possible while it is.
+fn keep_going(name: &str, tr: &Translations, video: bool) {
+    #[cfg(target_os = "android")]
+    {
+        use mobile_sentinel::permissions::{PermissionState, status};
+        let camera = video || status("android.permission.CAMERA") == PermissionState::Granted;
+        mobile_sentinel::call_service::start(name, &t(tr, "call.in_call"), camera);
+        mobile_sentinel::call_service::set_speaker(video);
+    }
+    #[cfg(not(target_os = "android"))]
+    let _ = (name, tr, video);
+}
+
+fn call_over() {
+    #[cfg(target_os = "android")]
+    {
+        mobile_sentinel::call_service::stop();
+        mobile_sentinel::call_service::end_audio();
+    }
+}
+
+/// On Android the frames of a shown screen come from the system, straight to the core. What the
+/// page does on a PC.
+#[cfg(target_os = "android")]
+fn show_screen(core: &Core, phase: Signal<Phase>, tr: &Translations) {
+    use mobile_sentinel::call_service::{ScreenCodec as Sdk, ScreenFrame, show_screen};
+    let (for_state, for_frames) = (core.clone(), core.clone());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<bool>();
+    let shown = show_screen(
+        &t(tr, "call.share_stop"),
+        move |state: Option<(u32, u32)>| {
+            let (w, h) = state.unwrap_or((0, 0));
+            crate::guard::set(crate::guard::Reason::Sharing, state.is_some());
+            for_state.call_screen_on(state.is_some(), w, h);
+            let _ = tx.send(state.is_some());
+        },
+        move |frame: ScreenFrame| {
+            let codec = match frame.codec {
+                Sdk::H264 => ScreenCodec::H264,
+                Sdk::Vp8 => ScreenCodec::Vp8,
+            };
+            for_frames.call_screen_frame(frame.time_us as u32, frame.key, codec, frame.data);
+        },
+    );
+    if !shown {
+        return;
+    }
+    let mut phase = phase;
+    spawn(async move {
+        while let Some(on) = rx.recv().await {
+            if let Phase::Active { sharing, .. } = &mut *phase.write() {
+                *sharing = on;
+            }
+            if !on {
+                break;
+            }
+        }
+    });
 }
 
 /// A screen that opens in the middle of a call (the app was in the
@@ -174,6 +266,9 @@ pub fn restore(core: &Core, mut phase: Signal<Phase>, bridge: &CallBridge) {
             bridge
                 .send(json!({ "t": "start", "call": c.call_id, "video": c.video, "group": group }));
             bridge.send(json!({ "t": "peers", "peers": named }));
+            if let Some(sharer) = &c.sharer {
+                bridge.send(json!({ "t": "peerScreen", "from": sharer, "on": true }));
+            }
             phase.set(Phase::Active {
                 contact_id: c.contact_id,
                 since: c.connected_since.unwrap_or_else(now_ms),
@@ -182,6 +277,8 @@ pub fn restore(core: &Core, mut phase: Signal<Phase>, bridge: &CallBridge) {
                 cams: Vec::new(),
                 muted: false,
                 group,
+                sharing: false,
+                sharer: c.sharer,
             });
         }
     }
@@ -235,7 +332,24 @@ pub fn on_event(
                 cams: Vec::new(),
                 muted: false,
                 group,
+                sharing: false,
+                sharer: None,
             });
+        }
+        CallEvent::PeerScreen { from, on, .. } => {
+            if let Phase::Active { sharer, .. } = &mut *phase.write() {
+                if on {
+                    *sharer = Some(from.clone());
+                } else if sharer.as_deref() == Some(from.as_str()) {
+                    *sharer = None;
+                }
+            }
+            bridge.send(json!({ "t": "peerScreen", "from": from, "on": on }));
+        }
+        CallEvent::ScreenKeyWanted { .. } => {
+            #[cfg(target_os = "android")]
+            mobile_sentinel::call_service::want_whole_picture();
+            bridge.send(json!({ "t": "screenKey" }));
         }
         CallEvent::Participants { peers: now, .. } => {
             let named: Vec<Value> = now
@@ -262,6 +376,8 @@ pub fn on_event(
             contact_id, reason, ..
         } => {
             let was_incoming = matches!(&*phase.read(), Phase::Incoming { .. });
+            crate::guard::set(crate::guard::Reason::Sharing, false);
+            call_over();
             bridge.send(json!({ "t": "stop" }));
             phase.set(Phase::Idle);
             let name = name_of(core, &contact_id);
@@ -353,6 +469,7 @@ pub fn start_call(
         }
         match core.call_invite(&id, video) {
             Ok(_) => {
+                keep_going(&name_of(&core, &id), &tr, video);
                 bridge.send(json!({ "t": "ring", "kind": "out" }));
                 phase.set(Phase::Outgoing {
                     contact_id: id,
@@ -385,6 +502,8 @@ pub fn CallOverlay() -> Element {
     let bridge = use_context::<CallBridge>();
     let toast_sig = use_context::<ToastSig>();
     let mut now = use_signal(now_ms);
+    let mut asking_share = use_signal(|| false);
+    let mut speaker = use_signal(|| false);
     let mut path_turn = use_signal(|| 0u32);
     let path_report = {
         let core = core.clone();
@@ -442,13 +561,18 @@ pub fn CallOverlay() -> Element {
             cams,
             peers,
             group,
+            sharer,
             ..
         } => {
             let mut s = clock(now() - since);
             if *group {
                 s = format!("{s} · {}", peers.len() + 1);
             }
-            (contact_id.clone(), s, *group || *my_cam || !cams.is_empty())
+            (
+                contact_id.clone(),
+                s,
+                *group || *my_cam || !cams.is_empty() || sharer.is_some(),
+            )
         }
     };
     let name = name_of(&core, &contact_id);
@@ -473,8 +597,21 @@ pub fn CallOverlay() -> Element {
             .unwrap_or_default(),
         _ => String::new(),
     };
-    let hide_avatar =
-        matches!(&current, Phase::Active { cams, group, .. } if *group || !cams.is_empty());
+    let hide_avatar = matches!(
+        &current,
+        Phase::Active { cams, group, sharer, .. }
+            if *group || !cams.is_empty() || sharer.is_some()
+    );
+    let (sharing_now, someone_sharing) = match &current {
+        Phase::Active {
+            sharing, sharer, ..
+        } => (*sharing, sharer.clone()),
+        _ => (false, None),
+    };
+    let watching_line = someone_sharing
+        .as_deref()
+        .map(|who| t(&tr, "call.peer_sharing").replace("{name}", &name_of(&core, who)));
+    let share_title = t(&tr, "call.share_title").replace("{name}", &name);
     let class = if video_ui {
         "call-overlay video-live"
     } else {
@@ -502,13 +639,24 @@ pub fn CallOverlay() -> Element {
                 if !path_note.is_empty() {
                     div { class: "call-path", "{path_note}" }
                 }
+                if let Some(line) = &watching_line {
+                    div { class: "call-path", "data-t": "call-watching", "{line}" }
+                }
+                if sharing_now {
+                    div { class: "call-sharing", "data-t": "call-sharing",
+                        Icon { name: IconName::Monitor, size: 20 }
+                        span { "{t(&tr, \"call.sharing\")}" }
+                    }
+                }
             }
             div { class: "call-controls",
                 match current.clone() {
                     Phase::Incoming { .. } => rsx! {
                         button {
                             class: "call-btn decline",
+                            "data-t": "call-decline",
                             aria_label: "{t(&tr, \"call.decline\")}",
+                            "data-label": "{t(&tr, \"call.decline\")}",
                             onclick: {
                                 let (core, bridge) = (core.clone(), bridge.clone());
                                 move |_| {
@@ -520,15 +668,20 @@ pub fn CallOverlay() -> Element {
                         }
                         button {
                             class: "call-btn accept",
+                            "data-t": "call-accept",
                             aria_label: "{t(&tr, \"call.accept\")}",
+                            "data-label": "{t(&tr, \"call.accept\")}",
                             onclick: {
                                 let (core, bridge, video) = (core.clone(), bridge.clone(), matches!(current, Phase::Incoming { video: true, .. }));
                                 let mut toast_sig = toast_sig;
+                                let answer_name = name.clone();
                                 move |_| {
                                     bridge.send(json!({ "t": "ring", "kind": Value::Null }));
                                     let core = core.clone();
+                                    let answer_name = answer_name.clone();
                                     spawn(async move {
                                         if ensure_permissions(video).await {
+                                            keep_going(&answer_name, &tr, video);
                                             core.call_answer(true);
                                         } else {
                                             core.call_answer(false);
@@ -544,6 +697,7 @@ pub fn CallOverlay() -> Element {
                         button {
                             class: "call-btn decline",
                             aria_label: "{t(&tr, \"call.hangup\")}",
+                            "data-label": "{t(&tr, \"call.hangup\")}",
                             onclick: {
                                 let (core, bridge) = (core.clone(), bridge.clone());
                                 move |_| {
@@ -557,10 +711,13 @@ pub fn CallOverlay() -> Element {
                     Phase::Active { my_cam, muted, .. } => {
                         let mute_label = t(&tr, if muted { "call.unmute" } else { "call.mute" });
                         let cam_label = t(&tr, if my_cam { "call.camera_off" } else { "call.camera_on" });
+                        let share_label = t(&tr, if sharing_now { "call.share_stop" } else { "call.share" });
+                        let someone_name = someone_sharing.as_deref().map(|who| name_of(&core, who));
                         rsx! {
                             button {
                                 class: if muted { "call-btn toggle on" } else { "call-btn toggle" },
                                 aria_label: "{mute_label}",
+                                "data-label": "{mute_label}",
                                 onclick: {
                                     let bridge = bridge.clone();
                                     move |_| {
@@ -573,9 +730,26 @@ pub fn CallOverlay() -> Element {
                                 },
                                 Icon { name: if muted { IconName::MicOff } else { IconName::Mic }, size: 26 }
                             }
+                            if cfg!(target_os = "android") {
+                                button {
+                                    class: if speaker() { "call-btn toggle" } else { "call-btn toggle on" },
+                                    "data-t": "call-speaker",
+                                    aria_label: "{t(&tr, \"call.speaker\")}",
+                                    "data-label": "{t(&tr, \"call.speaker\")}",
+                                    aria_pressed: "{speaker()}",
+                                    onclick: move |_| {
+                                        let on = !speaker();
+                                        speaker.set(on);
+                                        #[cfg(target_os = "android")]
+                                        mobile_sentinel::call_service::set_speaker(on);
+                                    },
+                                    Icon { name: IconName::Volume, size: 26 }
+                                }
+                            }
                             button {
                                 class: if my_cam { "call-btn toggle" } else { "call-btn toggle on" },
                                 aria_label: "{cam_label}",
+                                "data-label": "{t(&tr, \"call.l_camera\")}",
                                 onclick: {
                                     let bridge = bridge.clone();
                                     move |_| bridge.send(json!({ "t": "cam", "on": !my_cam }))
@@ -583,8 +757,37 @@ pub fn CallOverlay() -> Element {
                                 Icon { name: if my_cam { IconName::Video } else { IconName::VideoOff }, size: 26 }
                             }
                             button {
+                                class: if sharing_now { "call-btn toggle" } else { "call-btn toggle on" },
+                                "data-t": "call-share",
+                                aria_label: "{share_label}",
+                                "data-label": "{t(&tr, \"call.l_screen\")}",
+                                onclick: {
+                                    let bridge = bridge.clone();
+                                    let mut toast_sig = toast_sig;
+                                    let name = someone_name.clone();
+                                    move |_| {
+                                        if sharing_now {
+                                            #[cfg(target_os = "android")]
+                                            mobile_sentinel::call_service::stop_screen();
+                                            bridge.send(json!({ "t": "share", "on": false }));
+                                        } else if let Some(name) = &name {
+                                            toast(
+                                                &mut toast_sig,
+                                                t(&tr, "call.share_busy").replace("{name}", name),
+                                                ToastLevel::Info,
+                                            );
+                                        } else {
+                                            asking_share.set(true);
+                                        }
+                                    }
+                                },
+                                Icon { name: IconName::Monitor, size: 26 }
+                            }
+                            button {
                                 class: "call-btn decline",
+                                "data-t": "call-hangup",
                                 aria_label: "{t(&tr, \"call.hangup\")}",
+                            "data-label": "{t(&tr, \"call.hangup\")}",
                                 onclick: {
                                     let core = core.clone();
                                     move |_| core.call_end()
@@ -594,6 +797,43 @@ pub fn CallOverlay() -> Element {
                         }
                     }
                     Phase::Idle => rsx! {},
+                }
+            }
+            if asking_share() {
+                crate::components::Sheet {
+                    on_close: move |_| asking_share.set(false),
+                    title: share_title,
+                    tag: "share-sheet",
+                    p { class: "note", "{t(&tr, \"call.share_text\")}" }
+                    div { class: "btns",
+                        button {
+                            class: "btn",
+                            onclick: move |_| asking_share.set(false),
+                            "{t(&tr, \"common.cancel\")}"
+                        }
+                        button {
+                            class: "btn main",
+                            "data-t": "share-go",
+                            onclick: {
+                                let bridge = bridge.clone();
+                                let core = core.clone();
+                                move |_| {
+                                    asking_share.set(false);
+                                    #[cfg(target_os = "android")]
+                                    {
+                                        let _ = &bridge;
+                                        show_screen(&core, phase, &tr);
+                                    }
+                                    #[cfg(not(target_os = "android"))]
+                                    {
+                                        let _ = &core;
+                                        bridge.send(json!({ "t": "share", "on": true }));
+                                    }
+                                }
+                            },
+                            "{t(&tr, \"call.share_go\")}"
+                        }
+                    }
                 }
             }
         }

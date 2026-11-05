@@ -159,6 +159,17 @@ pub enum Frame {
     ChangeAck {
         id: [u8; 16],
     },
+    /// Someone started or stopped showing their screen in this call.
+    CallScreen {
+        call: [u8; 16],
+        on: bool,
+        width: u32,
+        height: u32,
+    },
+    /// "Send a whole picture": someone just started watching, or lost their place.
+    CallKeyRequest {
+        call: [u8; 16],
+    },
     /// One change, to our own other device. Sent until confirmed, in order.
     Sibling {
         seq: i64,
@@ -236,6 +247,12 @@ pub const AUDIO_DATAGRAM_MAGIC: u8 = 0xA1;
 /// as file streams: `"WMV1" | call id (16) | ts (u32 BE) | flags (u32 BE)`,
 /// then one encoded frame until the stream ends. Flag bit 0 = key frame.
 pub const VIDEO_STREAM_MAGIC: &[u8; 4] = b"WMV1";
+
+/// First bytes of a shown screen's uni stream, in the same 28-byte header shape: `"WMS1"`, the call
+/// id and 8 unused bytes. Then frame after frame: length (u32 BE), number (u32 BE), time (u32 BE),
+/// flags (one byte: bit 0 a whole picture, bits 1 and 2 the codec), and the frame. A screen is text
+/// more often than not: late is better than wrong, so it comes in order on one stream.
+pub const SCREEN_STREAM_MAGIC: &[u8; 4] = b"WMS1";
 
 /// Largest encoded video frame we accept.
 pub const MAX_VIDEO_FRAME: usize = 1024 * 1024;

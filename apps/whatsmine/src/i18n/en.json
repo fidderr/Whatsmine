@@ -836,5 +836,18 @@
   "soft.lilac": "lilac",
   "soft.slate": "slate",
   "look.in_one_chat": "In 1 chat",
-  "look.background": "Chat background"
+  "look.background": "Chat background",
+  "call.share": "Show your screen",
+  "call.share_stop": "Stop showing your screen",
+  "call.share_title": "Show your screen to {name}?",
+  "call.share_text": "They see what is on your screen until you stop, also notifications. WhatsMine itself stays hidden, so your chats and your 12 words do not show. Next you choose what to show.",
+  "call.share_go": "Choose what to show",
+  "call.sharing": "You are showing your screen",
+  "call.peer_sharing": "{name} is showing their screen",
+  "call.share_busy": "{name} is showing their screen right now",
+  "call.err_screen": "Your screen could not be shown",
+  "call.l_camera": "Camera",
+  "call.l_screen": "Screen",
+  "call.in_call": "In a call",
+  "call.speaker": "Speaker"
 }

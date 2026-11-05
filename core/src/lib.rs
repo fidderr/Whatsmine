@@ -307,6 +307,26 @@ impl Core {
         self.cmd(Cmd::CallVideo { ts, key, data });
     }
 
+    /// We started or stopped showing our screen in the connected call.
+    pub fn call_screen_on(&self, on: bool, width: u32, height: u32) {
+        self.cmd(Cmd::CallScreenOn { on, width, height });
+    }
+
+    /// Sends one encoded frame of the screen we are showing.
+    pub fn call_screen_frame(&self, ts: u32, key: bool, codec: calls::ScreenCodec, data: Vec<u8>) {
+        self.cmd(Cmd::CallScreenFrame {
+            ts,
+            key,
+            codec,
+            data,
+        });
+    }
+
+    /// We need a whole picture of the screen we are watching.
+    pub fn call_screen_key(&self) {
+        self.cmd(Cmd::CallScreenKey);
+    }
+
     /// Tells the other side our camera went on or off.
     pub fn call_video_on(&self, on: bool) {
         self.cmd(Cmd::CallVideoOn(on));

@@ -836,5 +836,18 @@
   "soft.lilac": "lilas",
   "soft.slate": "ardoise",
   "look.in_one_chat": "Dans 1 discussion",
-  "look.background": "Arrière-plan de discussion"
+  "look.background": "Arrière-plan de discussion",
+  "call.share": "Montrer votre écran",
+  "call.share_stop": "Arrêter de montrer votre écran",
+  "call.share_title": "Montrer votre écran à {name} ?",
+  "call.share_text": "Cette personne voit ce qui est à l'écran jusqu'à ce que vous arrêtiez, notifications comprises. WhatsMine reste caché : vos discussions et vos 12 mots ne se voient pas. Ensuite vous choisissez quoi montrer.",
+  "call.share_go": "Choisir quoi montrer",
+  "call.sharing": "Vous montrez votre écran",
+  "call.peer_sharing": "{name} montre son écran",
+  "call.share_busy": "{name} montre son écran en ce moment",
+  "call.err_screen": "Votre écran n'a pas pu être montré",
+  "call.l_camera": "Caméra",
+  "call.l_screen": "Écran",
+  "call.in_call": "En appel",
+  "call.speaker": "Haut-parleur"
 }

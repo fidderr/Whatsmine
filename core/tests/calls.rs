@@ -122,10 +122,12 @@ async fn call_lifecycle_with_media() {
         while audio_at_b < 5 || audio_at_a < 5 || video_at_b < 1 || video_at_a < 1 {
             tokio::select! {
                 Some(m) = media_b.recv() => match m.kind {
+                    MediaKind::Screen => panic!("no screen here"),
                     MediaKind::Audio => { assert_eq!(m.call_id, call); assert_eq!(m.data.len(), 80); audio_at_b += 1 }
                     MediaKind::Video => { assert!(m.key); assert_eq!(m.ts, 1000); assert_eq!(m.data, vec![7; 20_000]); video_at_b += 1 }
                 },
                 Some(m) = media_a.recv() => match m.kind {
+                    MediaKind::Screen => panic!("no screen here"),
                     MediaKind::Audio => { assert_eq!(m.data.len(), 60); audio_at_a += 1 }
                     MediaKind::Video => { assert!(!m.key); assert_eq!(m.data, vec![9; 5_000]); video_at_a += 1 }
                 },
@@ -160,6 +162,127 @@ async fn call_lifecycle_with_media() {
         matches!(e, CallEvent::Ended { .. })
     })
     .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_screen_arrives_in_order_and_a_viewer_can_ask_for_a_whole_picture() {
+    use whatsmine_core::calls::ScreenCodec;
+
+    let lookup = MemoryLookup::default();
+    let (a, b, _ka, _kb, _da, _db) = online_pair(&lookup).await;
+    let (mut ra, mut rb) = (a.subscribe(), b.subscribe());
+    a.call_invite(&b.my_key(), false).unwrap();
+    call_event(&mut rb, "ringing", |e| {
+        matches!(e, CallEvent::Incoming { .. })
+    })
+    .await;
+    b.call_answer(true);
+    call_event(&mut ra, "connected", |e| {
+        matches!(e, CallEvent::Connected { .. })
+    })
+    .await;
+    let mut viewer = b.call_media();
+
+    // Nothing goes out before it is switched on.
+    a.call_screen_frame(1, true, ScreenCodec::Vp9, vec![1; 100]);
+
+    a.call_screen_on(true, 1920, 1080);
+    let shown = call_event(&mut rb, "the screen", |e| {
+        matches!(e, CallEvent::PeerScreen { on: true, .. })
+    })
+    .await;
+    assert!(matches!(
+        shown,
+        CallEvent::PeerScreen {
+            width: 1920,
+            height: 1080,
+            ..
+        }
+    ));
+    until("the sharer to be known", || {
+        b.call_snapshot()
+            .is_some_and(|c| c.sharer.as_deref() == Some(a.my_key().as_str()))
+    })
+    .await;
+
+    // A frame of a screen can be big, and they come in order.
+    let big = vec![7u8; 400_000];
+    a.call_screen_frame(10, true, ScreenCodec::Vp9, big.clone());
+    for n in 0u8..5 {
+        a.call_screen_frame(11 + u32::from(n), false, ScreenCodec::H264, vec![n; 2_000]);
+    }
+    let mut got = Vec::new();
+    let read = async {
+        while got.len() < 6 {
+            let m = viewer.recv().await.expect("the media");
+            if m.kind == MediaKind::Screen {
+                got.push(m);
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(30), read)
+        .await
+        .expect("the frames");
+    assert_eq!(got[0].data, big);
+    assert!(got[0].key);
+    assert_eq!(got[0].codec, ScreenCodec::Vp9);
+    assert_eq!(
+        got[0].number, 0,
+        "the one from before it was switched on does not count"
+    );
+    for (i, m) in got.iter().enumerate().skip(1) {
+        assert_eq!(m.number, i as u32);
+        assert!(!m.key);
+        assert_eq!(m.codec, ScreenCodec::H264);
+    }
+
+    // Lost its place: asks for a whole picture.
+    b.call_screen_key();
+    call_event(&mut ra, "the question for a whole picture", |e| {
+        matches!(e, CallEvent::ScreenKeyWanted { .. })
+    })
+    .await;
+
+    // Stopped, and whoever watched knows.
+    a.call_screen_on(false, 0, 0);
+    call_event(&mut rb, "the end of the screen", |e| {
+        matches!(e, CallEvent::PeerScreen { on: false, .. })
+    })
+    .await;
+    until("nobody sharing", || {
+        b.call_snapshot().is_some_and(|c| c.sharer.is_none())
+    })
+    .await;
+    a.call_end();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn nobody_outside_the_call_shows_a_screen() {
+    use whatsmine_core::protocol::{Frame, id_to_bytes};
+
+    let lookup = MemoryLookup::default();
+    let (a, b, _ka, _kb, _da, _db) = online_pair(&lookup).await;
+    let mut rb = b.subscribe();
+    a.send_as_is(
+        &b.my_key(),
+        Frame::CallScreen {
+            call: id_to_bytes(&uuid::Uuid::now_v7().to_string()).unwrap(),
+            on: true,
+            width: 1,
+            height: 1,
+        },
+    );
+    let marker = a.send(&b.my_key(), "after it").unwrap();
+    until("what came after", || b.message(&marker.id).is_some()).await;
+    while let Ok(event) = rb.try_recv() {
+        assert!(
+            !matches!(
+                event,
+                whatsmine_core::CoreEvent::Call(CallEvent::PeerScreen { .. })
+            ),
+            "no call, no screen"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

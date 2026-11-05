@@ -40,6 +40,18 @@ pub(super) struct CallState {
     pub members: HashSet<PublicKey>,
     /// Who rang us (callee side).
     pub caller: Option<PublicKey>,
+    /// Who is showing their screen to us.
+    pub sharer: Option<PublicKey>,
+    /// We are showing our screen: how big it is, how many frames so far, and the streams it goes
+    /// out on, one per viewer.
+    pub showing: Option<Showing>,
+}
+
+pub(super) struct Showing {
+    pub width: u32,
+    pub height: u32,
+    pub number: u32,
+    pub streams: HashMap<PublicKey, tokio::sync::mpsc::Sender<bytes::Bytes>>,
 }
 
 /// A group call somebody is in: it can be joined while it lasts.
@@ -106,6 +118,7 @@ impl Engine {
                     .connected
                     .map(|t| crate::model::now_ms() - t.elapsed().as_millis() as i64),
                 peers,
+                sharer: c.sharer.as_ref().map(key_to_string),
             }
         });
         *self.shared.call.lock().unwrap_or_else(|p| p.into_inner()) = snapshot;
@@ -265,6 +278,8 @@ impl Engine {
             told: HashSet::new(),
             members,
             caller: None,
+            sharer: None,
+            showing: None,
         });
         self.publish_call_state();
     }
@@ -369,6 +384,8 @@ impl Engine {
             told: HashSet::new(),
             members,
             caller: None,
+            sharer: None,
+            showing: None,
         });
         self.publish_call_state();
         self.enter_call();
@@ -408,6 +425,78 @@ impl Engine {
         }
     }
 
+    /// We started or stopped showing our screen. Closing the streams is what ends them.
+    pub(super) fn call_screen_on(&mut self, on: bool, width: u32, height: u32) {
+        let Some(c) = self.call.as_mut().filter(|c| c.connected.is_some()) else {
+            return;
+        };
+        c.showing = on.then(|| Showing {
+            width,
+            height,
+            number: 0,
+            streams: HashMap::new(),
+        });
+        let (call, peers) = (c.id, c.peers.iter().copied().collect::<Vec<_>>());
+        for p in peers {
+            self.send(
+                p,
+                Frame::CallScreen {
+                    call,
+                    on,
+                    width,
+                    height,
+                },
+            );
+        }
+    }
+
+    /// One frame of our screen, to everyone watching. A viewer who is behind misses it, and says
+    /// so when the number jumps.
+    pub(super) fn call_screen_frame(
+        &mut self,
+        ts: u32,
+        key: bool,
+        codec: crate::calls::ScreenCodec,
+        data: &[u8],
+    ) {
+        if data.len() > crate::protocol::MAX_VIDEO_FRAME {
+            return;
+        }
+        let conns: Vec<(PublicKey, Connection)> = self
+            .call
+            .as_ref()
+            .into_iter()
+            .flat_map(|c| c.peers.iter())
+            .filter_map(|p| self.sessions.get(p).map(|s| (*p, s.conn.clone())))
+            .collect();
+        let Some(c) = self.call.as_mut() else { return };
+        let call = c.id;
+        let Some(showing) = c.showing.as_mut() else {
+            return;
+        };
+        let number = showing.number;
+        showing.number = showing.number.wrapping_add(1);
+        let frame = crate::calls::screen_frame(number, ts, key, codec, data);
+        showing
+            .streams
+            .retain(|p, tx| !tx.is_closed() && conns.iter().any(|(q, _)| q == p));
+        for (peer, conn) in conns {
+            let tx = showing
+                .streams
+                .entry(peer)
+                .or_insert_with(|| crate::calls::open_screen_stream(conn, call));
+            let _ = tx.try_send(frame.clone());
+        }
+    }
+
+    /// We lost our place in the screen we are watching.
+    pub(super) fn call_screen_key(&self) {
+        let Some(c) = self.call.as_ref() else { return };
+        if let Some(sharer) = c.sharer {
+            self.send(sharer, Frame::CallKeyRequest { call: c.id });
+        }
+    }
+
     /// Gives up on a call nobody answered.
     pub(super) fn call_tick(&mut self) {
         let Some(c) = self.call.as_ref() else { return };
@@ -434,6 +523,17 @@ impl Engine {
         let was_peer = c.peers.remove(&peer);
         c.invited.remove(&peer);
         c.told.remove(&peer);
+        if c.sharer == Some(peer) {
+            c.sharer = None;
+            let call_id = id_from_bytes(&c.id);
+            self.emit_call(CallEvent::PeerScreen {
+                call_id,
+                from: key_to_string(&peer),
+                on: false,
+                width: 0,
+                height: 0,
+            });
+        }
         if was_peer {
             self.announce_peers();
         }
@@ -536,6 +636,8 @@ impl Engine {
                     told: HashSet::new(),
                     members,
                     caller: Some(peer),
+                    sharer: None,
+                    showing: None,
                 });
                 self.publish_call_state();
                 self.emit_call(CallEvent::Incoming {
@@ -572,6 +674,22 @@ impl Engine {
                             self.enter_call();
                         } else if newly {
                             self.announce_peers();
+                        }
+                        // Whoever just came in can see what is being shown.
+                        if let Some((call, width, height)) = self
+                            .call
+                            .as_ref()
+                            .and_then(|c| c.showing.as_ref().map(|s| (c.id, s.width, s.height)))
+                        {
+                            self.send(
+                                peer,
+                                Frame::CallScreen {
+                                    call,
+                                    on: true,
+                                    width,
+                                    height,
+                                },
+                            );
                         }
                         // Make sure they know we are in, too.
                         let tell = self
@@ -620,6 +738,38 @@ impl Engine {
                 if self.call.as_ref().is_some_and(|c| c.id == call) {
                     self.call_peer_gone(peer, false);
                 }
+            }
+            Frame::CallScreen {
+                call,
+                on,
+                width,
+                height,
+            } => {
+                let Some(c) = self
+                    .call
+                    .as_mut()
+                    .filter(|c| c.id == call && c.peers.contains(&peer))
+                else {
+                    return;
+                };
+                c.sharer = on.then_some(peer);
+                self.publish_call_state();
+                self.emit_call(CallEvent::PeerScreen {
+                    call_id: id_from_bytes(&call),
+                    from: id,
+                    on,
+                    width,
+                    height,
+                });
+            }
+            Frame::CallKeyRequest { call }
+                if self.call.as_ref().is_some_and(|c| {
+                    c.id == call && c.peers.contains(&peer) && c.showing.is_some()
+                }) =>
+            {
+                self.emit_call(CallEvent::ScreenKeyWanted {
+                    call_id: id_from_bytes(&call),
+                });
             }
             Frame::CallVideo { call, on }
                 if self

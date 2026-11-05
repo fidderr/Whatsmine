@@ -6,6 +6,9 @@
 //!   `js:<script>`: run in the page, the result is left in `debug_script_result.txt`.
 //!     It is how the scenarios press buttons and read the screen, on any screen size.
 //!   `report`: how the connection stands, in `debug_report.txt`.
+//!   `core:<what>`: what only the core can do, for a test with two real windows. The answer is
+//!     left in `debug_script_result.txt`: `invite`, `key`, `add <link>`, `accept <key>`,
+//!     `online <key>`, `requests`.
 //!
 //! `<data dir>/debug_<name>.txt` holds a number to use instead of a wait that takes too long for
 //! a test, see [`crate::platform::shortened`].
@@ -32,9 +35,27 @@ pub fn start(dir: PathBuf, core: whatsmine_core::Core) {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build();
+        let mut records = None;
         loop {
             std::thread::sleep(Duration::from_millis(30));
-            if take_action(&dir)
+            if let Ok(runtime) = &runtime
+                && let Some(what) = dht_asked(&dir)
+            {
+                let answer = runtime.block_on(async {
+                    if records.is_none() {
+                        records = whatsmine_core::records::Records::join().ok();
+                    }
+                    match &records {
+                        Some(records) => dht_check(records, &what).await,
+                        None => "no DHT".to_owned(),
+                    }
+                });
+                let unfinished = dir.join("debug_dht.tmp");
+                if std::fs::write(&unfinished, answer).is_ok() {
+                    let _ = std::fs::rename(unfinished, dir.join("debug_dht.txt"));
+                }
+            }
+            if take_action(&dir, &core)
                 && let Ok(runtime) = &runtime
             {
                 let report = runtime.block_on(core.connection_report());
@@ -44,8 +65,42 @@ pub fn start(dir: PathBuf, core: whatsmine_core::Core) {
     });
 }
 
+fn dht_asked(dir: &Path) -> Option<String> {
+    let what = std::fs::read_to_string(dir.join("debug_dht_ask.txt")).ok()?;
+    let _ = std::fs::remove_file(dir.join("debug_dht_ask.txt"));
+    Some(what)
+}
+
+/// `put <word> <bytes>` or `get <word>`: can this device reach the DHT, and can another one read
+/// what it wrote? The word is what both sides agree on.
+async fn dht_check(records: &whatsmine_core::records::Records, what: &str) -> String {
+    let mut words = what.split_whitespace();
+    let (verb, word) = (words.next().unwrap_or(""), words.next().unwrap_or(""));
+    let mut secret = [0_u8; 32];
+    let take = word.len().min(32);
+    secret[..take].copy_from_slice(&word.as_bytes()[..take]);
+    let slot = whatsmine_core::records::seed("devtest", &secret, 0, 0);
+    let started = std::time::Instant::now();
+    match verb {
+        "put" => {
+            let size = words.next().and_then(|n| n.parse().ok()).unwrap_or(10);
+            let wrote = records.put(&slot, &vec![7; size]).await;
+            format!("wrote={wrote} in {} ms", started.elapsed().as_millis())
+        }
+        "get" => {
+            let read = records.get(&slot).await;
+            format!(
+                "read={:?} in {} ms",
+                read.map(|value| value.len()),
+                started.elapsed().as_millis()
+            )
+        }
+        _ => "what?".to_owned(),
+    }
+}
+
 /// Returns whether the harness asked for a report.
-fn take_action(dir: &Path) -> bool {
+fn take_action(dir: &Path, core: &whatsmine_core::Core) -> bool {
     let path = dir.join("debug_action.txt");
     let Ok(contents) = std::fs::read_to_string(&path) else {
         return false;
@@ -54,8 +109,42 @@ fn take_action(dir: &Path) -> bool {
     if let Some(script) = contents.strip_prefix("js:") {
         *SCRIPT.lock().unwrap_or_else(PoisonError::into_inner) = Some(script.to_owned());
     }
+    if let Some(what) = contents.strip_prefix("core:") {
+        let answer = core_action(core, what);
+        let unfinished = dir.join("debug_script_result.tmp");
+        if std::fs::write(&unfinished, format!("={answer}")).is_ok() {
+            let _ = std::fs::rename(unfinished, dir.join("debug_script_result.txt"));
+        }
+    }
     let _ = std::fs::remove_file(&path);
     contents == "report"
+}
+
+fn core_action(core: &whatsmine_core::Core, what: &str) -> String {
+    let (verb, rest) = what.split_once(' ').unwrap_or((what, ""));
+    match verb {
+        "invite" => core.invite_link(),
+        "key" => core.my_key(),
+        // A test window never has the focus: it says so itself, to be treated as in use.
+        "front" => {
+            core.set_in_front(true);
+            "ok".to_owned()
+        }
+        "add" => core
+            .add_contact(rest, None)
+            .map_or_else(|e| format!("error: {e}"), |c| c.id),
+        "accept" => core
+            .accept(rest)
+            .map_or_else(|e| format!("error: {e}"), |()| "ok".to_owned()),
+        "online" => core.is_online(rest).to_string(),
+        "requests" => core
+            .requests()
+            .iter()
+            .map(|c| c.id.clone())
+            .collect::<Vec<_>>()
+            .join(" "),
+        _ => "what?".to_owned(),
+    }
 }
 
 /// In one go: the harness reads it as soon as it is there.

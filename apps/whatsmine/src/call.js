@@ -8,12 +8,19 @@
 //                {t:'v', ts, key, d}         one VP8 frame
 //                {t:'cam', on}               our camera went on/off
 //                {t:'error', what, msg}      microphone / camera / codec problem
+//                {t:'s', ts, key, c, d}      one frame of the screen we show
+//                {t:'screen', on, w, h}      showing it, or not any more
+//                {t:'askKey'}                we need a whole picture of what we watch
 //   Rust -> JS   {t:'start', call, video, group}   we are in the call
 //                {t:'stop'}  {t:'mute', on}  {t:'cam', on}
 //                {t:'peers', peers:[{id,name}]}    who else is in the call
 //                {t:'peerVideo', from, on}
 //                {t:'a', from, ts, d}  {t:'v', from, ts, key, d}   packets from a peer
 //                {t:'ring', kind}            'in' | 'out' | null
+//                {t:'share', on}             start or stop showing our screen
+//                {t:'screenKey'}             someone needs a whole picture of ours
+//                {t:'s', from, n, ts, key, c, d}   one frame of a screen we watch
+//                {t:'peerScreen', from, on}  someone started or stopped showing theirs
 //
 // Every other person in the call gets their own decoders and a tile, so a
 // group call is the same code as a 1:1 call. Codecs are WebCodecs (Opus
@@ -22,7 +29,16 @@
 (() => {
   if (window.wmCall) return
   const CFG = { aBitrate: 24000, vBitrate: 700000, fps: 15, keyEvery: 2 }
-  const stats = { aSent: 0, aRecv: 0, aDec: 0, vSent: 0, vRecv: 0, vDec: 0, vKeyWait: 0, errors: [] }
+  // A screen is text more often than not: sharp over smooth, and few frames will do.
+  const SCREEN = { fps: 10, keyEvery: 8, bitrate: 2500000, least: 700000 }
+  const SCREEN_CODECS = [{ name: 'vp09.00.10.08', bits: 1 }, { name: 'vp8', bits: 0 }]
+  const DECODE = ['vp8', 'vp09.00.10.08', 'avc1.42E01F']
+  const stats = {
+    aSent: 0, aRecv: 0, aDec: 0, vSent: 0, vRecv: 0, vDec: 0, vKeyWait: 0, errors: [],
+    sSent: 0, sBytes: 0, sRecv: 0, sDec: 0, sGaps: 0, sKeys: 0
+  }
+  // For tests: a painted picture instead of what is really on screen.
+  let paintedScreen = false
   let dx = null
   let run = null
   let els = null
@@ -144,6 +160,7 @@
   function removePeer (r, id) {
     const p = r.peers.get(id)
     if (!p) return
+    closeScreen(p)
     for (const c of [p.adec, p.vdec]) quiet(() => c && c.close())
     for (const w of [p.agenW, p.vgenW]) quiet(() => w && w.close())
     p.tile.remove()
@@ -299,6 +316,256 @@
     })()
   }
 
+  // ---- showing our screen ----
+  function paintedStream () {
+    const c = document.createElement('canvas')
+    c.width = 1280
+    c.height = 720
+    const g = c.getContext('2d')
+    let n = 0
+    const paint = () => {
+      n++
+      g.fillStyle = '#f5f6f9'
+      g.fillRect(0, 0, c.width, c.height)
+      g.fillStyle = '#1f5fd6'
+      g.fillRect(0, 0, c.width, 48)
+      g.fillStyle = '#14161c'
+      g.font = '32px sans-serif'
+      g.fillText('A painted screen, frame ' + n, 48, 120)
+      g.fillStyle = n % 2 ? '#ff8a7a' : '#6fd6a0'
+      g.fillRect(48 + (n % 100) * 8, 200, 120, 120)
+    }
+    paint()
+    const s = c.captureStream(SCREEN.fps)
+    const t = setInterval(paint, 1000 / SCREEN.fps)
+    s.getVideoTracks()[0].addEventListener('ended', () => clearInterval(t))
+    s.stopPaint = () => clearInterval(t)
+    return s
+  }
+
+  async function screenEncoder (r, w, h) {
+    const share = r.share
+    if (share.enc) quiet(() => share.enc.close())
+    share.w = w
+    share.h = h
+    const viewers = Math.max(1, r.peers.size)
+    const bitrate = Math.max(SCREEN.least, Math.round(SCREEN.bitrate / viewers))
+    const base = { width: w, height: h, bitrate, framerate: SCREEN.fps, latencyMode: 'realtime', contentHint: 'detail' }
+    let chosen = null
+    for (const c of SCREEN_CODECS) {
+      try {
+        const answer = await VideoEncoder.isConfigSupported({ codec: c.name, ...base })
+        if (answer.supported) { chosen = c; break }
+      } catch (_) {}
+    }
+    if (!chosen) throw new Error('no encoder for a screen')
+    const enc = new VideoEncoder({
+      output: chunk => {
+        if (r.closed || !r.share) return
+        const u8 = new Uint8Array(chunk.byteLength)
+        chunk.copyTo(u8)
+        stats.sSent++
+        stats.sBytes += u8.length
+        send({ t: 's', ts: Math.floor(chunk.timestamp) % 4294967296, key: chunk.type === 'key', c: chosen.bits, d: b64(u8) })
+      },
+      error: e => fail('screen-encoder', e)
+    })
+    enc.configure({ codec: chosen.name, ...base })
+    share.enc = enc
+    share.forceKey = true
+  }
+
+  function stopShowing (r) {
+    const share = r && r.share
+    if (!share) return
+    r.share = null
+    quiet(() => share.reader.cancel())
+    share.stream.getTracks().forEach(t => t.stop())
+    quiet(() => share.stream.stopPaint && share.stream.stopPaint())
+    quiet(() => share.enc && share.enc.close())
+    send({ t: 'screen', on: false, w: 0, h: 0 })
+  }
+
+  async function shareOn (on) {
+    const r = run
+    if (!r) return
+    if (!on) return stopShowing(r)
+    if (r.share) return
+    let stream
+    try {
+      stream = paintedScreen
+        ? paintedStream()
+        : await navigator.mediaDevices.getDisplayMedia({
+          video: { frameRate: { ideal: SCREEN.fps, max: 15 }, width: { max: 1920 }, height: { max: 1080 } },
+          audio: false
+        })
+    } catch (err) {
+      // Saying no in the picker is no error.
+      if (err && err.name !== 'NotAllowedError') fail('screen', err)
+      send({ t: 'screen', on: false, w: 0, h: 0 })
+      return
+    }
+    if (r.closed || r.share) { stream.getTracks().forEach(t => t.stop()); return }
+    const track = stream.getVideoTracks()[0]
+    track.contentHint = 'detail'
+    // The system's own Stop, a window that closed.
+    track.addEventListener('ended', () => stopShowing(r))
+    const reader = new MediaStreamTrackProcessor({ track }).readable.getReader()
+    const set = track.getSettings()
+    r.share = { stream, track, reader, enc: null, w: 0, h: 0, forceKey: true, lastKey: 0, busy: false }
+    send({ t: 'screen', on: true, w: set.width || 0, h: set.height || 0 })
+    ;(async () => {
+      for (;;) {
+        let res
+        try { res = await reader.read() } catch (_) { break }
+        if (res.done) break
+        const frame = res.value
+        const share = r.share
+        try {
+          if (r.closed || !share) { frame.close(); continue }
+          const w = frame.displayWidth & ~1
+          const h = frame.displayHeight & ~1
+          if (!share.enc || share.w !== w || share.h !== h) await screenEncoder(r, w, h)
+          // Behind: this one is skipped, the next one is newer anyway.
+          if (share.enc.encodeQueueSize > 2) { frame.close(); continue }
+          const now = performance.now()
+          const key = share.forceKey || now - share.lastKey > SCREEN.keyEvery * 1000
+          if (key) {
+            share.forceKey = false
+            share.lastKey = now
+          }
+          share.enc.encode(frame, { keyFrame: key })
+        } catch (err) { note('screen-encode', err) }
+        frame.close()
+      }
+    })()
+  }
+
+  // ---- watching someone's screen ----
+  function zoomable (tile, video) {
+    let z = 1, x = 0, y = 0
+    const points = new Map()
+    let spread = 0
+    const show = () => {
+      z = Math.min(6, Math.max(1, z))
+      if (z === 1) { x = 0; y = 0 }
+      video.style.transform = 'translate(' + x + 'px,' + y + 'px) scale(' + z + ')'
+    }
+    const apart = () => {
+      const p = Array.from(points.values())
+      return p.length < 2 ? 0 : Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y)
+    }
+    tile.addEventListener('wheel', e => { e.preventDefault(); z *= e.deltaY < 0 ? 1.15 : 0.87; show() }, { passive: false })
+    let moved = 0
+    let downAt = 0
+    tile.addEventListener('pointerdown', e => {
+      tile.setPointerCapture(e.pointerId)
+      points.set(e.pointerId, { x: e.clientX, y: e.clientY })
+      spread = apart()
+      moved = 0
+      downAt = performance.now()
+    })
+    tile.addEventListener('pointermove', e => {
+      const p = points.get(e.pointerId)
+      if (!p) return
+      moved += Math.abs(e.clientX - p.x) + Math.abs(e.clientY - p.y)
+      if (points.size === 1 && z > 1) { x += e.clientX - p.x; y += e.clientY - p.y }
+      p.x = e.clientX
+      p.y = e.clientY
+      if (points.size === 2) {
+        const now = apart()
+        if (spread > 0) z *= now / spread
+        spread = now
+      }
+      show()
+    })
+    const lift = e => { points.delete(e.pointerId); spread = apart() }
+    tile.addEventListener('pointerup', e => {
+      lift(e)
+      // A tap, not a drag: the rest of the call screen goes away, or comes back.
+      if (moved < 12 && performance.now() - downAt < 350) document.body.classList.toggle('call-chrome-off')
+    })
+    tile.addEventListener('pointercancel', lift)
+    tile.addEventListener('dblclick', () => { z = z > 1 ? 1 : 2.5; show() })
+  }
+
+  function screenTile (p) {
+    if (p.sTile) return
+    const e = ensureEls()
+    const tile = document.createElement('div')
+    tile.className = 'wm-screen'
+    const video = document.createElement('video')
+    video.autoplay = true
+    video.muted = true
+    video.playsInline = true
+    tile.append(video)
+    e.box.append(tile)
+    e.box.classList.add('has-screen')
+    p.sTile = tile
+    p.sVideo = video
+    p.sGen = new MediaStreamTrackGenerator({ kind: 'video' })
+    p.sOut = p.sGen.writable.getWriter()
+    video.srcObject = new MediaStream([p.sGen])
+    video.play().catch(() => {})
+    p.sIdx = 0
+    p.sNext = null
+    p.sLost = true
+    zoomable(tile, video)
+  }
+
+  function closeScreen (p) {
+    if (!p.sTile) return
+    quiet(() => p.sDec && p.sDec.close())
+    quiet(() => p.sOut && p.sOut.close())
+    p.sTile.remove()
+    document.body.classList.remove('call-chrome-off')
+    p.sTile = null
+    p.sVideo = null
+    p.sDec = null
+    p.sCodec = null
+    if (els && !document.querySelector('.wm-screen')) els.box.classList.remove('has-screen')
+  }
+
+  function askKey (p) {
+    const now = performance.now()
+    if (now - (p.sAsked || 0) < 1000) return
+    p.sAsked = now
+    stats.sKeys++
+    send({ t: 'askKey' })
+  }
+
+  function onScreen (m) {
+    const r = run
+    if (!r || r.closed) return
+    const p = ensurePeer(r, m.from)
+    screenTile(p)
+    stats.sRecv++
+    // A frame builds on the ones before it: one missing, and the rest waits for a whole picture.
+    if (p.sLost && !m.key) return askKey(p)
+    if (p.sNext !== null && m.n !== p.sNext && !m.key) {
+      p.sLost = true
+      stats.sGaps++
+      return askKey(p)
+    }
+    p.sNext = (m.n + 1) >>> 0
+    p.sLost = false
+    if (!p.sDec || p.sDec.state !== 'configured' || p.sCodec !== m.c) {
+      quiet(() => p.sDec && p.sDec.close())
+      p.sCodec = m.c
+      p.sDec = new VideoDecoder({
+        output: f => {
+          stats.sDec++
+          p.sOut.write(f).catch(() => quiet(() => f.close()))
+        },
+        error: e => { note('screen-decoder', e); p.sDec = null; p.sLost = true; askKey(p) }
+      })
+      p.sDec.configure({ codec: DECODE[m.c] || 'vp8' })
+    }
+    try {
+      p.sDec.decode(new EncodedVideoChunk({ type: m.key ? 'key' : 'delta', timestamp: (p.sIdx++) * 100000, data: unb64(m.d) }))
+    } catch (e) { note('screen-decode', e); p.sDec = null; p.sLost = true; askKey(p) }
+  }
+
   // ---- call lifecycle ----
   async function start (m) {
     stop()
@@ -331,6 +598,7 @@
     clearInterval(r.watch)
     quiet(() => r.micReader && r.micReader.cancel())
     quiet(() => r.camReader && r.camReader.cancel())
+    stopShowing(r)
     ;[r.mic, r.cam].forEach(s => s && s.getTracks().forEach(t => t.stop()))
     for (const c of [r.aenc, r.venc]) quiet(() => c && c.close())
     for (const id of Array.from(r.peers.keys())) removePeer(r, id)
@@ -367,6 +635,24 @@
     switch (m.t) {
       case 'a': return onAudio(m)
       case 'v': return onVideo(m)
+      case 's': return onScreen(m)
+      case 'share': return shareOn(!!m.on)
+      case 'screenKey':
+        if (run && run.share) run.share.forceKey = true
+        return
+      case 'peerScreen': {
+        const r = run
+        if (!r) return
+        const p = ensurePeer(r, m.from)
+        if (m.on) {
+          screenTile(p)
+          p.sLost = true
+          askKey(p)
+        } else {
+          closeScreen(p)
+        }
+        return
+      }
       case 'start': return start(m)
       case 'stop': return stop()
       case 'mute':
@@ -398,7 +684,22 @@
 
   window.wmCall = {
     stats: () => JSON.parse(JSON.stringify(stats)),
-    state: () => run && { id: run.id, camOn: run.camOn, muted: run.muted, peers: Array.from(run.peers.keys()) },
+    state: () => run && { id: run.id, camOn: run.camOn, muted: run.muted, peers: Array.from(run.peers.keys()), showing: !!run.share },
+    usePaintedScreen: on => { paintedScreen = !!on },
+    // For tests: how big the screen we watch is, and whether it has more than one colour in it.
+    screenInfo: () => {
+      const v = document.querySelector('.wm-screen video')
+      if (!v || !v.videoWidth) return null
+      const c = document.createElement('canvas')
+      c.width = 64
+      c.height = 36
+      const g = c.getContext('2d')
+      g.drawImage(v, 0, 0, 64, 36)
+      const d = g.getImageData(0, 0, 64, 36).data
+      const seen = new Set()
+      for (let i = 0; i < d.length; i += 4) seen.add(d[i] >> 4 << 8 | d[i + 1] >> 4 << 4 | d[i + 2] >> 4)
+      return { w: v.videoWidth, h: v.videoHeight, colors: seen.size }
+    },
     // Pixels in a peer's tile, for tests: true if the picture is not flat.
     tileInfo: () => run && Array.from(run.peers.values()).map(p => ({
       id: p.id, cam: p.cam, w: p.video.videoWidth, h: p.video.videoHeight, name: p.label.textContent, nA: p.nA, nV: p.nV

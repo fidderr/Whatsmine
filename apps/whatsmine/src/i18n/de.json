@@ -836,5 +836,18 @@
   "soft.lilac": "Flieder",
   "soft.slate": "Schiefer",
   "look.in_one_chat": "In 1 Chat",
-  "look.background": "Chat-Hintergrund"
+  "look.background": "Chat-Hintergrund",
+  "call.share": "Bildschirm zeigen",
+  "call.share_stop": "Bildschirm nicht mehr zeigen",
+  "call.share_title": "Bildschirm {name} zeigen?",
+  "call.share_text": "Die Person sieht, was auf deinem Bildschirm ist, bis du aufhörst, auch Benachrichtigungen. WhatsMine selbst bleibt verborgen, deine Chats und 12 Wörter sind also nicht zu sehen. Danach wählst du, was du zeigst.",
+  "call.share_go": "Wählen, was du zeigst",
+  "call.sharing": "Du zeigst deinen Bildschirm",
+  "call.peer_sharing": "{name} zeigt den Bildschirm",
+  "call.share_busy": "{name} zeigt gerade den Bildschirm",
+  "call.err_screen": "Dein Bildschirm konnte nicht gezeigt werden",
+  "call.l_camera": "Kamera",
+  "call.l_screen": "Bildschirm",
+  "call.in_call": "Im Gespräch",
+  "call.speaker": "Lautsprecher"
 }

@@ -223,6 +223,21 @@ pub(crate) enum Cmd {
     },
     /// Our camera went on or off.
     CallVideoOn(bool),
+    /// We started or stopped showing our screen.
+    CallScreenOn {
+        on: bool,
+        width: u32,
+        height: u32,
+    },
+    /// One encoded frame of our screen.
+    CallScreenFrame {
+        ts: u32,
+        key: bool,
+        codec: calls::ScreenCodec,
+        data: Vec<u8>,
+    },
+    /// We need a whole picture of the screen we are watching.
+    CallScreenKey,
     Shutdown(std::sync::mpsc::Sender<()>),
 }
 
@@ -336,6 +351,7 @@ pub(crate) struct Engine {
     published: Option<(EndpointAddr, Instant)>,
     publishing: bool,
     next_request_poll: Option<Instant>,
+    last_request_poll: Option<Instant>,
     polling_requests: bool,
     /// Requests of ours waiting for an answer: when to leave them again, and how often we did.
     requests_out: HashMap<PublicKey, (Instant, usize)>,
@@ -448,6 +464,7 @@ impl Engine {
             published: None,
             publishing: false,
             next_request_poll: None,
+            last_request_poll: None,
             polling_requests: false,
             requests_out: HashMap::new(),
             owe_accept: HashSet::new(),
@@ -1761,6 +1778,7 @@ impl Engine {
             REQUESTS_REACHABLE
         };
         self.next_request_poll = Some(now + every);
+        self.last_request_poll = Some(now);
         let wall = now_ms();
         let invites: Vec<MyInvite> = self
             .db
@@ -1769,6 +1787,7 @@ impl Engine {
             .filter(|i| i.open_for_requests(wall))
             .collect();
         self.polling_requests = true;
+        tracing::debug!("looking for requests under {} invites", invites.len());
         let tx = self.tx.clone();
         // Knocks: under our location, and under old ones for contacts who were away.
         self.identity
@@ -1822,6 +1841,7 @@ impl Engine {
 
     fn on_requests_found(&mut self, found: Vec<(String, Vec<u8>)>) {
         self.polling_requests = false;
+        tracing::debug!("requests found: {}", found.len());
         let invites = self.db.invites();
         for (id, note) in found {
             if !self.seen_notes.insert(*blake3::hash(&note).as_bytes()) {
@@ -1832,6 +1852,8 @@ impl Engine {
             };
             if let Some(request) = requests::open(invite, &note) {
                 self.on_request(invite.clone(), request);
+            } else {
+                tracing::debug!("a request that could not be opened");
             }
         }
     }
@@ -1975,7 +1997,8 @@ impl Engine {
             );
             let records = records.clone();
             tokio::spawn(async move {
-                records.put(&seed, &sealed).await;
+                let left = records.put(&seed, &sealed).await;
+                tracing::debug!("request left: {left}, {} bytes", sealed.len());
             });
         }
     }
@@ -2137,6 +2160,8 @@ impl Engine {
                 if in_front && !self.in_front {
                     self.backoff.clear();
                     self.look_around_all();
+                    self.next_request_poll =
+                        poll_on_return(self.next_request_poll, self.last_request_poll);
                 }
                 self.in_front = in_front;
             }
@@ -2340,6 +2365,14 @@ impl Engine {
                 }
             }
             Cmd::CallVideoOn(on) => self.call_video_on(on),
+            Cmd::CallScreenOn { on, width, height } => self.call_screen_on(on, width, height),
+            Cmd::CallScreenFrame {
+                ts,
+                key,
+                codec,
+                data,
+            } => self.call_screen_frame(ts, key, codec, &data),
+            Cmd::CallScreenKey => self.call_screen_key(),
             Cmd::SendGroup { group, message_id } => {
                 self.note_activity();
                 self.wanted_dirty = true;
@@ -3276,7 +3309,9 @@ impl Engine {
             f @ (Frame::CallInvite { .. }
             | Frame::CallAnswer { .. }
             | Frame::CallEnd { .. }
-            | Frame::CallVideo { .. }) => self.on_call_frame(peer, f),
+            | Frame::CallVideo { .. }
+            | Frame::CallScreen { .. }
+            | Frame::CallKeyRequest { .. }) => self.on_call_frame(peer, f),
             Frame::FileDecline { id: mid } => {
                 if self.group_declined(peer, &mid) {
                     return;
@@ -3812,6 +3847,10 @@ fn spawn_file_acceptor(
                     calls::receive_video(recv, header, peer, &media_in).await;
                     return;
                 }
+                if &header[..4] == crate::protocol::SCREEN_STREAM_MAGIC {
+                    calls::receive_screen(recv, header, peer, &media_in).await;
+                    return;
+                }
                 let progress_tx = tx.clone();
                 let contact_id = ctx.peer_id.clone();
                 let (message_id, result) =
@@ -3882,6 +3921,15 @@ fn closed_on_purpose(conn: &Connection) -> bool {
     )
 }
 
+/// Whoever opens the app should not wait for the pace of a phone in a pocket. Quick switches
+/// between apps do not make it look more often than the app in use does.
+fn poll_on_return(next: Option<Instant>, last: Option<Instant>) -> Option<Instant> {
+    match (next, last) {
+        (Some(next), Some(last)) => Some(next.min(last + REQUESTS_IN_USE)),
+        (next, _) => next,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::clean_name;
@@ -3890,5 +3938,24 @@ mod tests {
     fn names_are_cleaned() {
         assert_eq!(clean_name("  Roy\n\u{7}  "), "Roy");
         assert_eq!(clean_name(&"x".repeat(100)).len(), 64);
+    }
+
+    #[test]
+    fn opening_the_app_brings_the_next_look_for_requests_closer() {
+        use super::{REQUESTS_IN_USE, REQUESTS_REACHABLE, poll_on_return};
+        use tokio::time::{Duration, Instant};
+        let last = Instant::now();
+        let slow = last + REQUESTS_REACHABLE;
+        // Looked a while ago, at the slow pace: now the pace of the app in use.
+        assert_eq!(
+            poll_on_return(Some(slow), Some(last)),
+            Some(last + REQUESTS_IN_USE)
+        );
+        // Already soon: stays.
+        let soon = last + Duration::from_secs(5);
+        assert_eq!(poll_on_return(Some(soon), Some(last)), Some(soon));
+        // Nothing to bring closer without an endpoint or before the first look.
+        assert_eq!(poll_on_return(None, Some(last)), None);
+        assert_eq!(poll_on_return(Some(slow), None), Some(slow));
     }
 }
