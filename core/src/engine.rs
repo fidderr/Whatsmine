@@ -247,11 +247,8 @@ pub(crate) enum Cmd {
     ChannelOut(String),
     /// We left: nothing that was on its way brings it back.
     ChannelForget(String),
-    ChannelReact {
-        id: String,
-        number: u64,
-        emoji: usize,
-    },
+    /// Something to write: at the next look, which is now.
+    ChannelLookNow,
     /// What we owe changed: posts to send, or one taken back. The app is in use.
     StatusOut,
     /// We looked at something.
@@ -461,7 +458,6 @@ pub(crate) struct Engine {
     control: control::ControlSide,
     channel: channel::ChannelSide,
     control_sink: calls::ControlSink,
-    control_scope_was_whole: bool,
     /// What this device is, next to another one of the same person.
     this_device: DeviceState,
     echoes: crate::sibling::Echoes,
@@ -536,7 +532,6 @@ impl Engine {
             control: control::ControlSide::new(),
             channel: channel::ChannelSide::default(),
             control_sink,
-            control_scope_was_whole: false,
             group_calls: HashMap::new(),
             media_in: MediaIn {
                 active: ActiveCall::default(),
@@ -2458,21 +2453,18 @@ impl Engine {
             } => self.call_screen_on(on, width, height, can_control),
             Cmd::ChannelOut(id) => self.channel_out(&id),
             Cmd::ChannelForget(id) => self.db.delete_channel(&id),
-            Cmd::ChannelReact { id, number, emoji } => self.channel_react(&id, number, emoji),
+            Cmd::ChannelLookNow => self.channel_look_now(),
             Cmd::StatusOut => self.status_out(),
             Cmd::StatusTell => {
                 let peers: Vec<PublicKey> = self.sessions.keys().copied().collect();
                 for peer in peers {
                     if peer != self.me {
-                        self.flush_status(peer);
+                        self.flush_status_seen(peer);
                     }
                 }
             }
             Cmd::ControlAsk => self.control_ask(),
-            Cmd::ControlAnswer { yes, scope } => {
-                self.control_scope_was_whole = scope == crate::control::Scope::WholeScreen;
-                self.control_answer(yes, scope);
-            }
+            Cmd::ControlAnswer { yes, scope } => self.control_answer(yes, scope),
             Cmd::ControlStop => self.control_stop(),
             Cmd::ControlOwnerBusy => self.control_owner_busy(),
             Cmd::ControlExtend => self.control_extend(),

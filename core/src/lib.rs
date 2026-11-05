@@ -126,6 +126,7 @@ struct Inner {
     /// Where incoming call media goes (whoever called `call_media` last).
     media_sink: calls::MediaSink,
     control_sink: calls::ControlSink,
+    channel_writing: Mutex<()>,
 }
 
 impl Drop for Inner {
@@ -175,6 +176,8 @@ impl Core {
             );
             let mut settings = db.settings();
             settings.avatar = None;
+            // Nobody turned that on here. It takes someone's own hand, on each PC.
+            settings.control_on_since = None;
             db.save_settings(&settings)?;
         }
         let me = identity::Identity::load_or_create(&db).context("loading identity")?;
@@ -239,6 +242,7 @@ impl Core {
                 runtime: Mutex::new(Some(runtime)),
                 media_sink,
                 control_sink,
+                channel_writing: Mutex::new(()),
             }),
         };
         // Opened when the app last went down: that was the one time.
@@ -488,15 +492,22 @@ impl Core {
     /// Writes in a channel we run. Returns the number of the post.
     pub fn channel_write(&self, id: &str, text: &str, photo: Option<&Path>) -> anyhow::Result<u64> {
         let db = &self.inner.db;
-        let Some(mut c) = db.channel(id) else {
-            bail!("no_channel");
-        };
-        let Some(secret) = c.secret else {
+        let Some(secret) = db.channel(id).and_then(|c| c.secret) else {
             bail!("not_yours");
         };
         let text: String = text.trim().chars().take(channel::MAX_TEXT).collect();
+        // This can take seconds, so before anything else is looked at.
         let jpeg = photo.map(files::wallpaper_jpeg).transpose()?;
         ensure!(!text.is_empty() || jpeg.is_some(), "nothing_to_post");
+        // One at a time: two with one number would be two different signed posts.
+        let _one = self
+            .inner
+            .channel_writing
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let Some(mut c) = db.channel(id) else {
+            bail!("no_channel");
+        };
         let number = c.last + 1;
         let short = channel::short_part(&text).to_owned();
         let needs_body = jpeg.is_some() || short.len() < text.len();
@@ -536,7 +547,7 @@ impl Core {
         }
         c.last = number;
         c.head = Some(head.to_bytes());
-        db.save_channel(&c);
+        db.update_channel(&c);
         self.cmd(Cmd::ChannelOut(id.to_owned()));
         self.emit(CoreEvent::ChannelsChanged);
         Ok(number)
@@ -576,15 +587,17 @@ impl Core {
 
     /// One of [`channel::EMOJI`] on a post. Nobody can tell who, and it cannot be taken back.
     pub fn channel_react(&self, id: &str, number: u64, emoji: usize) {
+        let db = &self.inner.db;
+        let (Some(c), Some(post)) = (db.channel(id), db.channel_post(id, number)) else {
+            return;
+        };
         if emoji < channel::EMOJI.len() {
-            self.inner
-                .db
-                .add_channel_reaction_of_mine(id, number, emoji as u8);
-            self.cmd(Cmd::ChannelReact {
-                id: id.to_owned(),
-                number,
-                emoji,
-            });
+            db.add_channel_reaction_of_mine(id, number, emoji as u8);
+            // Kept here, and written at the next look, whenever that can be.
+            let mut sketch = post.sketch;
+            sketch.add(emoji, &c.follower);
+            db.set_channel_sketch(id, number, &sketch);
+            self.cmd(Cmd::ChannelLookNow);
             self.emit(CoreEvent::ChannelsChanged);
         }
     }
@@ -669,7 +682,10 @@ impl Core {
 
     /// Everything still around, newest first. Our own too.
     pub fn status_posts(&self) -> Vec<status::Post> {
-        self.inner.db.status_posts()
+        let hidden = self.hidden_ids();
+        let mut posts = self.inner.db.status_posts();
+        posts.retain(|p| !hidden.contains(&p.author));
+        posts
     }
 
     pub fn status_post_by_id(&self, id: &str) -> Option<status::Post> {
@@ -1064,7 +1080,7 @@ impl Core {
                 .join(format!("{}.look.tmp", uuid::Uuid::now_v7()));
             std::fs::create_dir_all(self.media_dir())?;
             std::fs::write(&tmp, jpeg)?;
-            return self.send_file_inner(
+            let sent = self.send_file_inner(
                 chat,
                 &tmp,
                 "look.jpg",
@@ -1075,6 +1091,10 @@ impl Core {
                 false,
                 Some(rich),
             );
+            if sent.is_err() {
+                let _ = std::fs::remove_file(&tmp);
+            }
+            return sent;
         }
         self.send_rich(chat, rich)
     }

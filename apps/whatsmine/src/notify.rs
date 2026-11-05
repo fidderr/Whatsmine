@@ -144,11 +144,17 @@ impl Hub {
                 if ui_active {
                     return Vec::new();
                 }
+                // Not on a lock screen, for someone who said so.
+                let (title, body) = if settings.notification_previews {
+                    (name.clone(), text.chars().take(120).collect())
+                } else {
+                    generic(look, "notify.new_message")
+                };
                 vec![Action::Post(Notice {
                     tag: format!("channel:{channel}"),
                     kind: Kind::Message,
-                    title: name.clone(),
-                    body: text.chars().take(120).collect(),
+                    title,
+                    body,
                     chat: None,
                 })]
             }

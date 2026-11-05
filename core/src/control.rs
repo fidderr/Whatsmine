@@ -70,6 +70,18 @@ pub enum Input {
     Text(String),
     /// Nothing happened, and I am still here.
     StillHere,
+    /// Never from the wire: the owner's own hand is on the PC, and whatever is held down goes up.
+    LetGo,
+}
+
+impl Input {
+    /// Something that goes up. Those always count, or something stays held down on someone's PC.
+    fn is_release(&self) -> bool {
+        matches!(
+            self,
+            Self::Button { down: false, .. } | Self::Key { down: false, .. }
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -111,6 +123,7 @@ pub fn open_batch(key: &[u8; 32], sealed: &[u8]) -> Option<Batch> {
     let fits = batch.events.len() <= MOST_IN_BATCH
         && batch.events.iter().all(|e| match e {
             Input::Text(text) => text.chars().count() <= MOST_TEXT,
+            Input::LetGo => false,
             _ => true,
         });
     fits.then_some(batch)
@@ -473,7 +486,13 @@ impl Controlled {
         }
         session.in_this_second += batch.events.len() as u32;
         if session.in_this_second > MOST_PER_SECOND {
-            return Verdict::Dropped;
+            // Too much, but what goes up still goes up.
+            let up: Vec<Input> = batch.events.into_iter().filter(Input::is_release).collect();
+            return if up.is_empty() {
+                Verdict::Dropped
+            } else {
+                Verdict::Use(up)
+            };
         }
         if now < session.waiting_until {
             return Verdict::Waiting;
@@ -481,7 +500,7 @@ impl Controlled {
         let events: Vec<Input> = batch
             .events
             .into_iter()
-            .filter(|e| !matches!(e, Input::StillHere))
+            .filter(|e| !matches!(e, Input::StillHere | Input::LetGo))
             .collect();
         Verdict::Use(events)
     }
@@ -503,6 +522,14 @@ pub mod scan {
     pub const RIGHT_WIN: u16 = 0x5C;
     pub const MENU: u16 = 0x5D;
 }
+
+/// The extended keys there are on a normal keyboard: Enter on the number pad, right Ctrl, divide,
+/// Print Screen, right Alt, the arrows and what is around them, and the menu key.
+const EXTENDED_KEYS: [u16; 16] = [
+    0x1C, 0x1D, 0x35, 0x37, 0x38, 0x47, 0x48, 0x49, 0x4B, 0x4D, 0x4F, 0x50, 0x51, 0x52, 0x53, 0x5D,
+];
+/// F12.
+const LAST_PLAIN_KEY: u16 = 0x58;
 
 /// Which modifier keys the one in control is holding down.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -526,6 +553,15 @@ impl Held {
 /// May this key reach the PC? The Windows key and what opens the system's own tools do not, and
 /// never mind what is being shown: those are how someone gets out of what they were let into.
 pub fn key_allowed(code: u16, extended: bool, held: Held, scope: Scope) -> bool {
+    // Only what is on a normal keyboard. Not the keys that start the mail program or the calculator,
+    // and nothing that only looks different from the keys blocked below.
+    if extended {
+        if !EXTENDED_KEYS.contains(&code) {
+            return false;
+        }
+    } else if code == 0 || code > LAST_PLAIN_KEY {
+        return false;
+    }
     if extended && matches!(code, scan::LEFT_WIN | scan::RIGHT_WIN) {
         return false;
     }
@@ -603,7 +639,6 @@ pub enum Landing {
 pub struct Applier<D: Desk> {
     desk: D,
     scope: Scope,
-    held: Held,
     keys: Vec<(u16, bool)>,
     buttons: Vec<MouseButton>,
     pointer: Option<(i32, i32)>,
@@ -614,7 +649,6 @@ impl<D: Desk> Applier<D> {
         Self {
             desk,
             scope,
-            held: Held::default(),
             keys: Vec::new(),
             buttons: Vec::new(),
             pointer: None,
@@ -643,9 +677,27 @@ impl<D: Desk> Applier<D> {
         }
     }
 
-    fn under_pointer(&self) -> bool {
-        self.pointer
-            .is_some_and(|(x, y)| self.may_land(self.desk.window_at(x, y)))
+    /// What is down right now, from what really is. Left and right are each a key of their own: one
+    /// going up says nothing about the other.
+    fn held(&self) -> Held {
+        let mut held = Held::default();
+        for (code, _) in &self.keys {
+            held.note(*code, true);
+        }
+        held
+    }
+
+    /// A press and the wheel land where the real pointer is, and the owner's hand may have moved it.
+    /// So it goes back to the place that was checked, checked again, right before.
+    fn point_again(&mut self) -> bool {
+        let Some((x, y)) = self.pointer else {
+            return false;
+        };
+        if !self.may_land(self.desk.window_at(x, y)) {
+            return false;
+        }
+        self.desk.mouse_to(x, y);
+        true
     }
 
     pub fn apply(&mut self, events: Vec<Input>) -> Result<(), Ended> {
@@ -666,7 +718,7 @@ impl<D: Desk> Applier<D> {
                     }
                 }
                 Input::Button { which, down: true } => {
-                    if self.under_pointer() {
+                    if self.point_again() {
                         self.desk.button(which, true);
                         if !self.buttons.contains(&which) {
                             self.buttons.push(which);
@@ -680,7 +732,7 @@ impl<D: Desk> Applier<D> {
                     }
                 }
                 Input::Wheel { dx, dy } => {
-                    if self.under_pointer() {
+                    if self.point_again() {
                         self.desk.wheel(dx, dy);
                     }
                 }
@@ -689,11 +741,10 @@ impl<D: Desk> Applier<D> {
                     extended,
                     down: true,
                 } => {
-                    if key_allowed(code, extended, self.held, self.scope)
+                    if key_allowed(code, extended, self.held(), self.scope)
                         && self.may_land(self.desk.foreground())
                     {
                         self.desk.key(code, extended, true);
-                        self.held.note(code, true);
                         if !self.keys.contains(&(code, extended)) {
                             self.keys.push((code, extended));
                         }
@@ -706,7 +757,6 @@ impl<D: Desk> Applier<D> {
                 } => {
                     if self.keys.contains(&(code, extended)) {
                         self.keys.retain(|k| *k != (code, extended));
-                        self.held.note(code, false);
                         self.desk.key(code, extended, false);
                     }
                 }
@@ -717,6 +767,7 @@ impl<D: Desk> Applier<D> {
                     }
                 }
                 Input::StillHere => {}
+                Input::LetGo => self.let_go(),
             }
         }
         Ok(())
@@ -730,7 +781,6 @@ impl<D: Desk> Applier<D> {
         for (code, extended) in std::mem::take(&mut self.keys) {
             self.desk.key(code, extended, false);
         }
-        self.held = Held::default();
         self.pointer = None;
     }
 }
@@ -1324,7 +1374,7 @@ mod tests {
         let mut events = vec![at(500)];
         events.extend(press(MouseButton::Left));
         a.apply(events).unwrap();
-        assert_eq!(did(&mut a).len(), 3, "the shown window");
+        assert_eq!(did(&mut a).len(), 4, "the shown window");
         a.desk.typing_on = Some(Landing::Other);
         a.apply(vec![Input::Text("x".into())]).unwrap();
         assert_eq!(
@@ -1338,7 +1388,7 @@ mod tests {
         let mut events = vec![at(150)];
         events.extend(press(MouseButton::Left));
         a.apply(events).unwrap();
-        assert_eq!(did(&mut a).len(), 3);
+        assert_eq!(did(&mut a).len(), 4);
     }
 
     #[test]
@@ -1441,5 +1491,120 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(did(&mut a), ["text ab"]);
+    }
+
+    #[test]
+    fn both_ctrl_keys_down_and_one_up_is_still_ctrl_down() {
+        let key = |code, extended, down| Input::Key {
+            code,
+            extended,
+            down,
+        };
+        for (scope, modifier, blocked) in [
+            (Scope::WholeScreen, scan::CTRL, scan::ESC),
+            (Scope::Window, scan::ALT, scan::TAB),
+            (Scope::Window, scan::ALT, scan::ESC),
+        ] {
+            let mut a = Applier::new(Paper::default(), scope);
+            a.apply(vec![
+                key(modifier, false, true),
+                key(modifier, true, true),
+                key(modifier, true, false),
+                key(blocked, false, true),
+            ])
+            .unwrap();
+            let went = did(&mut a);
+            assert_eq!(went.len(), 3, "the blocked key did not go: {went:?}");
+        }
+    }
+
+    #[test]
+    fn a_press_lands_where_it_was_checked_not_where_the_owner_moved_the_mouse() {
+        let mut a = Applier::new(Paper::default(), Scope::Window);
+        a.apply(vec![at(500)]).unwrap();
+        did(&mut a);
+        // The owner moved the real pointer anywhere since. The press goes back first.
+        a.apply(vec![Input::Button {
+            which: MouseButton::Left,
+            down: true,
+        }])
+        .unwrap();
+        let went = did(&mut a);
+        assert!(went[0].starts_with("to "), "{went:?}");
+        assert_eq!(went[1], "Left true");
+        a.apply(vec![Input::Wheel { dx: 0, dy: 120 }]).unwrap();
+        let went = did(&mut a);
+        assert!(went[0].starts_with("to "), "{went:?}");
+    }
+
+    #[test]
+    fn the_owners_hand_lets_go_of_what_is_held_and_what_goes_up_is_never_lost() {
+        let mut a = Applier::new(Paper::default(), Scope::WholeScreen);
+        a.apply(vec![
+            at(500),
+            Input::Button {
+                which: MouseButton::Left,
+                down: true,
+            },
+            Input::Key {
+                code: scan::CTRL,
+                extended: false,
+                down: true,
+            },
+        ])
+        .unwrap();
+        did(&mut a);
+        a.apply(vec![Input::LetGo]).unwrap();
+        assert_eq!(did(&mut a), ["Left false", "key 29 false"]);
+
+        // Nobody can send that from outside.
+        let key = [3u8; 32];
+        let forged = Batch {
+            number: 1,
+            events: vec![Input::LetGo],
+        };
+        assert_eq!(open_batch(&key, &seal_batch(&key, &forged).unwrap()), None);
+
+        // Over the limit: what goes up still goes up, and nothing else.
+        let (mut c, id) = granted();
+        let mut events = vec![Input::Move { x: 0, y: 0 }; MOST_PER_SECOND as usize];
+        events.push(Input::Button {
+            which: MouseButton::Left,
+            down: true,
+        });
+        events.push(Input::Key {
+            code: 0x1E,
+            extended: false,
+            down: false,
+        });
+        let verdict = c.input("noor", &id, Batch { number: 1, events }, NOW + 7000);
+        assert_eq!(
+            verdict,
+            Verdict::Use(vec![Input::Key {
+                code: 0x1E,
+                extended: false,
+                down: false
+            }])
+        );
+    }
+
+    #[test]
+    fn only_keys_that_are_on_a_normal_keyboard() {
+        let none = Held::default();
+        for scope in [Scope::Window, Scope::WholeScreen] {
+            // What opens other programs: calculator, mail, this PC, the browser.
+            for launcher in [0x21, 0x6C, 0x6B, 0x32] {
+                assert!(!key_allowed(launcher, true, none, scope), "{launcher:#x}");
+            }
+            // What only looks different from a blocked key.
+            for sneaky in [0xE05B, 0x0101, 0x015B, 0xFFFF, 0] {
+                assert!(!key_allowed(sneaky, false, none, scope), "{sneaky:#x}");
+                assert!(!key_allowed(sneaky, true, none, scope), "{sneaky:#x}");
+            }
+            assert!(key_allowed(0x58, false, none, scope), "F12");
+            assert!(!key_allowed(0x59, false, none, scope));
+            assert!(key_allowed(0x48, true, none, scope), "up");
+            assert!(key_allowed(0x1D, true, none, scope), "right Ctrl");
+        }
     }
 }

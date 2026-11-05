@@ -302,7 +302,10 @@ impl Database {
     /// Deletes every row and compacts the file so nothing lingers on disk.
     pub fn wipe(&self) -> rusqlite::Result<()> {
         self.lock().execute_batch(
-            "DELETE FROM look_photos; DELETE FROM looks; DELETE FROM sibling_out; DELETE FROM changes_out; DELETE FROM reminders; DELETE FROM chat_prefs; DELETE FROM calls; DELETE FROM tombstones; DELETE FROM secrets; DELETE FROM olm_sessions; DELETE FROM contact_keys; DELETE FROM invites; DELETE FROM seen_ids; DELETE FROM drafts; DELETE FROM group_acks; DELETE FROM messages; DELETE FROM group_members; DELETE FROM groups; DELETE FROM contacts;
+            "DELETE FROM channel_bodies; DELETE FROM channel_posts; DELETE FROM channels; \
+             DELETE FROM status_seen; DELETE FROM status_out; DELETE FROM status_photos; \
+             DELETE FROM status_posts; DELETE FROM control_log; \
+             DELETE FROM look_photos; DELETE FROM looks; DELETE FROM sibling_out; DELETE FROM changes_out; DELETE FROM reminders; DELETE FROM chat_prefs; DELETE FROM calls; DELETE FROM tombstones; DELETE FROM secrets; DELETE FROM olm_sessions; DELETE FROM contact_keys; DELETE FROM invites; DELETE FROM seen_ids; DELETE FROM drafts; DELETE FROM group_acks; DELETE FROM messages; DELETE FROM group_members; DELETE FROM groups; DELETE FROM contacts;
              DELETE FROM settings; PRAGMA wal_checkpoint(TRUNCATE); VACUUM;",
         )
     }
@@ -1197,6 +1200,7 @@ impl Database {
                 has_body: post.more.is_none(),
                 reactions: vec![0; crate::channel::EMOJI.len()],
                 mine: Vec::new(),
+                sketch: crate::channel::Reactions::default(),
             },
             &record.to_bytes(),
         )
@@ -1314,6 +1318,20 @@ impl Database {
         if let Some(mut post) = self.channel_post(channel, number) {
             post.has_body = true;
             post.text = text.to_owned();
+            self.update_channel_post(&post);
+        }
+    }
+
+    /// What we know of the reactions on a post, whatever is in the DHT right now.
+    pub fn set_channel_sketch(
+        &self,
+        channel: &str,
+        number: u64,
+        sketch: &crate::channel::Reactions,
+    ) {
+        if let Some(mut post) = self.channel_post(channel, number) {
+            post.reactions = sketch.counts();
+            post.sketch = sketch.clone();
             self.update_channel_post(&post);
         }
     }
@@ -2539,7 +2557,30 @@ mod tests {
             .unwrap();
         db.insert_message(&msg("m", "k", true, 1)).unwrap();
         db.set_draft("k", "x");
+        let channel = crate::channel::new_channel("News", 1);
+        db.save_channel(&channel);
+        db.add_control_log(&crate::control::LogEntry {
+            who: "k".into(),
+            whole_screen: false,
+            from: 1,
+            to: 2,
+            why: crate::control::Ended::Owner,
+        });
+        db.add_status(&crate::status::Post {
+            id: "s".into(),
+            author: "k".into(),
+            text: "x".into(),
+            backdrop: crate::status::Backdrop::Sea,
+            at: 1,
+            until: i64::MAX,
+            parts: 0,
+            seen: false,
+            seen_told: false,
+        });
         db.wipe().unwrap();
+        assert!(db.channels().is_empty(), "with the key to write");
+        assert!(db.control_log().is_empty());
+        assert!(db.status_posts().is_empty());
         assert_eq!(db.settings(), Settings::default());
         assert!(db.contact("k").is_none());
         assert!(db.message("m").is_none());

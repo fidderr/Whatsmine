@@ -45,7 +45,8 @@ pub enum Rich {
     ContactCard { name: String, invite: String },
     /// A copy of a look. Nothing changes for anyone until they choose to use it.
     Look(Box<crate::look::Look>),
-    /// A line this device wrote in the chat itself. Never leaves this device.
+    /// A line this device wrote in the chat itself. Never leaves this device, and refused from
+    /// outside: it looks like the app is saying it.
     Note(String),
     /// A reply to someone's status, with what it was about: the post itself will be gone tomorrow.
     StatusReply {
@@ -238,6 +239,8 @@ impl MessageExtra {
         let (rich, unknown) = match wire.rich {
             None => (None, false),
             Some(value) => match serde_json::from_value::<Rich>(value) {
+                // A line that looks like the app wrote it: nobody else gets to write those.
+                Ok(Rich::Note(_)) => (None, true),
                 Ok(rich) => (Some(rich), false),
                 Err(_) => (None, true),
             },

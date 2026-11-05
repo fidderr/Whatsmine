@@ -348,6 +348,15 @@ async fn made_up_posts_get_nowhere() {
     after_all(&a, &b).await;
     assert_eq!(from(&b.status_posts(), &a).len(), MOST_FROM_ONE);
 
+    // A chat that is hidden: nothing here shows that person exists.
+    let mut prefs = b.chat_prefs(&a.my_key());
+    prefs.locked = true;
+    b.set_chat_prefs(&a.my_key(), &prefs);
+    assert!(from(&b.status_posts(), &a).is_empty());
+    prefs.locked = false;
+    b.set_chat_prefs(&a.my_key(), &prefs);
+    assert_eq!(from(&b.status_posts(), &a).len(), MOST_FROM_ONE);
+
     // Someone who is no contact any more: nothing of theirs stays, and nothing new comes in.
     b.block(&a.my_key()).unwrap();
     assert!(from(&b.status_posts(), &a).is_empty());

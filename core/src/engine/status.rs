@@ -66,6 +66,15 @@ impl Engine {
                 }
             }
         }
+        self.flush_status_seen(peer);
+    }
+
+    /// That we looked. Nothing else goes along: photos do not get sent again for that.
+    pub(super) fn flush_status_seen(&mut self, peer: PublicKey) {
+        let id = key_to_string(&peer);
+        if self.db.contact(&id).map(|c| c.state) != Some(ContactState::Accepted) {
+            return;
+        }
         if self.settings().read_receipts {
             for post_id in self.db.status_seen_to_tell(&id) {
                 if let Some(bytes) = id_to_bytes(&post_id)

@@ -64,6 +64,17 @@ pub struct Channel {
     pub at: Millis,
     /// The newest record as it sits in the DHT, to write it again.
     pub head: Option<Vec<u8>>,
+    /// Nothing at or below this number is looked for any more: nobody has it.
+    #[serde(default)]
+    pub floor: u64,
+    /// How many looks in a row found a post missing.
+    #[serde(default)]
+    pub misses: u8,
+    /// The followers we know of, for which week.
+    #[serde(default)]
+    pub sketch: Sketch,
+    #[serde(default)]
+    pub sketch_week: u64,
 }
 
 /// A post as it is here.
@@ -81,6 +92,9 @@ pub struct ChannelPost {
     pub reactions: Vec<u32>,
     /// Which we chose ourselves.
     pub mine: Vec<u8>,
+    /// What we know of them, so a read that failed loses nobody's.
+    #[serde(default)]
+    pub sketch: Reactions,
 }
 
 impl ChannelPost {
@@ -172,6 +186,10 @@ pub fn new_channel(name: &str, now: Millis) -> Channel {
         muted: false,
         at: now,
         head: None,
+        floor: 0,
+        misses: 0,
+        sketch: Sketch::default(),
+        sketch_week: 0,
     }
 }
 
@@ -190,6 +208,10 @@ pub fn from_link(link: &ChannelLink, now: Millis) -> Channel {
         muted: false,
         at: now,
         head: None,
+        floor: 0,
+        misses: 0,
+        sketch: Sketch::default(),
+        sketch_week: 0,
     }
 }
 

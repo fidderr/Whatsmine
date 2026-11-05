@@ -357,6 +357,79 @@ async fn counts_are_about_right_and_reactions_add_up() {
     assert_eq!(author.channel_posts(&c.id)[0].reactions[0], 0);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn someone_new_starts_with_the_newest_even_if_the_old_ones_are_long_gone() {
+    let mut w = World::new();
+    let author = w.person("Roy");
+    let c = author.channel_create("News").unwrap();
+    for n in 0..30 {
+        author
+            .channel_write(&c.id, &format!("Post {n}"), None)
+            .unwrap();
+    }
+    // The DHT has forgotten, and only the newest are written again.
+    w.lookup.forget_everything();
+    let later = w.person("Sam");
+    later.channel_follow(&c.link()).unwrap();
+    until("the newest", || {
+        later
+            .channel_posts(&c.id)
+            .iter()
+            .any(|p| p.text == "Post 29")
+    })
+    .await;
+    // It knows where it is, whatever it cannot get any more.
+    until("up to date", || later.channel(&c.id).unwrap().last == 30).await;
+    author.channel_write(&c.id, "The next one", None).unwrap();
+    until("the next", || {
+        later.channel_posts(&c.id).iter().any(|p| p.number == 31)
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_read_that_failed_loses_nobodys_reaction() {
+    let mut w = World::new();
+    let author = w.person("Roy");
+    let (a, b) = (w.person("Noor"), w.person("Sam"));
+    let c = author.channel_create("News").unwrap();
+    let number = author.channel_write(&c.id, "Who is there?", None).unwrap();
+    a.channel_follow(&c.link()).unwrap();
+    b.channel_follow(&c.link()).unwrap();
+    until("Noor has it", || !a.channel_posts(&c.id).is_empty()).await;
+    until("Sam has it", || !b.channel_posts(&c.id).is_empty()).await;
+    a.channel_react(&c.id, number, 0);
+    until("Sam sees it", || {
+        b.channel_posts(&c.id)[0].reactions[0] == 1
+    })
+    .await;
+    // All of it gone from the DHT, as when a read fails or it was written over.
+    w.lookup.forget_everything();
+    b.channel_react(&c.id, number, 0);
+    until("both count", || {
+        author.channel_posts(&c.id)[0].reactions[0] == 2
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn two_posts_at_once_get_a_number_each() {
+    let mut w = World::new();
+    let author = w.person("Roy");
+    let c = author.channel_create("News").unwrap();
+    let mut writers = Vec::new();
+    for n in 0..8 {
+        let (core, id) = (author.clone(), c.id.clone());
+        writers.push(std::thread::spawn(move || {
+            core.channel_write(&id, &format!("Post {n}"), None).unwrap()
+        }));
+    }
+    let mut numbers: Vec<u64> = writers.into_iter().map(|t| t.join().unwrap()).collect();
+    numbers.sort_unstable();
+    assert_eq!(numbers, (1..=8).collect::<Vec<u64>>());
+    assert_eq!(author.channel_posts(&c.id).len(), 8);
+}
+
 /// As many followers as this proves, and the number the app may claim.
 #[tokio::test(flavor = "multi_thread")]
 async fn twenty_followers_all_get_it_with_the_author_away_for_the_rest() {

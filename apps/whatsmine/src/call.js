@@ -567,6 +567,8 @@
     const r = run
     if (!r || r.closed) return
     const p = ensurePeer(r, m.from)
+    // Frames come on a stream of their own, and can arrive after they said they stopped.
+    if (!p.sShowing) return
     screenTile(p)
     stats.sRecv++
     // A frame builds on the ones before it: one missing, and the rest waits for a whole picture.
@@ -753,10 +755,23 @@
         press = null
       }
     }
+    let wheelX = 0
+    let wheelY = 0
     const onWheel = e => {
       e.preventDefault()
-      const notch = v => (v === 0 ? 0 : v > 0 ? -120 : 120)
-      put(['w', notch(e.deltaX), notch(e.deltaY)])
+      const lines = e.deltaMode === 1 ? 33 : 1
+      wheelX += e.deltaX * lines
+      wheelY += e.deltaY * lines
+      // A notch of the real wheel at a time, however small the steps of a touchpad. On Windows
+      // up and to the right count as positive.
+      while (Math.abs(wheelY) >= 100) {
+        put(['w', 0, wheelY > 0 ? -120 : 120])
+        wheelY -= wheelY > 0 ? 100 : -100
+      }
+      while (Math.abs(wheelX) >= 100) {
+        put(['w', wheelX > 0 ? 120 : -120, 0])
+        wheelX -= wheelX > 0 ? 100 : -100
+      }
     }
     const noMenu = e => e.preventDefault()
     const down = new Set()
@@ -959,6 +974,7 @@
         const r = run
         if (!r) return
         const p = ensurePeer(r, m.from)
+        p.sShowing = !!m.on
         if (m.on) {
           screenTile(p)
           p.sLost = true

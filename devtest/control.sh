@@ -216,7 +216,8 @@ press_key keyup ArrowUp
 arrived() { last_line_is "key 72e up"; }
 if wait_for 5 arrived; then
     note "$(did_since "$n0" | tr '\n' ';' | cut -c1-200)"
-    want="to 499,499;to 499,499;Left down;Left up;wheel 0,-120;key 30 down;key 30 up;key 72e down;key 72e up;"
+    # Before each press and the wheel, the pointer goes back to the place that was checked.
+    want="to 499,499;to 499,499;to 499,499;Left down;Left up;to 499,499;wheel 0,-120;key 30 down;key 30 up;key 72e down;key 72e up;"
     [ "$(did_since "$n0" | tr '\n' ';')" = "$want" ] && pass || fail "not what was done"
 else
     fail "did not arrive: $(did_since "$n0" | tr '\n' ';' | cut -c1-200)"

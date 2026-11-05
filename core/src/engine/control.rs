@@ -40,11 +40,12 @@ struct OwnedSession {
     key: [u8; 32],
     who: PublicKey,
     since: Millis,
+    whole_screen: bool,
 }
 
 struct Driving {
     who: PublicKey,
-    tx: mpsc::Sender<Vec<Input>>,
+    tx: mpsc::UnboundedSender<Vec<Input>>,
     session: [u8; 16],
     key: [u8; 32],
 }
@@ -166,9 +167,24 @@ impl Engine {
                 }
             }
             Frame::ControlStop { call } if call == c.id && c.peers.contains(&peer) => {
-                if self.control.session.as_ref().is_some_and(|s| s.who == peer)
-                    || self.control.owned.asked_by() == Some(key_to_string(&peer).as_str())
-                {
+                let who = key_to_string(&peer);
+                if self.control.owned.asked_by() == Some(who.as_str()) {
+                    // A question taken back counts like one that got no: nobody gets to keep
+                    // popping up on someone's screen.
+                    let now = self.control.now();
+                    self.control
+                        .owned
+                        .answer(false, Scope::Window, [0; 16], now);
+                    emit(
+                        &self.events,
+                        CoreEvent::Call(CallEvent::ControlOff {
+                            call_id,
+                            who,
+                            driving: false,
+                            why: Ended::Them,
+                        }),
+                    );
+                } else if self.control.session.as_ref().is_some_and(|s| s.who == peer) {
                     self.control_owner_side_ends(Ended::Them, false);
                 }
                 if self.control.driving.as_ref().is_some_and(|d| d.who == peer) {
@@ -225,6 +241,7 @@ impl Engine {
             key,
             who: peer,
             since: now_ms(),
+            whole_screen: grant.scope == Scope::WholeScreen,
         });
         self.control_gate(Some((id, peer)));
         self.send(
@@ -261,6 +278,25 @@ impl Engine {
     pub(super) fn control_owner_busy(&mut self) {
         let now = self.control.now();
         self.control.owned.owner_busy(now);
+        // The owner's hand wins: whatever someone holds down over there would get in its way, and
+        // Ctrl held down turns what the owner types into shortcuts.
+        if self.control.owned.is_on() {
+            self.control_to_desk(vec![Input::LetGo]);
+        }
+    }
+
+    /// On to the desktop. If that cannot keep up, this is not safe: what goes up must get there.
+    fn control_to_desk(&mut self, events: Vec<Input>) {
+        let sink = self
+            .control_sink
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        if let Some(sink) = sink
+            && sink.try_send(events).is_err()
+        {
+            self.control_owner_side_ends(Ended::NotSafeAnyMore, true);
+        }
     }
 
     /// More time, by the owner's own hand.
@@ -332,8 +368,8 @@ impl Engine {
             return;
         };
         for part in events.chunks(MOST_IN_BATCH) {
-            // A full queue means the other side is far behind: more of the same does not help.
-            let _ = driving.tx.try_send(part.to_vec());
+            // Never dropped here: a key going up has to get there. It is one hand's worth anyway.
+            let _ = driving.tx.send(part.to_vec());
         }
     }
 
@@ -350,16 +386,7 @@ impl Engine {
         let who = key_to_string(&peer);
         let now = self.control.now();
         match self.control.owned.input(&who, &session, batch, now) {
-            Verdict::Use(events) if !events.is_empty() => {
-                let sink = self
-                    .control_sink
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .clone();
-                if let Some(sink) = sink {
-                    let _ = sink.try_send(events);
-                }
-            }
+            Verdict::Use(events) if !events.is_empty() => self.control_to_desk(events),
             Verdict::Ended(why) => self.control_owner_side_ends(why, true),
             Verdict::Use(_) | Verdict::Waiting | Verdict::Dropped => {}
         }
@@ -373,17 +400,44 @@ impl Engine {
 
     /// Time passing.
     pub(super) fn control_tick(&mut self) {
-        let was_on = self.control.owned.is_on();
+        let asked = self.control.owned.asked_by().map(str::to_owned);
         let now = self.control.now();
         if let Some(why) = self.control.owned.tick(now) {
             self.control_owner_side_ends(why, true);
-        } else if was_on && !self.control.owned.is_on() {
-            self.control_owner_side_ends(Ended::TimeUp, true);
+        } else if let Some(who) = asked
+            && self.control.owned.asked_by().is_none()
+        {
+            // Nobody answered: both sides hear it is over.
+            self.control_question_over(who);
         }
     }
 
+    fn control_question_over(&mut self, who: String) {
+        let Some(c) = self.call.as_ref() else { return };
+        let call = c.id;
+        if let Some(peer) = crate::identity::parse_key(&who) {
+            self.send(
+                peer,
+                Frame::ControlAnswer {
+                    call,
+                    answer: ControlReply::No(crate::control::Refusal::SaidNo),
+                },
+            );
+        }
+        emit(
+            &self.events,
+            CoreEvent::Call(CallEvent::ControlOff {
+                call_id: id_from_bytes(&call),
+                who,
+                driving: false,
+                why: Ended::TimeUp,
+            }),
+        );
+    }
+
+    /// Someone is in control, or waits for an answer: time matters.
     pub(super) fn control_is_on(&self) -> bool {
-        self.control.owned.is_on()
+        self.control.owned.is_on() || self.control.owned.asked_by().is_some()
     }
 
     /// The sharing stopped, or the call ended.
@@ -433,7 +487,7 @@ impl Engine {
         if let Some(session) = &session {
             self.db.add_control_log(&crate::control::LogEntry {
                 who: who.clone(),
-                whole_screen: self.control_scope_was_whole,
+                whole_screen: session.whole_screen,
                 from: session.since,
                 to: now_ms(),
                 why,
@@ -464,8 +518,8 @@ fn open_control_stream(
     conn: Connection,
     session: [u8; 16],
     key: [u8; 32],
-) -> mpsc::Sender<Vec<Input>> {
-    let (tx, mut rx) = mpsc::channel::<Vec<Input>>(64);
+) -> mpsc::UnboundedSender<Vec<Input>> {
+    let (tx, mut rx) = mpsc::unbounded_channel::<Vec<Input>>();
     tokio::spawn(async move {
         let Ok(mut send) = conn.open_uni().await else {
             return;

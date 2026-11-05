@@ -867,7 +867,12 @@ impl Engine {
                 else {
                     return;
                 };
-                c.sharer = on.then_some(peer);
+                // Someone who stops says nothing about someone else who is showing.
+                if on {
+                    c.sharer = Some(peer);
+                } else if c.sharer == Some(peer) {
+                    c.sharer = None;
+                }
                 if !on {
                     self.control_stop_driving_if(peer);
                 }

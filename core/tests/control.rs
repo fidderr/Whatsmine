@@ -276,6 +276,50 @@ async fn no_means_no_and_no_nagging() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn taking_a_question_back_does_not_let_anyone_keep_asking() {
+    let mut call = in_a_call(true, true, true).await;
+    call.other.control_ask();
+    call_event(&mut call.owner_events, "the question", |e| {
+        matches!(e, CallEvent::ControlAsked { .. })
+    })
+    .await;
+    // Stopping while it is on the owner's screen.
+    call.other.control_stop();
+    let call_id = call.other.call_snapshot().unwrap().call_id;
+    call.other.send_as_is(
+        &call.owner_key,
+        Frame::ControlStop {
+            call: id_to_bytes(&call_id).unwrap(),
+        },
+    );
+    call_event(&mut call.owner_events, "it goes away", |e| {
+        matches!(e, CallEvent::ControlOff { .. })
+    })
+    .await;
+    // And right away again: it does not get to the owner.
+    call.other.control_ask();
+    let told = call_event(&mut call.owner_events, "told of it", |e| {
+        matches!(
+            e,
+            CallEvent::ControlAsked { .. } | CallEvent::ControlAskedAnyway { .. }
+        )
+    })
+    .await;
+    assert!(
+        matches!(told, CallEvent::ControlAskedAnyway { .. }),
+        "no new question on the owner's screen: {told:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_owners_hand_makes_whatever_is_held_go_up_at_once() {
+    let mut call = in_a_call(true, true, true).await;
+    let mut input = call.let_in().await;
+    call.owner.control_owner_busy();
+    assert_eq!(next_input(&mut input).await, [Input::LetGo]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_yes_pressed_too_fast_does_nothing() {
     let mut call = in_a_call(true, true, true).await;
     call.other.control_ask();
@@ -315,6 +359,11 @@ async fn input_gets_through_in_order_only_while_it_is_on() {
 
     // The owner's own hand: whoever is in control waits.
     call.owner.control_owner_busy();
+    assert_eq!(
+        next_input(&mut input).await,
+        [Input::LetGo],
+        "what was held goes up"
+    );
     tokio::time::sleep(Duration::from_millis(100)).await;
     call.other.control_send(vec![point(4)]);
     no_input(&mut input).await;

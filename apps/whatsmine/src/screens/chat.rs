@@ -175,7 +175,7 @@ fn ChatView(id: String) -> Element {
         let mut eval = document::eval(
             "(function attach (n) {\n\
               const m = document.getElementById('msgs');\n\
-              if (m) m.addEventListener('scroll', () => dioxus.send(m.scrollHeight - m.scrollTop - m.clientHeight > 400)));\n\
+              if (m) m.addEventListener('scroll', () => dioxus.send(m.scrollHeight - m.scrollTop - m.clientHeight > 400));\n\
               else if (n < 300) requestAnimationFrame(() => attach(n + 1));\n\
              })(0);\n\
              await new Promise(() => {});",
