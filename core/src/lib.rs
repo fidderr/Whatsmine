@@ -860,6 +860,7 @@ impl Core {
         ensure!(!text.is_empty(), "empty");
         ensure!(text.len() <= protocol::MAX_TEXT, "too_long");
         let peer = self.recipient(contact_id)?;
+        self.may_write_in(contact_id)?;
         extra.disappear_ms = self.inner.db.chat_prefs(contact_id).disappear_ms;
         let now = now_ms();
         let later = at.filter(|at| *at > now);
@@ -1037,7 +1038,12 @@ impl Core {
     /// Takes it back for everyone. What is left says so.
     pub fn unsend_message(&self, message_id: &str) -> anyhow::Result<()> {
         let mut m = self.inner.db.message(message_id).context("no_message")?;
-        ensure!(self.is_mine(&m), "not_yours");
+        let runs_it = self
+            .inner
+            .db
+            .group(&m.contact_id)
+            .is_some_and(|(state, _, _)| state.is_manager(&self.my_key()));
+        ensure!(self.is_mine(&m) || runs_it, "not_yours");
         self.remove_files(&m);
         m.body = String::new();
         m.attachment = None;
@@ -1496,6 +1502,36 @@ impl Core {
         }
     }
 
+    /// What a group's rules say about writing in it now.
+    fn may_write_in(&self, chat: &str) -> anyhow::Result<()> {
+        if !groups::is_group_id(chat) {
+            return Ok(());
+        }
+        let Some((state, _, _)) = self.inner.db.group(chat) else {
+            return Ok(());
+        };
+        let me = self.my_key();
+        if state.is_manager(&me) {
+            return Ok(());
+        }
+        ensure!(!state.rules.only_admins_send, "only_admins");
+        if state.rules.slow_ms > 0 {
+            let last_mine = self
+                .inner
+                .db
+                .messages(chat, None, 50)
+                .into_iter()
+                .rev()
+                .find(|m| m.outgoing)
+                .map_or(0, |m| m.sent_at);
+            ensure!(
+                now_ms() - last_mine >= i64::from(state.rules.slow_ms),
+                "slow_mode"
+            );
+        }
+        Ok(())
+    }
+
     /// Hands a stored outgoing message to the network.
     fn dispatch(&self, contact_id: &str, peer: Option<PublicKey>, m: &Message) {
         match peer {
@@ -1593,6 +1629,12 @@ impl Core {
             version: 1,
             members: keys,
             closed: false,
+            rules: protocol::GroupRules {
+                signer: me.clone(),
+                only_admins_add: true,
+                only_admins_edit: true,
+                ..protocol::GroupRules::default()
+            },
         };
         let sig = groups::sign(&self.inner.key, &state);
         self.inner.db.save_group(&state, &sig, true, &[], &me)?;
@@ -1620,7 +1662,8 @@ impl Core {
                 id: k.clone(),
                 name: self.name_of(k),
                 is_me: *k == me,
-                is_admin: *k == state.admin,
+                is_admin: state.is_manager(k),
+                is_owner: *k == state.admin,
                 online: self.is_online(k),
                 is_contact: self
                     .inner
@@ -1636,18 +1679,26 @@ impl Core {
                 .db
                 .contact(id)
                 .map(|c| c.display_name())
-                .unwrap_or(state.name),
+                .unwrap_or_else(|| state.name.clone()),
             admin: state.admin.clone(),
-            i_am_admin: state.admin == me,
+            i_am_admin: state.is_manager(&me),
+            i_am_owner: state.admin == me,
+            rules: state.rules.clone(),
             active,
             members,
         })
     }
 
-    /// The group's state, if we administer it and are still in it.
-    fn admin_state(&self, id: &str) -> anyhow::Result<protocol::GroupState> {
+    /// The group's state, if we are in it and run it.
+    fn managed_state(&self, id: &str) -> anyhow::Result<protocol::GroupState> {
         let (state, _, active) = self.inner.db.group(id).context("not a group")?;
-        ensure!(active && state.admin == self.my_key(), "not_admin");
+        ensure!(active && state.is_manager(&self.my_key()), "not_admin");
+        Ok(state)
+    }
+
+    fn owned_state(&self, id: &str) -> anyhow::Result<protocol::GroupState> {
+        let state = self.managed_state(id)?;
+        ensure!(state.admin == self.my_key(), "not_owner");
         Ok(state)
     }
 
@@ -1657,8 +1708,10 @@ impl Core {
         also_to: Vec<PublicKey>,
     ) -> anyhow::Result<()> {
         state.version += 1;
-        let sig = groups::sign(&self.inner.key, &state);
         let me = self.my_key();
+        state.rules.signer.clone_from(&me);
+        state.rules.admins.sort();
+        let sig = groups::sign(&self.inner.key, &state);
         let active = state.members.contains(&me) && !state.closed;
         self.inner.db.save_group(&state, &sig, active, &[], &me)?;
         self.emit(CoreEvent::ContactsChanged);
@@ -1666,9 +1719,13 @@ impl Core {
         Ok(())
     }
 
-    /// Admin only: adds one of our contacts to the group.
+    /// Adds one of our contacts to the group: for admins, or anyone if the group allows it.
     pub fn group_add(&self, id: &str, member: &str) -> anyhow::Result<()> {
-        let mut state = self.admin_state(id)?;
+        let (mut state, _, active) = self.inner.db.group(id).context("not a group")?;
+        ensure!(
+            active && (state.is_manager(&self.my_key()) || !state.rules.only_admins_add),
+            "not_admin"
+        );
         ensure!(!state.members.iter().any(|m| m == member), "already_member");
         ensure!(
             state.members.len() < protocol::MAX_GROUP_MEMBERS,
@@ -1685,12 +1742,15 @@ impl Core {
         self.publish_new_state(state, Vec::new())
     }
 
-    /// Admin only: removes a member. They are told if they are online.
+    /// Removes a member. They are told if they are online. Admins do not remove each other.
     pub fn group_remove(&self, id: &str, member: &str) -> anyhow::Result<()> {
-        let mut state = self.admin_state(id)?;
-        ensure!(member != self.my_key(), "cannot_remove_self");
+        let mut state = self.managed_state(id)?;
+        let me = self.my_key();
+        ensure!(member != me, "cannot_remove_self");
         ensure!(state.members.iter().any(|m| m == member), "not_a_member");
+        ensure!(state.admin == me || !state.is_manager(member), "not_owner");
         state.members.retain(|m| m != member);
+        state.rules.admins.retain(|m| m != member);
         self.inner.db.remove_member_acks(id, member);
         let removed = identity::parse_key(member).into_iter().collect();
         // They knew how the others find each other.
@@ -1702,24 +1762,88 @@ impl Core {
         Ok(())
     }
 
-    /// Admin only.
+    /// For admins, or anyone if the group allows it.
     pub fn group_rename(&self, id: &str, name: &str) -> anyhow::Result<()> {
-        let mut state = self.admin_state(id)?;
+        let (mut state, _, active) = self.inner.db.group(id).context("not a group")?;
+        ensure!(
+            active && (state.is_manager(&self.my_key()) || !state.rules.only_admins_edit),
+            "not_admin"
+        );
         let name = engine::clean_name(name);
         ensure!(!name.is_empty(), "empty");
         state.name = name;
         self.publish_new_state(state, Vec::new())
     }
 
-    /// Leaves the group (history stays). If we are its admin, the group ends
-    /// for everyone.
+    /// What the group allows. For admins.
+    pub fn group_set_rules(
+        &self,
+        id: &str,
+        change: impl FnOnce(&mut protocol::GroupRules),
+    ) -> anyhow::Result<()> {
+        let mut state = self.managed_state(id)?;
+        let admins = state.rules.admins.clone();
+        change(&mut state.rules);
+        state.rules.admins = admins;
+        self.publish_new_state(state, Vec::new())
+    }
+
+    /// Makes someone an admin, or no longer. For the owner.
+    pub fn group_set_admin(&self, id: &str, member: &str, admin: bool) -> anyhow::Result<()> {
+        let mut state = self.owned_state(id)?;
+        ensure!(state.members.iter().any(|m| m == member), "not_a_member");
+        state.rules.admins.retain(|m| m != member);
+        if admin && member != state.admin {
+            state.rules.admins.push(member.to_owned());
+        }
+        self.publish_new_state(state, Vec::new())
+    }
+
+    /// Someone else runs the group from now on, and we stay in it as an admin.
+    pub fn group_hand_over(&self, id: &str, member: &str) -> anyhow::Result<()> {
+        let mut state = self.owned_state(id)?;
+        ensure!(state.members.iter().any(|m| m == member), "not_a_member");
+        let me = self.my_key();
+        state.rules.admins.retain(|m| m != member);
+        state.rules.admins.push(me);
+        state.admin = member.to_owned();
+        self.publish_new_state(state, Vec::new())
+    }
+
+    /// Ends the group for everyone. For the owner. The history stays.
+    pub fn group_close(&self, id: &str) -> anyhow::Result<()> {
+        let mut state = self.owned_state(id)?;
+        state.closed = true;
+        self.publish_new_state(state, Vec::new())
+    }
+
+    /// Leaves the group (history stays). An owner hands it over first: the group goes on.
     pub fn leave_group(&self, id: &str) -> anyhow::Result<()> {
         let (mut state, _, active) = self.inner.db.group(id).context("not a group")?;
         if !active {
             return Ok(());
         }
-        if state.admin == self.my_key() {
-            state.closed = true;
+        let me = self.my_key();
+        if state.admin == me {
+            let others: Vec<String> = state
+                .members
+                .iter()
+                .filter(|m| **m != me)
+                .cloned()
+                .collect();
+            let Some(next) = state
+                .rules
+                .admins
+                .first()
+                .cloned()
+                .or_else(|| others.first().cloned())
+            else {
+                state.closed = true;
+                return self.publish_new_state(state, Vec::new());
+            };
+            state.rules.admins.retain(|m| *m != next);
+            state.admin = next;
+            state.members.retain(|m| *m != me);
             return self.publish_new_state(state, Vec::new());
         }
         self.inner.db.set_group_active(id, false);
@@ -1732,6 +1856,107 @@ impl Core {
         }
         self.emit(CoreEvent::ContactsChanged);
         Ok(())
+    }
+
+    // ---- joining by link ----
+
+    /// A link anyone can ask to join with. Made the first time; admins each have their own.
+    pub fn group_link(&self, id: &str) -> anyhow::Result<String> {
+        let state = self.managed_state(id)?;
+        let link = engine::group_link_state(&self.inner.db, id).unwrap_or_else(|| {
+            let fresh = GroupLinkState {
+                token: vault::random(),
+                ..GroupLinkState::default()
+            };
+            engine::save_group_link_state(&self.inner.db, id, &fresh);
+            fresh
+        });
+        Ok(identity::GroupLink {
+            group: id.to_owned(),
+            name: state.name,
+            invite: self.main_invite(),
+            token: link.token,
+        }
+        .link())
+    }
+
+    /// The old link stops working.
+    pub fn group_link_reset(&self, id: &str) -> anyhow::Result<String> {
+        self.managed_state(id)?;
+        let mut link = engine::group_link_state(&self.inner.db, id).unwrap_or_default();
+        link.token = vault::random();
+        link.asking.clear();
+        engine::save_group_link_state(&self.inner.db, id, &link);
+        self.group_link(id)
+    }
+
+    pub fn group_link_state(&self, id: &str) -> GroupLinkState {
+        engine::group_link_state(&self.inner.db, id).unwrap_or_default()
+    }
+
+    /// Someone with the link waits for an admin.
+    pub fn group_link_approve(&self, id: &str, approve: bool) -> anyhow::Result<()> {
+        self.group_link(id)?;
+        let mut link = engine::group_link_state(&self.inner.db, id).unwrap_or_default();
+        link.approve = approve;
+        engine::save_group_link_state(&self.inner.db, id, &link);
+        self.emit(CoreEvent::ContactsChanged);
+        Ok(())
+    }
+
+    /// Lets someone in who asked, or not.
+    pub fn group_answer_join(&self, id: &str, who: &str, yes: bool) -> anyhow::Result<()> {
+        let mut state = self.managed_state(id)?;
+        let mut link = engine::group_link_state(&self.inner.db, id).unwrap_or_default();
+        link.asking.retain(|a| a.id != who);
+        engine::save_group_link_state(&self.inner.db, id, &link);
+        if yes {
+            ensure!(
+                state.members.len() < protocol::MAX_GROUP_MEMBERS,
+                "too_many"
+            );
+            if !state.members.iter().any(|m| m == who) {
+                state.members.push(who.to_owned());
+                state.members.sort();
+                self.publish_new_state(state, identity::parse_key(who).into_iter().collect())?;
+            }
+        }
+        self.emit(CoreEvent::ContactsChanged);
+        Ok(())
+    }
+
+    /// Asks to join the group of a link. They let us in, or an admin does.
+    pub fn join_by_link(&self, text: &str, greeting: &str) -> anyhow::Result<String> {
+        let Some(link) = identity::parse_group_link(text) else {
+            bail!("invalid_key");
+        };
+        let Some(owner) = link.invite.key() else {
+            bail!("invalid_key");
+        };
+        ensure!(owner != self.inner.me, "own_key");
+        let id = identity::key_to_string(&owner);
+        if self.inner.db.contact(&id).is_none() {
+            self.inner.db.upsert_contact(
+                &id,
+                ContactState::PendingOut,
+                link.invite.name(),
+                None,
+            )?;
+        }
+        let mut keys = self.inner.db.contact_keys(&id).unwrap_or_default();
+        keys.join = Some(requests::JoinAsk {
+            group: link.group.clone(),
+            token: link.token,
+        });
+        keys.invite = Some(link.invite);
+        keys.greeting = greeting.chars().take(requests::MAX_GREETING).collect();
+        self.inner.db.set_contact_keys(&id, &keys);
+        self.inner
+            .db
+            .set_secret(&engine::join_asked_name(&link.group), b"1")?;
+        self.emit(CoreEvent::ContactsChanged);
+        self.cmd(Cmd::SendRequest(owner));
+        Ok(link.group)
     }
 
     /// Leaves (if still in) and removes the group and its history from this device.

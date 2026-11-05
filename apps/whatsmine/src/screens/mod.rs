@@ -1,4 +1,4 @@
-mod add;
+pub mod add;
 mod address;
 mod calls;
 mod chat;

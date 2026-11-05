@@ -278,8 +278,8 @@ async fn leaving_and_closing() {
     })
     .await;
 
-    // The admin leaving ends the group for everyone.
-    t.a.leave_group(&t.group).unwrap();
+    // Ending it is the owner's to do, for everyone.
+    t.a.group_close(&t.group).unwrap();
     until("carol sees it closed", || {
         t.c.group_info(&t.group).is_some_and(|g| !g.active)
     })
@@ -422,4 +422,162 @@ async fn group_call_with_three_people_join_and_leave() {
             && t.c.group_call(&t.group).is_none()
     })
     .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_owner_leaving_does_not_end_the_group() {
+    let t = trio().await;
+    let (kb, kc) = (t.b.my_key(), t.c.my_key());
+    t.a.group_set_admin(&t.group, &kc, true).unwrap();
+    until("carol to be an admin", || {
+        t.c.group_info(&t.group).is_some_and(|g| g.i_am_admin)
+    })
+    .await;
+    t.a.leave_group(&t.group).unwrap();
+    until("carol to be the owner", || {
+        t.c.group_info(&t.group).is_some_and(|g| g.i_am_owner)
+    })
+    .await;
+    until("bob to see two members", || {
+        t.b.group_info(&t.group)
+            .is_some_and(|g| g.active && g.members.len() == 2)
+    })
+    .await;
+    assert!(!t.a.group_info(&t.group).unwrap().active);
+    let m = t.b.send(&t.group, "still here").unwrap();
+    until("the group to go on", || t.c.message(&m.id).is_some()).await;
+
+    // The new owner runs it, an old state is not taken back.
+    t.c.group_rename(&t.group, "Ours").unwrap();
+    until("the new name", || {
+        t.b.group_info(&t.group).is_some_and(|g| g.name == "Ours")
+    })
+    .await;
+    assert!(t.b.group_remove(&t.group, &kc).is_err());
+    t.c.group_remove(&t.group, &kb).unwrap();
+    until("bob to be out", || {
+        t.b.group_info(&t.group).is_some_and(|g| !g.active)
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn what_a_group_allows_holds() {
+    let t = trio().await;
+    // Announcements: only admins write, and what others send anyway does not count.
+    t.a.group_set_rules(&t.group, |r| r.only_admins_send = true)
+        .unwrap();
+    until("the rule to reach bob", || {
+        t.b.group_info(&t.group)
+            .is_some_and(|g| g.rules.only_admins_send)
+    })
+    .await;
+    assert_eq!(
+        t.b.send(&t.group, "may I?").unwrap_err().to_string(),
+        "only_admins"
+    );
+    let m = t.a.send(&t.group, "announcement").unwrap();
+    until("the announcement", || t.b.message(&m.id).is_some()).await;
+
+    // Slow mode: one message per wait.
+    t.a.group_set_rules(&t.group, |r| {
+        r.only_admins_send = false;
+        r.slow_ms = 60_000;
+    })
+    .unwrap();
+    until("the slow rule to reach bob", || {
+        t.b.group_info(&t.group)
+            .is_some_and(|g| g.rules.slow_ms == 60_000)
+    })
+    .await;
+    t.b.send(&t.group, "one").unwrap();
+    assert_eq!(
+        t.b.send(&t.group, "two").unwrap_err().to_string(),
+        "slow_mode"
+    );
+
+    // Anyone may rename once the group says so.
+    assert!(t.b.group_rename(&t.group, "Mine").is_err());
+    t.a.group_set_rules(&t.group, |r| r.only_admins_edit = false)
+        .unwrap();
+    until("the edit rule to reach bob", || {
+        t.b.group_info(&t.group)
+            .is_some_and(|g| !g.rules.only_admins_edit)
+    })
+    .await;
+    t.b.group_rename(&t.group, "Ours").unwrap();
+    until("the name at alice", || {
+        t.a.group_info(&t.group).is_some_and(|g| g.name == "Ours")
+    })
+    .await;
+}
+
+/// Bob writes while Carol is away and is gone by the time she is back: Alice passes it on.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_comes_from_any_member_when_its_writer_is_gone() {
+    let mut t = trio().await;
+    let (kb, kc) = (t.b.my_key(), t.c.my_key());
+    t.c.shutdown();
+    let m = t.b.send(&t.group, "for when you are back").unwrap();
+    until("alice to have it", || t.a.message(&m.id).is_some()).await;
+    t.b.shutdown();
+    t.c = start(t.dirs[2].path(), &t.lookup, "Carol");
+    assert_eq!(t.c.my_key(), kc);
+    until("carol to have it, from alice", || {
+        t.c.message(&m.id).is_some()
+    })
+    .await;
+    let got = t.c.message(&m.id).unwrap();
+    assert_eq!(got.body, "for when you are back");
+    assert_eq!(got.sender.as_deref(), Some(kb.as_str()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn joining_with_a_link_goes_through_who_runs_it() {
+    let t = trio().await;
+    let dir = tempfile::tempdir().unwrap();
+    let dave = start(dir.path(), &t.lookup, "Dave");
+    let link = t.a.group_link(&t.group).unwrap();
+    assert!(whatsmine_core::identity::parse_group_link(&link).is_some());
+
+    // A made-up token gets nowhere.
+    let mut wrong = whatsmine_core::identity::parse_group_link(&link).unwrap();
+    wrong.token = [9; 16];
+    dave.join_by_link(&wrong.link(), "").unwrap();
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(dave.group_info(&t.group).is_none());
+
+    // The real link, with approval on: Alice decides.
+    t.a.group_link_approve(&t.group, true).unwrap();
+    dave.join_by_link(&link, "Hi, it is Dave").unwrap();
+    until("alice to see who asks", || {
+        !t.a.group_link_state(&t.group).asking.is_empty()
+    })
+    .await;
+    let asker = t.a.group_link_state(&t.group).asking[0].clone();
+    assert_eq!(asker.id, dave.my_key());
+    assert_eq!(asker.greeting, "Hi, it is Dave");
+    assert!(dave.group_info(&t.group).is_none());
+    t.a.group_answer_join(&t.group, &asker.id, true).unwrap();
+    until("dave to be in", || {
+        dave.group_info(&t.group)
+            .is_some_and(|g| g.active && g.members.len() == 4)
+    })
+    .await;
+    until("bob to see dave", || {
+        t.b.group_info(&t.group)
+            .is_some_and(|g| g.members.len() == 4)
+    })
+    .await;
+    let m = dave.send(&t.group, "hello all").unwrap();
+    until("the others to get it", || {
+        t.b.message(&m.id).is_some() && t.c.message(&m.id).is_some()
+    })
+    .await;
+    // Alice is no contact of Dave's because of this.
+    assert_ne!(
+        dave.contact(&t.a.my_key()).map(|c| c.state),
+        Some(ContactState::Accepted)
+    );
+    dave.shutdown();
 }

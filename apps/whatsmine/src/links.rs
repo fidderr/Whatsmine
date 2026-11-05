@@ -17,12 +17,75 @@ pub struct InviteSig(pub Signal<Option<Invite>>);
 /// Looks for an invitation in `text` and, if there is one, asks about it.
 /// False if the text holds none.
 pub fn offer(mut sig: InviteSig, text: &str) -> bool {
+    if let Some(link) = whatsmine_core::identity::parse_group_link(text) {
+        // Asked about in the same way, with a dialog of its own.
+        if let Ok(mut pending) = PENDING_JOIN.lock() {
+            *pending = Some(link);
+        }
+        JOIN_NEWS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        return true;
+    }
     match parse_invite(text) {
         Some(invite) => {
             sig.0.set(Some(invite));
             true
         }
         None => false,
+    }
+}
+
+static PENDING_JOIN: std::sync::Mutex<Option<whatsmine_core::identity::GroupLink>> =
+    std::sync::Mutex::new(None);
+static JOIN_NEWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The question: join this group?
+#[component]
+pub fn JoinDialog() -> Element {
+    let tr = use_tr();
+    let core = use_core();
+    let mut toast_sig = use_context::<ToastSig>();
+    let mut shown: Signal<Option<whatsmine_core::identity::GroupLink>> = use_signal(|| None);
+    let mut seen = use_signal(|| 0u64);
+    use_future(move || async move {
+        loop {
+            let news = JOIN_NEWS.load(std::sync::atomic::Ordering::Relaxed);
+            if news != *seen.peek() {
+                seen.set(news);
+                let link = PENDING_JOIN.lock().ok().and_then(|mut p| p.take());
+                shown.set(link);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    });
+    let Some(link) = shown() else {
+        return rsx! {};
+    };
+    let text = link.link();
+    rsx! {
+        div { class: "scrim center", onclick: move |_| shown.set(None),
+            BackLayer { on_back: move |_| shown.set(None) }
+            div { class: "confirm-dialog invite-dialog", "data-t": "join-dialog", onclick: move |e| e.stop_propagation(),
+                h3 { "{t(&tr, \"join.title\").replace(\"{name}\", &link.name)}" }
+                p { "{t(&tr, \"join.body\")}" }
+                div { class: "btns",
+                    button { class: "btn", onclick: move |_| shown.set(None),
+                        "{t(&tr, \"common.cancel\")}"
+                    }
+                    button {
+                        class: "btn main",
+                        "data-t": "join-yes",
+                        onclick: move |_| {
+                            shown.set(None);
+                            match core.join_by_link(&text, "") {
+                                Ok(_) => toast(&mut toast_sig, t(&tr, "join.asked"), ToastLevel::Info),
+                                Err(e) => toast(&mut toast_sig, t(&tr, &format!("add.err.{e}")), ToastLevel::Error),
+                            }
+                        },
+                        "{t(&tr, \"join.yes\")}"
+                    }
+                }
+            }
+        }
     }
 }
 

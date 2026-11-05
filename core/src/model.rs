@@ -232,7 +232,9 @@ pub struct GroupMember {
     /// the group's admin gave.
     pub name: String,
     pub is_me: bool,
+    /// The owner, or an admin.
     pub is_admin: bool,
+    pub is_owner: bool,
     pub online: bool,
     /// One of our contacts (so a 1:1 chat with them exists).
     pub is_contact: bool,
@@ -244,6 +246,8 @@ pub struct GroupInfo {
     pub name: String,
     pub admin: String,
     pub i_am_admin: bool,
+    pub i_am_owner: bool,
+    pub rules: crate::protocol::GroupRules,
     /// False once we left, were removed, or the admin closed the group:
     /// the history stays but nothing more is sent or received.
     pub active: bool,
@@ -470,6 +474,9 @@ pub struct ContactKeys {
     /// What they gave for passing them on.
     #[serde(default)]
     pub card: Option<String>,
+    /// We asked them to let us into a group.
+    #[serde(default)]
+    pub join: Option<crate::requests::JoinAsk>,
 }
 
 /// One way for strangers to ask to be added.
@@ -488,6 +495,23 @@ pub struct MyInvite {
     pub main: bool,
     /// Whoever comes with this was scanned in person: added both ways without asking.
     pub met_token: Option<[u8; 16]>,
+}
+
+/// Someone who asked to join a group through its link.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct JoinAsker {
+    pub id: String,
+    pub name: String,
+    pub greeting: String,
+}
+
+/// What a link to a group does, kept by whoever made it.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct GroupLinkState {
+    pub token: [u8; 16],
+    /// Someone with the link waits for an admin.
+    pub approve: bool,
+    pub asking: Vec<JoinAsker>,
 }
 
 /// What the files on this device take.

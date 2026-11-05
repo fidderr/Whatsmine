@@ -28,6 +28,7 @@ pub const OLD_LOCATION_LIFE_MS: i64 = 90 * 24 * 3600 * 1000;
 /// Base of the links people share. Chat apps do not make `whatsmine://` clickable, and what comes
 /// after the `#` never reaches the web server.
 pub const LINK_BASE: &str = "https://fidderr.github.io/whatsmine/add#";
+pub const JOIN_BASE: &str = "https://fidderr.github.io/whatsmine/join#";
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Identity {
@@ -207,6 +208,47 @@ pub fn parse_invite(text: &str) -> Option<Invite> {
             && invite.key().is_some()
         {
             return Some(invite);
+        }
+    }
+    None
+}
+
+/// What a link to a group holds: who to ask, and the token that says the link is real.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupLink {
+    pub group: String,
+    pub name: String,
+    pub invite: Invite,
+    pub token: [u8; 16],
+}
+
+impl GroupLink {
+    pub fn link(&self) -> String {
+        let bytes = postcard::to_stdvec(self).expect("a group link serializes");
+        format!(
+            "{JOIN_BASE}{}",
+            data_encoding::BASE32_NOPAD.encode(&bytes).to_lowercase()
+        )
+    }
+}
+
+/// Finds a group link in whatever was pasted, scanned or clicked.
+pub fn parse_group_link(text: &str) -> Option<GroupLink> {
+    for token in text.split_whitespace() {
+        let token = token.trim_matches(|c: char| !c.is_alphanumeric());
+        let Some(rest) = token
+            .strip_prefix("whatsmine://join/")
+            .or_else(|| token.split_once("/join#").map(|(_, rest)| rest))
+        else {
+            continue;
+        };
+        let upper = rest.to_ascii_uppercase();
+        if let Ok(bytes) = data_encoding::BASE32_NOPAD.decode(upper.as_bytes())
+            && let Ok(link) = postcard::from_bytes::<GroupLink>(&bytes)
+            && link.invite.key().is_some()
+            && crate::groups::is_group_id(&link.group)
+        {
+            return Some(link);
         }
     }
     None

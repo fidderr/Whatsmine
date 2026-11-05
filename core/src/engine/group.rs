@@ -15,6 +15,36 @@ use crate::model::{
 };
 use crate::protocol::{Frame, GroupState, MAX_GROUP_MEMBERS, MAX_TEXT, ReceiptKind, id_from_bytes};
 
+/// How far back members compare what they have.
+const RELAY_LOOK_BACK: u32 = 100;
+
+/// Where it is kept that we asked to join a group.
+pub(crate) fn join_asked_name(group: &str) -> String {
+    format!("join-asked:{group}")
+}
+
+fn link_state_name(group: &str) -> String {
+    format!("group-link:{group}")
+}
+
+pub(crate) fn group_link_state(
+    db: &crate::db::Database,
+    group: &str,
+) -> Option<crate::model::GroupLinkState> {
+    db.secret(&link_state_name(group))
+        .and_then(|json| serde_json::from_slice(&json).ok())
+}
+
+pub(crate) fn save_group_link_state(
+    db: &crate::db::Database,
+    group: &str,
+    state: &crate::model::GroupLinkState,
+) {
+    if let Ok(json) = serde_json::to_vec(state) {
+        let _ = db.set_secret(&link_state_name(group), &json);
+    }
+}
+
 impl Engine {
     fn me_id(&self) -> String {
         key_to_string(&self.me)
@@ -100,6 +130,22 @@ impl Engine {
             for m in self.db.group_unacked_for(&id) {
                 self.send_message(peer, &m);
             }
+            // What each of us has, so nobody has to wait for whoever wrote something.
+            for g in &groups {
+                let ids: Vec<[u8; 16]> = self
+                    .db
+                    .messages(g, None, RELAY_LOOK_BACK)
+                    .iter()
+                    .filter_map(|m| crate::protocol::id_to_bytes(&m.id))
+                    .collect();
+                self.send(
+                    peer,
+                    Frame::GroupHave {
+                        group: g.clone(),
+                        ids,
+                    },
+                );
+            }
         }
         // A leave the admin has not heard about yet.
         for g in self.db.pending_leaves_to(&id) {
@@ -132,9 +178,6 @@ impl Engine {
         let me = self.me_id();
         if !groups::is_group_id(&state.id)
             || state.members.len() > MAX_GROUP_MEMBERS
-            || state.members.is_empty()
-            || !state.members.contains(&state.admin)
-            || !state.members.contains(&sender)
             || state.name.is_empty()
             || clean_name(&state.name) != state.name
             || !groups::verify(&state, &sig)
@@ -142,22 +185,43 @@ impl Engine {
             return;
         }
         let local = self.db.group(&state.id);
+        // The last state of a group can leave nobody but the one telling: an owner who left.
+        let in_it = state.members.contains(&sender)
+            || local
+                .as_ref()
+                .is_some_and(|(cur, _, _)| cur.members.contains(&sender));
+        if !in_it || (!state.closed && !state.members.contains(&state.admin)) {
+            return;
+        }
+        let asked = self.db.secret(&join_asked_name(&state.id)).is_some();
         match &local {
-            Some((cur, _, _)) => {
-                if cur.admin != state.admin || state.version <= cur.version {
+            Some((cur, cur_sig, _)) => {
+                if !groups::may_change(cur, &state) {
+                    return;
+                }
+                // Two admins at the same moment: the same one wins everywhere.
+                if state.version < cur.version
+                    || (state.version == cur.version && sig.as_slice() <= cur_sig.as_slice())
+                {
                     return;
                 }
             }
             None => {
-                // Only a contact's group can add us; nobody else gets a say.
-                let admin_is_contact = self
-                    .db
-                    .contact(&state.admin)
-                    .is_some_and(|c| c.state == ContactState::Accepted);
-                if !admin_is_contact || !state.members.contains(&me) || state.closed {
+                // Only a contact's group, or one we asked to join, can add us.
+                let by_contact = state.members.iter().any(|m| {
+                    state.is_manager(m)
+                        && self
+                            .db
+                            .contact(m)
+                            .is_some_and(|c| c.state == ContactState::Accepted)
+                });
+                if !(by_contact || asked) || !state.members.contains(&me) || state.closed {
                     return;
                 }
             }
+        }
+        if asked && state.members.contains(&me) {
+            self.joined_through_link(&state);
         }
         if let Some((cur, _, _)) = &local {
             for gone in cur.members.iter().filter(|m| !state.members.contains(m)) {
@@ -204,19 +268,22 @@ impl Engine {
         let Some((mut state, _, true)) = self.db.group(&gid) else {
             return;
         };
-        // Only the admin changes the member list; everyone else follows the
-        // admin's next signed state.
-        if state.admin != me || !state.members.contains(&sender) || sender == me {
+        // Only the owner and admins change the member list; everyone else follows the next signed
+        // state. Only the owner takes away an admin.
+        let may = state.admin == me || (state.is_manager(&me) && !state.is_manager(&sender));
+        if !may || !state.members.contains(&sender) || sender == me {
             return;
         }
         state.members.retain(|m| *m != sender);
+        state.rules.admins.retain(|m| *m != sender);
         state.version += 1;
         self.db.remove_member_acks(&gid, &sender);
         self.save_and_publish(state, &[peer]);
     }
 
     /// Signs a new state of a group we administer, stores it and sends it.
-    pub(super) fn save_and_publish(&mut self, state: GroupState, also_to: &[PublicKey]) {
+    pub(super) fn save_and_publish(&mut self, mut state: GroupState, also_to: &[PublicKey]) {
+        state.rules.signer = self.me_id();
         let sig = groups::sign(&self.key, &state);
         let names = self.group_names(&state);
         let me = self.me_id();
@@ -232,6 +299,7 @@ impl Engine {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn on_group_msg(
         &mut self,
         peer: PublicKey,
@@ -240,23 +308,34 @@ impl Engine {
         sent_at: i64,
         group: String,
         extra: Vec<u8>,
+        sig: Vec<u8>,
     ) {
         let sender = key_to_string(&peer);
         if text.len() > MAX_TEXT || !self.group_allows(&group, &sender) {
             return;
+        }
+        let mut parsed = crate::rich::MessageExtra::from_wire(&extra);
+        // Whatever cannot be checked is not passed on, but they are who they are: it still counts.
+        if groups::verify_message(&peer, &group, &mid, &text, sent_at, &extra, &sig) {
+            parsed.proof = Some(crate::rich::GroupProof {
+                text: text.clone(),
+                sent_at,
+                wire: extra,
+                sig,
+            });
         }
         let message = Message {
             id: id_from_bytes(&mid),
             contact_id: group,
             outgoing: false,
             body: text,
-            sent_at,
+            sent_at: sent_at.min(now_ms()),
             received_at: now_ms(),
             status: MessageStatus::Delivered,
             read: false,
             attachment: None,
             sender: Some(sender),
-            extra: crate::rich::MessageExtra::from_wire(&extra),
+            extra: parsed,
         };
         if self.db.insert_message(&message).unwrap_or(false) {
             emit(&self.events, CoreEvent::MessageAdded(message));
@@ -273,7 +352,216 @@ impl Engine {
 
     /// May `sender` write in `group` as far as we are concerned?
     pub(super) fn group_allows(&self, group: &str, sender: &str) -> bool {
-        self.db.is_group_member(group, sender) && self.db.is_group_member(group, &self.me_id())
+        if !self.db.is_group_member(group, sender) || !self.db.is_group_member(group, &self.me_id())
+        {
+            return false;
+        }
+        self.db
+            .group(group)
+            .is_some_and(|(state, _, _)| !state.rules.only_admins_send || state.is_manager(sender))
+    }
+
+    /// Someone says what they have of a group: pass on what they lack, as far as they were in it.
+    pub(super) fn on_group_have(&self, peer: PublicKey, group: &str, ids: &[[u8; 16]]) {
+        let who = key_to_string(&peer);
+        let Some(since) = self.db.member_since(group, &who) else {
+            return;
+        };
+        if !self.db.is_group_member(group, &self.me_id()) {
+            return;
+        }
+        for m in self.db.messages(group, None, RELAY_LOOK_BACK) {
+            let Some(mid) = crate::protocol::id_to_bytes(&m.id) else {
+                continue;
+            };
+            if ids.contains(&mid) || m.sent_at < since || m.attachment.is_some() {
+                continue;
+            }
+            // Whoever wrote it knows who has it already: that goes its own way.
+            if m.sender.as_deref() == Some(who.as_str()) {
+                continue;
+            }
+            if m.outgoing {
+                if m.status == MessageStatus::Scheduled || m.extra.unsent {
+                    continue;
+                }
+                let wire = m.extra.to_wire();
+                let sig = groups::sign_message(&self.key, group, &mid, &m.body, m.sent_at, &wire);
+                self.send(
+                    peer,
+                    Frame::GroupRelay {
+                        group: group.to_owned(),
+                        author: *self.me.as_bytes(),
+                        id: mid,
+                        text: m.body,
+                        sent_at: m.sent_at,
+                        extra: wire,
+                        sig,
+                    },
+                );
+                continue;
+            }
+            let (Some(proof), Some(author)) = (
+                m.extra.proof.clone(),
+                m.sender.as_deref().and_then(parse_key),
+            ) else {
+                continue;
+            };
+            if m.extra.unsent {
+                continue;
+            }
+            self.send(
+                peer,
+                Frame::GroupRelay {
+                    group: group.to_owned(),
+                    author: *author.as_bytes(),
+                    id: mid,
+                    text: proof.text,
+                    sent_at: proof.sent_at,
+                    extra: proof.wire,
+                    sig: proof.sig,
+                },
+            );
+        }
+    }
+
+    /// Something someone else in the group wrote, passed on. It counts because they signed it.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn on_group_relay(
+        &mut self,
+        peer: PublicKey,
+        group: String,
+        author: [u8; 32],
+        mid: [u8; 16],
+        text: String,
+        sent_at: i64,
+        wire: Vec<u8>,
+        sig: Vec<u8>,
+    ) {
+        let (who_tells, Ok(author_key)) = (key_to_string(&peer), PublicKey::from_bytes(&author))
+        else {
+            return;
+        };
+        let writer = key_to_string(&author_key);
+        if writer == self.me_id()
+            || text.len() > MAX_TEXT
+            || !self.group_allows(&group, &who_tells)
+            || !self.group_allows(&group, &writer)
+            || !groups::verify_message(&author_key, &group, &mid, &text, sent_at, &wire, &sig)
+        {
+            return;
+        }
+        let mut parsed = crate::rich::MessageExtra::from_wire(&wire);
+        parsed.proof = Some(crate::rich::GroupProof {
+            text: text.clone(),
+            sent_at,
+            wire,
+            sig,
+        });
+        let message = Message {
+            id: id_from_bytes(&mid),
+            contact_id: group,
+            outgoing: false,
+            body: text,
+            sent_at: sent_at.min(now_ms()),
+            received_at: now_ms(),
+            status: MessageStatus::Delivered,
+            read: false,
+            attachment: None,
+            sender: Some(writer),
+            extra: parsed,
+        };
+        if self.db.insert_message(&message).unwrap_or(false) {
+            self.timers_dirty = true;
+            emit(&self.events, CoreEvent::MessageAdded(message));
+            emit(&self.events, CoreEvent::ContactsChanged);
+        }
+    }
+
+    // ---- joining by link ----
+
+    /// Someone used a link to one of our groups.
+    pub(super) fn on_join_ask(
+        &mut self,
+        peer: PublicKey,
+        join: &crate::requests::JoinAsk,
+        name: &str,
+        request: &crate::requests::Request,
+    ) {
+        let id = key_to_string(&peer);
+        let me = self.me_id();
+        let Some((mut state, _, true)) = self.db.group(&join.group) else {
+            return;
+        };
+        let Some(mut link) = group_link_state(&self.db, &join.group) else {
+            return;
+        };
+        if link.token != join.token || !state.is_manager(&me) || state.members.contains(&id) {
+            return;
+        }
+        if state.members.len() >= MAX_GROUP_MEMBERS {
+            return;
+        }
+        // To find them, and for the group to go on.
+        if self.db.contact(&id).is_none()
+            && self
+                .db
+                .upsert_contact(&id, ContactState::GroupPeer, Some(name), None)
+                .is_err()
+        {
+            return;
+        }
+        let mut keys = self.db.contact_keys(&id).unwrap_or_default();
+        keys.location = Some(request.location);
+        self.db.set_contact_keys(&id, &keys);
+        if link.approve {
+            if !link.asking.iter().any(|a| a.id == id) {
+                link.asking.push(crate::model::JoinAsker {
+                    id: id.clone(),
+                    name: name.to_owned(),
+                    greeting: request.greeting.chars().take(140).collect(),
+                });
+                save_group_link_state(&self.db, &join.group, &link);
+                emit(
+                    &self.events,
+                    CoreEvent::RequestReceived {
+                        contact_id: id,
+                        name: name.to_owned(),
+                    },
+                );
+                emit(&self.events, CoreEvent::ContactsChanged);
+            }
+            return;
+        }
+        state.members.push(id);
+        state.members.sort();
+        state.version += 1;
+        self.save_and_publish(state, &[]);
+        self.blips.insert(peer, Instant::now());
+        self.wanted_dirty = true;
+    }
+
+    /// We are in: who let us in is no longer someone we are waiting for.
+    fn joined_through_link(&mut self, state: &GroupState) {
+        let _ = self.db.delete_secret(&join_asked_name(&state.id));
+        for member in &state.members {
+            let Some(mut keys) = self.db.contact_keys(member) else {
+                continue;
+            };
+            if keys.join.as_ref().is_some_and(|j| j.group == state.id) {
+                keys.join = None;
+                keys.invite = None;
+                self.db.set_contact_keys(member, &keys);
+                if let Some(key) = parse_key(member) {
+                    self.requests_out.remove(&key);
+                }
+                if self.db.contact(member).map(|c| c.state) == Some(ContactState::PendingOut) {
+                    let _ = self
+                        .db
+                        .upsert_contact(member, ContactState::GroupPeer, None, None);
+                }
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]

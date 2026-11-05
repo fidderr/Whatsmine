@@ -28,6 +28,15 @@ pub struct Request {
     pub location: [u8; 32],
     pub met_token: Option<[u8; 16]>,
     pub at: Millis,
+    /// Not to be added as a contact, but to a group.
+    pub join: Option<JoinAsk>,
+}
+
+/// Asking to join a group, with the token from its link.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JoinAsk {
+    pub group: String,
+    pub token: [u8; 16],
 }
 
 #[derive(Serialize, Deserialize)]
@@ -170,6 +179,7 @@ mod tests {
             location: random(),
             met_token: None,
             at: 1,
+            join: None,
         }
     }
 

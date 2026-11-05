@@ -192,6 +192,12 @@ impl Core {
             version: 1,
             members,
             closed: false,
+            rules: protocol::GroupRules {
+                signer: me.clone(),
+                only_admins_add: true,
+                only_admins_edit: true,
+                ..protocol::GroupRules::default()
+            },
         };
         let sig = groups::sign(&self.inner.key, &state);
         db.save_group(&state, &sig, true, &[], &me)?;

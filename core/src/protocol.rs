@@ -61,6 +61,23 @@ pub enum Frame {
         group: Option<String>,
         /// Replies, polls and the rest, as `MessageExtra::to_wire`. Nothing for a plain text.
         extra: Vec<u8>,
+        /// In a group: the writer's signature, so anyone in it can pass this on.
+        sig: Vec<u8>,
+    },
+    /// "These are the group's last messages I have."
+    GroupHave {
+        group: String,
+        ids: Vec<[u8; 16]>,
+    },
+    /// A message of someone else in the group, passed on with their signature.
+    GroupRelay {
+        group: String,
+        author: [u8; 32],
+        id: [u8; 16],
+        text: String,
+        sent_at: i64,
+        extra: Vec<u8>,
+        sig: Vec<u8>,
     },
     Receipt {
         kind: ReceiptKind,
@@ -153,22 +170,48 @@ pub struct GroupState {
     pub version: u64,
     /// Keys of every member, the admin included, sorted.
     pub members: Vec<String>,
-    /// The admin ended the group.
+    /// The owner ended the group.
     pub closed: bool,
+    pub rules: GroupRules,
+}
+
+/// Who does what in a group. Signed along with the rest.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct GroupRules {
+    /// Besides the owner.
+    pub admins: Vec<String>,
+    /// Who signed this version.
+    pub signer: String,
+    /// Only admins can send: for announcements.
+    pub only_admins_send: bool,
+    pub only_admins_add: bool,
+    pub only_admins_edit: bool,
+    /// How long someone waits between messages. 0 means no waiting.
+    pub slow_ms: u32,
+    pub about: String,
+}
+
+impl GroupState {
+    /// The owner or an admin.
+    pub fn is_manager(&self, who: &str) -> bool {
+        self.admin == who || self.rules.admins.iter().any(|a| a == who)
+    }
 }
 
 impl GroupState {
     pub fn signing_bytes(&self) -> Vec<u8> {
         let mut canon = self.clone();
         canon.members.sort();
+        canon.rules.admins.sort();
         let mut out = b"whatsmine-group-v1".to_vec();
         out.extend(postcard::to_stdvec(&canon).unwrap_or_default());
         out
     }
 }
 
-/// Most members one group may have (everyone connects to everyone).
-pub const MAX_GROUP_MEMBERS: usize = 16;
+/// Most members one group may have. Each message is sealed for each member, and members who are
+/// around pass on what others missed.
+pub const MAX_GROUP_MEMBERS: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CallResult {
@@ -267,6 +310,20 @@ mod tests {
                 sent_at: 1_792_000_000_000,
                 group: Some("g:x".into()),
                 extra: vec![1, 2],
+                sig: vec![3],
+            },
+            Frame::GroupHave {
+                group: "g:x".into(),
+                ids: vec![[1; 16]],
+            },
+            Frame::GroupRelay {
+                group: "g:x".into(),
+                author: [5; 32],
+                id: [1; 16],
+                text: "hi".into(),
+                sent_at: 5,
+                extra: Vec::new(),
+                sig: vec![6],
             },
             Frame::Change {
                 id: [1; 16],
@@ -313,6 +370,7 @@ mod tests {
                     version: 3,
                     members: vec!["a".into(), "b".into()],
                     closed: false,
+                    rules: GroupRules::default(),
                 },
                 sig: vec![1; 64],
                 names: vec![("b".into(), "Bob".into())],

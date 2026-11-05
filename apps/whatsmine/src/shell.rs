@@ -198,11 +198,13 @@ pub fn Shell() -> Element {
                 main { class: "wide-main", Outlet::<Route> {} }
             }
             InviteDialog {}
+            crate::links::JoinDialog {}
         };
     }
     rsx! {
         Outlet::<Route> {}
         InviteDialog {}
+        crate::links::JoinDialog {}
     }
 }
 

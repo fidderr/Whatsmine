@@ -98,11 +98,13 @@ CREATE TABLE IF NOT EXISTS groups (
     closed   INTEGER NOT NULL DEFAULT 0,
     active   INTEGER NOT NULL DEFAULT 1,
     left     INTEGER NOT NULL DEFAULT 0,
-    sig      BLOB NOT NULL
+    sig      BLOB NOT NULL,
+    rules    BLOB
 );
 CREATE TABLE IF NOT EXISTS group_members (
     group_id  TEXT NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
     member_id TEXT NOT NULL,
+    since     INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (group_id, member_id)
 );
 CREATE TABLE IF NOT EXISTS group_acks (
@@ -921,6 +923,12 @@ impl Database {
         Ok(())
     }
 
+    pub fn delete_secret(&self, name: &str) -> rusqlite::Result<()> {
+        self.lock()
+            .execute("DELETE FROM secrets WHERE name = ?1", params![name])?;
+        Ok(())
+    }
+
     /// The key that seals an Olm pickle: a purpose of its own.
     pub fn pickle_key(&self) -> [u8; 32] {
         self.vault.derive("olm pickles")
@@ -1148,15 +1156,29 @@ impl Database {
     /// The stored state of a group, its signature, and whether we are still in it.
     pub fn group(&self, id: &str) -> Option<(GroupState, Vec<u8>, bool)> {
         let conn = self.lock();
-        let (admin, version, closed, active, sig): (String, i64, bool, bool, Vec<u8>) = conn
+        type Row = (String, i64, bool, bool, Vec<u8>, Option<Vec<u8>>);
+        let (admin, version, closed, active, sig, rules): Row = conn
             .query_row(
-                "SELECT admin, version, closed, active, sig FROM groups WHERE id = ?1",
+                "SELECT admin, version, closed, active, sig, rules FROM groups WHERE id = ?1",
                 params![id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
             )
             .optional()
             .ok()
             .flatten()?;
+        let rules = rules
+            .and_then(|sealed| self.vault.open(&sealed))
+            .and_then(|json| serde_json::from_slice(&json).ok())
+            .unwrap_or_default();
         let name: Option<Vec<u8>> = conn
             .query_row(
                 "SELECT their_name FROM contacts WHERE id = ?1",
@@ -1183,6 +1205,7 @@ impl Database {
                 version: version as u64,
                 members,
                 closed,
+                rules,
             },
             sig,
             active,
@@ -1208,27 +1231,38 @@ impl Database {
             params![state.id, self.vault.seal_str(&state.name), now],
         )?;
         conn.execute(
-            "INSERT INTO groups (id, admin, version, closed, active, sig)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO groups (id, admin, version, closed, active, sig, rules)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(id) DO UPDATE SET admin = excluded.admin, version = excluded.version,
-                closed = excluded.closed, active = excluded.active, sig = excluded.sig",
+                closed = excluded.closed, active = excluded.active, sig = excluded.sig,
+                rules = excluded.rules",
             params![
                 state.id,
                 state.admin,
                 state.version as i64,
                 state.closed,
                 active,
-                sig
+                sig,
+                self.vault
+                    .seal(&serde_json::to_vec(&state.rules).expect("rules serialize")),
             ],
         )?;
-        conn.execute(
-            "DELETE FROM group_members WHERE group_id = ?1",
-            params![state.id],
-        )?;
+        // Who stays keeps the moment they came in: nobody is passed what was said before that.
+        let before: Vec<String> = conn
+            .prepare("SELECT member_id FROM group_members WHERE group_id = ?1")?
+            .query_map(params![state.id], |r| r.get(0))?
+            .filter_map(Result::ok)
+            .collect();
+        for gone in before.iter().filter(|m| !state.members.contains(m)) {
+            conn.execute(
+                "DELETE FROM group_members WHERE group_id = ?1 AND member_id = ?2",
+                params![state.id, gone],
+            )?;
+        }
         for m in &state.members {
             conn.execute(
-                "INSERT OR IGNORE INTO group_members (group_id, member_id) VALUES (?1, ?2)",
-                params![state.id, m],
+                "INSERT OR IGNORE INTO group_members (group_id, member_id, since) VALUES (?1, ?2, ?3)",
+                params![state.id, m, now],
             )?;
             if m != me {
                 let name = names
@@ -1325,6 +1359,19 @@ impl Database {
                     .map(|rows| rows.filter_map(Result::ok).collect())
             })
             .unwrap_or_default()
+    }
+
+    /// From when on this member may be passed what was said.
+    pub fn member_since(&self, group_id: &str, member: &str) -> Option<Millis> {
+        self.lock()
+            .query_row(
+                "SELECT since FROM group_members WHERE group_id = ?1 AND member_id = ?2",
+                params![group_id, member],
+                |r| r.get(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
     }
 
     pub fn is_group_member(&self, group_id: &str, member: &str) -> bool {

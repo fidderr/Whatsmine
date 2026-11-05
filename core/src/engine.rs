@@ -47,6 +47,7 @@ use crate::sealing::{OpenError, Sealing};
 
 mod call;
 mod group;
+pub(crate) use group::{group_link_state, join_asked_name, save_group_link_state};
 
 use call::{CallState, GroupCalls};
 
@@ -932,7 +933,13 @@ impl Engine {
                 m.body = text;
                 m.extra.edited = true;
             }
-            MessageChange::Unsend if writer == who => {
+            MessageChange::Unsend
+                if writer == who
+                    || self
+                        .db
+                        .group(&chat)
+                        .is_some_and(|(state, _, _)| state.is_manager(&who)) =>
+            {
                 self.remove_message_files(&m);
                 m.body = String::new();
                 m.attachment = None;
@@ -975,6 +982,9 @@ impl Engine {
                     self.owe_accept.insert(peer);
                 }
                 ContactState::PendingOut if keys.invite.is_some() => {
+                    self.requests_out.insert(peer, (now, 0));
+                }
+                ContactState::Accepted if keys.join.is_some() && keys.invite.is_some() => {
                     self.requests_out.insert(peer, (now, 0));
                 }
                 _ => {}
@@ -1342,6 +1352,9 @@ impl Engine {
         if state == Some(ContactState::Blocked) {
             return;
         }
+        if let Some(join) = request.join.clone() {
+            return self.on_join_ask(peer, &join, &name, &request);
+        }
         // Words someone never wants to see in a request.
         let said = format!("{name} {}", request.greeting).to_lowercase();
         if self
@@ -1450,6 +1463,7 @@ impl Engine {
                 location: self.identity.location,
                 met_token: invite.met_token,
                 at: now_ms(),
+                join: keys.join,
             };
             let Some(sealed) = requests::seal(&invite, &request, &self.key) else {
                 tracing::warn!("an invite with a key that cannot be used");
@@ -2468,13 +2482,25 @@ impl Engine {
                 sent_at,
                 group: Some(group),
                 extra,
-            } => self.on_group_msg(peer, mid, text, sent_at, group, extra),
+                sig,
+            } => self.on_group_msg(peer, mid, text, sent_at, group, extra, sig),
+            Frame::GroupHave { group, ids } => self.on_group_have(peer, &group, &ids),
+            Frame::GroupRelay {
+                group,
+                author,
+                id: mid,
+                text,
+                sent_at,
+                extra,
+                sig,
+            } => self.on_group_relay(peer, group, author, mid, text, sent_at, extra, sig),
             Frame::Msg {
                 id: mid,
                 text,
                 sent_at,
                 group: None,
                 extra,
+                sig: _,
             } => {
                 if state != Some(ContactState::Accepted) || text.len() > MAX_TEXT {
                     return;
@@ -2856,13 +2882,20 @@ impl Engine {
                     extra: m.extra.to_wire(),
                 }
             }
-            None => Frame::Msg {
-                id,
-                text: m.body.clone(),
-                sent_at: m.sent_at,
-                group,
-                extra: m.extra.to_wire(),
-            },
+            None => {
+                let extra = m.extra.to_wire();
+                let sig = group.as_deref().map_or_else(Vec::new, |g| {
+                    groups::sign_message(&self.key, g, &id, &m.body, m.sent_at, &extra)
+                });
+                Frame::Msg {
+                    id,
+                    text: m.body.clone(),
+                    sent_at: m.sent_at,
+                    group,
+                    extra,
+                    sig,
+                }
+            }
         };
         let sent = self.send(peer, frame);
         if sent

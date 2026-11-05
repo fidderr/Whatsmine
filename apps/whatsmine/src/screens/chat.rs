@@ -206,6 +206,9 @@ fn ChatView(id: String) -> Element {
     let is_group = contact.kind == ContactKind::Group;
     let group_info = if is_group { core.group_info(&id) } else { None };
     let can_write = !is_group || group_info.as_ref().is_some_and(|g| g.active);
+    let only_admins = group_info
+        .as_ref()
+        .is_some_and(|g| g.active && g.rules.only_admins_send && !g.i_am_admin);
     let call_ready = if is_group {
         can_write
     } else {
@@ -698,6 +701,8 @@ fn ChatView(id: String) -> Element {
                 }
             } else if !can_write {
                 div { class: "sys-line", style: "margin:8px", "{t(&tr, \"group.inactive\")}" }
+            } else if only_admins {
+                div { class: "sys-line", style: "margin:8px", "{t(&tr, \"group.only_admins\")}" }
             } else if recording() {
                 VoiceBar {
                     on_send: move |file: Picked| {

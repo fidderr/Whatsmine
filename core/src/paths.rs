@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 /// The generation of what is kept on disk. A new one means the old data cannot be used any more
 /// (another way of being someone, another protocol): it goes, once.
-pub const DATA_GENERATION: u32 = 4;
+pub const DATA_GENERATION: u32 = 5;
 const GENERATION_FILE: &str = "generation";
 
 /// Before anything opens what is in `dir`: removes the data of an earlier generation. Returns

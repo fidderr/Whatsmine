@@ -155,6 +155,17 @@ pub struct MessageExtra {
     pub viewed: bool,
     /// From a newer version, with something this one cannot show.
     pub unknown: bool,
+    /// As it came, with the signature: what it takes to pass it on in a group.
+    pub proof: Option<GroupProof>,
+}
+
+/// A group message as its writer signed it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupProof {
+    pub text: String,
+    pub sent_at: Millis,
+    pub wire: Vec<u8>,
+    pub sig: Vec<u8>,
 }
 
 /// What goes to the others with a message. What is only for this device stays out.
