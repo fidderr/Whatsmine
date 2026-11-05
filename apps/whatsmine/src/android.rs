@@ -211,15 +211,15 @@ pub fn request_blocking(permission: &str) -> bool {
 
 // ---- the Back button ----
 
-static BACK: OnceLock<(
+/// Android sends Back on its own thread; the UI takes the one receiver once.
+type BackChannel = (
     mpsc::UnboundedSender<()>,
     Mutex<Option<mpsc::UnboundedReceiver<()>>>,
-)> = OnceLock::new();
+);
 
-fn back_channel() -> &'static (
-    mpsc::UnboundedSender<()>,
-    Mutex<Option<mpsc::UnboundedReceiver<()>>>,
-) {
+static BACK: OnceLock<BackChannel> = OnceLock::new();
+
+fn back_channel() -> &'static BackChannel {
     BACK.get_or_init(|| {
         let (tx, rx) = mpsc::unbounded_channel();
         (tx, Mutex::new(Some(rx)))
