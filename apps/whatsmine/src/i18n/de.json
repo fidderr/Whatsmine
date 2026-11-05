@@ -322,7 +322,7 @@
   "calls.recent": "Zuletzt",
   "calls.someone": "Jemand",
   "calls.title": "Anrufe",
-  "calls.tried": "Hat versucht dich anzurufen, {when}",
+  "calls.tried": "Verpasst, {when}",
   "chat.delete_for_all": "Für alle löschen",
   "chat.disappear_on": "Nachrichten verschwinden hier nach {time}",
   "chat.edit": "Bearbeiten",

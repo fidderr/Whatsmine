@@ -282,15 +282,18 @@ select {
   gap: 4px;
   padding: calc(8px + var(--safe-top)) calc(4px + var(--safe-right)) 8px calc(4px + var(--safe-left));
 }
+/* A long title, as some are in German, takes a second line rather than losing its end. */
 .hdr h1 {
   flex: 1;
   min-width: 0;
   font-size: 1.25rem;
   line-height: 1.4;
   font-weight: 500;
-  white-space: nowrap;
+  overflow-wrap: break-word;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
   overflow: hidden;
-  text-overflow: ellipsis;
 }
 .hdr.s {
   background: var(--surface);
