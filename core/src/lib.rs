@@ -33,6 +33,7 @@ pub mod rich;
 pub mod sealing;
 #[cfg(feature = "test-hooks")]
 mod seed;
+pub mod sibling;
 pub mod vault;
 
 use std::collections::HashSet;
@@ -146,6 +147,25 @@ impl Core {
         if let backup::Restored::Words(words) = &restored {
             identity::Identity::from_words(words)?.save(&db)?;
         }
+        if let backup::Restored::Linked(slot) = &restored {
+            // The same person, and a device of its own: its own address, encryption and files.
+            let mut me = identity::Identity::load_or_create(&db)?;
+            me.rotate_network(now_ms());
+            me.save(&db)?;
+            db.forget_encryption();
+            db.forget_file_places();
+            sibling::save_device_state(
+                &db,
+                &sibling::DeviceState {
+                    slot: *slot,
+                    linked: true,
+                    removing: false,
+                },
+            );
+            let mut settings = db.settings();
+            settings.avatar = None;
+            db.save_settings(&settings)?;
+        }
         let me = identity::Identity::load_or_create(&db).context("loading identity")?;
         let key = me.person();
         ensure_main_invite(&db);
@@ -158,6 +178,17 @@ impl Core {
 
         let (cmds, cmd_rx) = mpsc::unbounded_channel();
         let (events, _) = broadcast::channel(1024);
+        let linked = Arc::new(std::sync::atomic::AtomicBool::new(
+            sibling::device_state(&db).linked,
+        ));
+        let echoes = sibling::Echoes::default();
+        runtime.spawn(sibling::watch(
+            db.clone(),
+            events.subscribe(),
+            cmds.clone(),
+            linked.clone(),
+            echoes.clone(),
+        ));
         let media_sink: calls::MediaSink = Arc::new(Mutex::new(None));
         let shared = Shared {
             online: Arc::new(Mutex::new(HashSet::new())),
@@ -174,6 +205,8 @@ impl Core {
             shared.clone(),
             files::media_dir(dir),
             media_sink.clone(),
+            linked,
+            echoes,
             cmd_rx,
         ));
 
@@ -718,6 +751,65 @@ impl Core {
             self.emit(CoreEvent::ContactsChanged);
         }
         me
+    }
+
+    // ---- our other device ----
+
+    pub fn device_state(&self) -> sibling::DeviceState {
+        sibling::device_state(&self.inner.db)
+    }
+
+    /// A code for the other device to come in with. It works for 10 minutes.
+    pub async fn start_link(&self) -> String {
+        let secret = vault::random::<32>();
+        for _ in 0..NET_TRIES {
+            let (done, answer) = tokio::sync::oneshot::channel();
+            self.cmd(Cmd::StartLink { secret, done });
+            let sent = tokio::time::timeout(Duration::from_secs(15), answer).await;
+            if matches!(sent, Ok(Ok(true))) {
+                break;
+            }
+            tokio::time::sleep(NET_WAIT).await;
+        }
+        sibling::link_code(&secret)
+    }
+
+    /// Becomes the other device of whoever made this code, at the next start. What is on this
+    /// device now goes. Errors: `invalid_key`, `code_not_found`, `link_failed`.
+    pub async fn join_device(&self, code: &str) -> anyhow::Result<()> {
+        let Some(secret) = sibling::parse_link_code(code) else {
+            bail!("invalid_key");
+        };
+        let mut last = "link_failed".to_owned();
+        for _ in 0..NET_TRIES {
+            let (reply, answer) = tokio::sync::oneshot::channel();
+            self.cmd(Cmd::JoinDevice { secret, reply });
+            match answer.await {
+                Ok(Ok(())) => return Ok(()),
+                Ok(Err(e)) if e == "no_network" => {
+                    tokio::time::sleep(NET_WAIT).await;
+                }
+                Ok(Err(e)) => {
+                    last = e;
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+        bail!(last)
+    }
+
+    /// The other device stops being you, as soon as it hears. It keeps nothing.
+    pub fn remove_other_device(&self) {
+        let mut state = self.device_state();
+        if !state.linked {
+            return;
+        }
+        state.removing = true;
+        sibling::save_device_state(&self.inner.db, &state);
+        sibling::queue(&self.inner.db, &sibling::SyncEvent::Remove);
+        self.cmd(Cmd::DeviceChanged);
+        self.emit(CoreEvent::ContactsChanged);
     }
 
     /// What we know about how this contact got here.
@@ -1314,7 +1406,14 @@ impl Core {
         if let Some(m) = self.inner.db.message(message_id) {
             self.remove_files(&m);
         }
+        let chat = self.inner.db.message(message_id).map(|m| m.contact_id);
         self.inner.db.delete_message(message_id);
+        if let Some(contact_id) = chat {
+            self.emit(CoreEvent::MessageGone {
+                contact_id,
+                message_id: message_id.to_owned(),
+            });
+        }
         self.emit(CoreEvent::ContactsChanged);
     }
 

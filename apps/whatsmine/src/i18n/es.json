@@ -712,5 +712,20 @@
   "join.asked": "Solicitado. Entrarás en cuanto te dejen.",
   "join.body": "Quien lleva el grupo recibe tu nombre y decide. Tú podrás ver a los miembros.",
   "join.title": "¿Unirte a {name}?",
-  "join.yes": "Pedir unirme"
+  "join.yes": "Pedir unirme",
+  "add.err.link_failed": "No se pudo pasar todo. Mantén ambos dispositivos abiertos e inténtalo de nuevo.",
+  "devices.join": "Vincular con mi otro dispositivo",
+  "devices.join_placeholder": "El código de tu otro dispositivo",
+  "devices.join_text": "En tu otro dispositivo: Ajustes, Tus dispositivos, Vincular un dispositivo. Escanea o pega el código aquí.",
+  "devices.link": "Vincular un dispositivo",
+  "devices.link_files": "Tus chats y contactos van con él. Los archivos se quedan aquí hasta que alguien los pida.",
+  "devices.link_note": "Tu teléfono y tu PC, un solo tú: los mensajes llegan a ambos, también si el otro está apagado.",
+  "devices.link_step_1": "Abre WhatsMine en el otro dispositivo y elige: Ya usé WhatsMine antes.",
+  "devices.link_step_2": "Elige Vincular con mi otro dispositivo y escanea este código.",
+  "devices.other": "Tu otro dispositivo",
+  "devices.other_note": "Vinculado. Los mensajes llegan a ambos",
+  "devices.remove": "Quitar el otro dispositivo",
+  "devices.remove_text": "Borra todo lo tuyo en cuanto esté en línea. Si lo perdiste, restablece también tu dirección, y ten en cuenta que quien lo tenga posee tu clave hasta entonces.",
+  "devices.remove_title": "¿Quitar el otro dispositivo?",
+  "devices.removing": "Se quitará en cuanto esté en línea"
 }

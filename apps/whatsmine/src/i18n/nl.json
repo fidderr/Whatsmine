@@ -712,5 +712,20 @@
   "join.asked": "Gevraagd. Je bent erbij zodra ze je binnenlaten.",
   "join.body": "Wie de groep beheert krijgt je naam en beslist. Jij krijgt de leden te zien.",
   "join.title": "Meedoen met {name}?",
-  "join.yes": "Vragen om mee te doen"
+  "join.yes": "Vragen om mee te doen",
+  "add.err.link_failed": "Niet alles kon worden overgezet. Houd beide apparaten open en probeer het opnieuw.",
+  "devices.join": "Koppelen aan mijn andere apparaat",
+  "devices.join_placeholder": "De code van je andere apparaat",
+  "devices.join_text": "Op je andere apparaat: Instellingen, Je apparaten, Apparaat koppelen. Scan of plak de code hier.",
+  "devices.link": "Apparaat koppelen",
+  "devices.link_files": "Je chats en contacten gaan mee. Bestanden blijven hier tot iemand erom vraagt.",
+  "devices.link_note": "Je telefoon en pc, één jij: berichten komen op beide binnen, ook als de andere uit staat.",
+  "devices.link_step_1": "Open WhatsMine op het andere apparaat en kies: Ik gebruikte WhatsMine al eerder.",
+  "devices.link_step_2": "Kies Koppelen aan mijn andere apparaat, en scan deze code.",
+  "devices.other": "Je andere apparaat",
+  "devices.other_note": "Gekoppeld. Berichten komen op beide binnen",
+  "devices.remove": "Het andere apparaat verwijderen",
+  "devices.remove_text": "Het wist alles van jou zodra het online is. Ben je het kwijt, zet dan ook je adres opnieuw in, en bedenk dat wie het heeft tot die tijd je sleutel heeft.",
+  "devices.remove_title": "Het andere apparaat verwijderen?",
+  "devices.removing": "Wordt verwijderd zodra het online is"
 }

@@ -159,6 +159,14 @@ pub enum Frame {
     ChangeAck {
         id: [u8; 16],
     },
+    /// One change, to our own other device. Sent until confirmed, in order.
+    Sibling {
+        seq: i64,
+        event: Vec<u8>,
+    },
+    SiblingAck {
+        seq: i64,
+    },
 }
 
 /// What the admin signs. A higher `version` replaces a lower one.
@@ -332,6 +340,11 @@ mod tests {
                 group: None,
             },
             Frame::ChangeAck { id: [1; 16] },
+            Frame::Sibling {
+                seq: 4,
+                event: vec![1],
+            },
+            Frame::SiblingAck { seq: 4 },
             Frame::Receipt {
                 kind: ReceiptKind::Read,
                 ids: vec![[1; 16], [2; 16]],

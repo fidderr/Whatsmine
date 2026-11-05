@@ -712,5 +712,20 @@
   "join.asked": "Gefragt. Du bist dabei, sobald sie dich hereinlassen.",
   "join.body": "Wer die Gruppe führt, bekommt deinen Namen und entscheidet. Du siehst die Mitglieder.",
   "join.title": "{name} beitreten?",
-  "join.yes": "Beitritt anfragen"
+  "join.yes": "Beitritt anfragen",
+  "add.err.link_failed": "Es konnte nicht alles übertragen werden. Lass beide Geräte offen und versuche es erneut.",
+  "devices.join": "Mit meinem anderen Gerät verbinden",
+  "devices.join_placeholder": "Der Code von deinem anderen Gerät",
+  "devices.join_text": "Auf deinem anderen Gerät: Einstellungen, Deine Geräte, Gerät verbinden. Scanne oder füge den Code hier ein.",
+  "devices.link": "Gerät verbinden",
+  "devices.link_files": "Chats und Kontakte kommen mit. Dateien bleiben hier, bis jemand sie anfordert.",
+  "devices.link_note": "Dein Telefon und dein PC, ein Du: Nachrichten erscheinen auf beiden, auch wenn das andere aus ist.",
+  "devices.link_step_1": "Öffne WhatsMine auf dem anderen Gerät und wähle: Ich habe WhatsMine schon benutzt.",
+  "devices.link_step_2": "Wähle Mit meinem anderen Gerät verbinden und scanne diesen Code.",
+  "devices.other": "Dein anderes Gerät",
+  "devices.other_note": "Verbunden. Nachrichten erscheinen auf beiden",
+  "devices.remove": "Das andere Gerät entfernen",
+  "devices.remove_text": "Es löscht alles von dir, sobald es online ist. Hast du es verloren, setze auch deine Adresse zurück, und bedenke: Wer es hat, hat bis dahin deinen Schlüssel.",
+  "devices.remove_title": "Das andere Gerät entfernen?",
+  "devices.removing": "Wird entfernt, sobald es online ist"
 }

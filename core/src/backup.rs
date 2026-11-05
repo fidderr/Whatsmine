@@ -24,6 +24,8 @@ struct Contents {
 struct Pending {
     words: String,
     backup: Option<Vec<u8>>,
+    /// Coming in as someone's other device: what it sent.
+    linked: Option<Vec<u8>>,
 }
 
 /// What came back at this start.
@@ -33,6 +35,8 @@ pub enum Restored {
     Words(String),
     /// Everything that was in the file.
     Backup,
+    /// This is now someone's other device, in this slot.
+    Linked(u8),
 }
 
 pub fn seal(me: &Identity, vault_key: &[u8; 32], db: Vec<u8>) -> anyhow::Result<Vec<u8>> {
@@ -66,10 +70,36 @@ pub fn leave_for_next_start(
     {
         anyhow::bail!("wrong_backup");
     }
-    let plain = postcard::to_stdvec(&Pending {
-        words: words.to_owned(),
-        backup,
-    })?;
+    leave(
+        dir,
+        vault,
+        &Pending {
+            words: words.to_owned(),
+            backup,
+            linked: None,
+        },
+    )
+}
+
+/// What the other device sent, for the next start.
+pub fn leave_linked_for_next_start(
+    dir: &Path,
+    vault: &Vault,
+    bundle: Vec<u8>,
+) -> anyhow::Result<()> {
+    leave(
+        dir,
+        vault,
+        &Pending {
+            words: String::new(),
+            backup: None,
+            linked: Some(bundle),
+        },
+    )
+}
+
+fn leave(dir: &Path, vault: &Vault, pending: &Pending) -> anyhow::Result<()> {
+    let plain = postcard::to_stdvec(pending)?;
     let unfinished = dir.join("restore.tmp");
     std::fs::write(&unfinished, vault.seal(&plain))?;
     std::fs::rename(unfinished, dir.join(PENDING))?;
@@ -92,6 +122,12 @@ pub fn apply_if_left(dir: &Path, vault: &Vault) -> anyhow::Result<Restored> {
     };
     for name in ["", "-wal", "-shm", "-journal"] {
         let _ = std::fs::remove_file(dir.join(format!("{}{name}", crate::DB_FILE)));
+    }
+    if let Some(bytes) = left.linked {
+        let bundle: crate::sibling::Bundle = postcard::from_bytes(&bytes)?;
+        std::fs::write(dir.join(crate::DB_FILE), bundle.db)?;
+        Vault::replace_key(dir, &bundle.vault_key)?;
+        return Ok(Restored::Linked(bundle.slot));
     }
     let Some(file) = left.backup else {
         return Ok(Restored::Words(left.words));

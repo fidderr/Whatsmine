@@ -712,5 +712,20 @@
   "join.asked": "Demandé. Vous entrez dès qu'on vous accepte.",
   "join.body": "Qui gère le groupe reçoit votre nom et décide. Vous verrez les membres.",
   "join.title": "Rejoindre {name} ?",
-  "join.yes": "Demander à rejoindre"
+  "join.yes": "Demander à rejoindre",
+  "add.err.link_failed": "Tout n'a pas pu être transféré. Gardez les deux appareils ouverts et réessayez.",
+  "devices.join": "Lier à mon autre appareil",
+  "devices.join_placeholder": "Le code de votre autre appareil",
+  "devices.join_text": "Sur votre autre appareil : Réglages, Vos appareils, Lier un appareil. Scannez ou collez son code ici.",
+  "devices.link": "Lier un appareil",
+  "devices.link_files": "Vos chats et contacts suivent. Les fichiers restent ici jusqu'à ce qu'on les demande.",
+  "devices.link_note": "Votre téléphone et votre PC, un seul vous : les messages arrivent sur les deux, même si l'autre est éteint.",
+  "devices.link_step_1": "Ouvrez WhatsMine sur l'autre appareil et choisissez : J'ai déjà utilisé WhatsMine.",
+  "devices.link_step_2": "Choisissez Lier à mon autre appareil et scannez ce code.",
+  "devices.other": "Votre autre appareil",
+  "devices.other_note": "Lié. Les messages arrivent sur les deux",
+  "devices.remove": "Retirer l'autre appareil",
+  "devices.remove_text": "Il efface tout ce qui est à vous dès qu'il est en ligne. Si vous l'avez perdu, réinitialisez aussi votre adresse, et sachez que son détenteur a votre clé jusque-là.",
+  "devices.remove_title": "Retirer l'autre appareil ?",
+  "devices.removing": "Sera retiré dès qu'il sera en ligne"
 }

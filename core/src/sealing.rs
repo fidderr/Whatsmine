@@ -137,6 +137,11 @@ impl Sealing {
         (curve, one_time.to_bytes())
     }
 
+    /// Our long-lived key on this device.
+    pub fn my_curve(&self) -> [u8; 32] {
+        self.account.borrow().curve25519_key().to_bytes()
+    }
+
     pub fn has_session(&self, person: &str) -> bool {
         self.with_session(person, |_| ()).is_some()
     }

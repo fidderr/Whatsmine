@@ -108,29 +108,91 @@ pub fn open(secret: &[u8; 32], sealed: &[u8], person: &PublicKey) -> Option<Loca
     Some(signed.record)
 }
 
-/// Publishes under today's key.
-pub async fn publish(records: &Records, secret: &[u8; 32], sealed: &[u8], now: Millis) -> bool {
-    let seed = records::seed(PURPOSE, secret, records::day_of(now), 0);
+/// Publishes under today's key. Each device of a person has its own place: `slot`.
+pub async fn publish(
+    records: &Records,
+    secret: &[u8; 32],
+    sealed: &[u8],
+    now: Millis,
+    slot: u8,
+) -> bool {
+    let seed = records::seed(PURPOSE, secret, records::day_of(now), slot);
     records.put(&seed, sealed).await
 }
 
 /// Looks under today's key and yesterday's: someone asleep since before midnight is still there.
+async fn lookup_slot(
+    records: Records,
+    secret: [u8; 32],
+    person: PublicKey,
+    now: Millis,
+    slot: u8,
+) -> Option<LocationRecord> {
+    let today = records::day_of(now);
+    for day in [today, today.saturating_sub(1)] {
+        let seed = records::seed(PURPOSE, &secret, day, slot);
+        if let Some(sealed) = records.get(&seed).await
+            && let Some(record) = open(&secret, &sealed, &person)
+        {
+            return Some(record);
+        }
+    }
+    None
+}
+
+/// Where someone is: on whichever of their devices was around last.
 pub async fn lookup(
     records: &Records,
     secret: &[u8; 32],
     person: &PublicKey,
     now: Millis,
 ) -> Option<LocationRecord> {
-    let today = records::day_of(now);
-    for day in [today, today.saturating_sub(1)] {
-        let seed = records::seed(PURPOSE, secret, day, 0);
-        if let Some(sealed) = records.get(&seed).await
-            && let Some(record) = open(secret, &sealed, person)
-        {
-            return Some(record);
+    lookup_skipping(records, secret, person, now, None).await
+}
+
+/// The same, except for one device: for finding our own other one.
+pub async fn lookup_skipping(
+    records: &Records,
+    secret: &[u8; 32],
+    person: &PublicKey,
+    now: Millis,
+    skip: Option<u8>,
+) -> Option<LocationRecord> {
+    let mut looking = tokio::task::JoinSet::new();
+    for slot in 0..crate::sibling::DEVICES {
+        if Some(slot) != skip {
+            looking.spawn(lookup_slot(records.clone(), *secret, *person, now, slot));
         }
     }
-    None
+    let mut best: Option<LocationRecord> = None;
+    let newest = |found: Option<LocationRecord>, best: &mut Option<LocationRecord>| {
+        if let Some(found) = found
+            && best.as_ref().is_none_or(|b| b.at < found.at)
+        {
+            *best = Some(found);
+        }
+    };
+    // Most people have one device: an empty place must not hold up the one that is filled.
+    while let Some(done) = looking.join_next().await {
+        if let Ok(found) = done {
+            newest(found, &mut best);
+            if best.is_some() {
+                break;
+            }
+        }
+    }
+    if best.is_some() {
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(300), async {
+            while let Some(done) = looking.join_next().await {
+                if let Ok(found) = done {
+                    newest(found, &mut best);
+                }
+            }
+        })
+        .await;
+    }
+    looking.abort_all();
+    best
 }
 
 /// The secret a group's members find each other with, one per member.
@@ -200,12 +262,46 @@ mod tests {
         let day = 24 * 3600 * 1000;
         let now = 100 * day;
         let sealed = seal(&secret, record(&person, 1), &person);
-        assert!(publish(&records, &secret, &sealed, now).await);
+        assert!(publish(&records, &secret, &sealed, now, 0).await);
         let public = person.public();
         let found = |at| lookup(&records, &secret, &public, at);
         assert!(found(now).await.is_some());
         assert!(found(now + day).await.is_some());
         assert!(found(now + 2 * day).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn the_device_around_last_is_the_one_found() {
+        let records = Records::Local(LocalRecords::default());
+        let (person, secret) = (SecretKey::generate(), random());
+        let now = 100 * 24 * 3600 * 1000;
+        let mut older = record(&person, 1);
+        older.at = 5;
+        let mut newer = record(&person, 2);
+        newer.at = 6;
+        publish(
+            &records,
+            &secret,
+            &seal(&secret, older.clone(), &person),
+            now,
+            0,
+        )
+        .await;
+        publish(
+            &records,
+            &secret,
+            &seal(&secret, newer.clone(), &person),
+            now,
+            1,
+        )
+        .await;
+        let public = person.public();
+        assert_eq!(lookup(&records, &secret, &public, now).await, Some(newer));
+        // Our own other device: not ourselves.
+        assert_eq!(
+            lookup_skipping(&records, &secret, &public, now, Some(1)).await,
+            Some(older)
+        );
     }
 
     #[test]

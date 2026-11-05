@@ -424,6 +424,14 @@ pub enum CoreEvent {
         contact_id: String,
         message_id: String,
     },
+    /// Read on our other device.
+    ReadElsewhere {
+        contact_id: String,
+    },
+    /// Our other device changed something about how we are shown.
+    SettingsChanged,
+    /// The other device said this one is to stop being you. Nothing is left here.
+    RemovedFromPerson,
     /// You asked to be reminded of this message, now.
     Reminder {
         message_id: String,

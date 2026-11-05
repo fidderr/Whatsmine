@@ -122,6 +122,14 @@ impl Identity {
         self.network_since = now;
     }
 
+    /// Takes over the location secret of our other device.
+    pub fn follow_location(&mut self, secret: [u8; 32], now: Millis) {
+        if self.location != secret {
+            self.rotate_location(now);
+            self.location = secret;
+        }
+    }
+
     /// A new location secret. The old one is still looked at for a while, never published to.
     pub fn rotate_location(&mut self, now: Millis) {
         self.old_locations

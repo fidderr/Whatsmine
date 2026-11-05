@@ -69,6 +69,10 @@ CREATE TABLE IF NOT EXISTS changes_out (
     at       INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS changes_by_peer ON changes_out(peer, seq);
+CREATE TABLE IF NOT EXISTS sibling_out (
+    seq   INTEGER PRIMARY KEY AUTOINCREMENT,
+    event BLOB NOT NULL
+);
 CREATE TABLE IF NOT EXISTS reminders (
     message_id   TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
     at           INTEGER NOT NULL,
@@ -224,7 +228,7 @@ impl Database {
     /// Deletes every row and compacts the file so nothing lingers on disk.
     pub fn wipe(&self) -> rusqlite::Result<()> {
         self.lock().execute_batch(
-            "DELETE FROM changes_out; DELETE FROM reminders; DELETE FROM chat_prefs; DELETE FROM calls; DELETE FROM tombstones; DELETE FROM secrets; DELETE FROM olm_sessions; DELETE FROM contact_keys; DELETE FROM invites; DELETE FROM seen_ids; DELETE FROM drafts; DELETE FROM group_acks; DELETE FROM messages; DELETE FROM group_members; DELETE FROM groups; DELETE FROM contacts;
+            "DELETE FROM sibling_out; DELETE FROM changes_out; DELETE FROM reminders; DELETE FROM chat_prefs; DELETE FROM calls; DELETE FROM tombstones; DELETE FROM secrets; DELETE FROM olm_sessions; DELETE FROM contact_keys; DELETE FROM invites; DELETE FROM seen_ids; DELETE FROM drafts; DELETE FROM group_acks; DELETE FROM messages; DELETE FROM group_members; DELETE FROM groups; DELETE FROM contacts;
              DELETE FROM settings; PRAGMA wal_checkpoint(TRUNCATE); VACUUM;",
         )
     }
@@ -607,6 +611,67 @@ impl Database {
                 |r| r.get(0),
             )
             .unwrap_or(false)
+    }
+
+    pub fn queue_sync(&self, event: &[u8]) {
+        let _ = self.lock().execute(
+            "INSERT INTO sibling_out (event) VALUES (?1)",
+            params![self.vault.seal(event)],
+        );
+    }
+
+    /// What the other device has not confirmed, from after this one on, oldest first.
+    pub fn sync_owed_after(&self, after: i64, most: u32) -> Vec<(i64, Vec<u8>)> {
+        let conn = self.lock();
+        let Ok(mut stmt) =
+            conn.prepare("SELECT seq, event FROM sibling_out WHERE seq > ?1 ORDER BY seq LIMIT ?2")
+        else {
+            return Vec::new();
+        };
+        stmt.query_map(params![after, most], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?))
+        })
+        .map(|rows| {
+            rows.filter_map(Result::ok)
+                .filter_map(|(seq, sealed)| Some((seq, self.vault.open(&sealed)?)))
+                .collect()
+        })
+        .unwrap_or_default()
+    }
+
+    pub fn sync_is_owed(&self) -> bool {
+        self.lock()
+            .query_row("SELECT EXISTS(SELECT 1 FROM sibling_out)", [], |r| r.get(0))
+            .unwrap_or(false)
+    }
+
+    pub fn sync_arrived(&self, seq: i64) {
+        let _ = self
+            .lock()
+            .execute("DELETE FROM sibling_out WHERE seq = ?1", params![seq]);
+    }
+
+    /// A new device starts its own encryption: sessions cannot be in two places.
+    pub fn forget_encryption(&self) {
+        let conn = self.lock();
+        let _ = conn.execute("DELETE FROM olm_sessions", []);
+        let _ = conn.execute("DELETE FROM secrets WHERE name = 'olm_account'", []);
+        let _ = conn.execute("DELETE FROM sibling_out", []);
+    }
+
+    /// The files of the device this was copied from are not here.
+    pub fn forget_file_places(&self) {
+        let with_files = self.messages_where("attachment IS NOT NULL", params![]);
+        for mut m in with_files {
+            if let Some(a) = &mut m.attachment {
+                a.path = None;
+                if a.state == TransferState::Done {
+                    a.state = TransferState::Waiting;
+                }
+            }
+            self.update_message(&m);
+        }
+        let _ = self.lock().execute("UPDATE contacts SET avatar = NULL", []);
     }
 
     /// One change for each of `peers`, to be sent until confirmed.

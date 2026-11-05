@@ -353,6 +353,20 @@ fn Main(core: AppCore) -> Element {
                         *rev.write() += 1;
                     }
                     Ok(CoreEvent::Net(status)) => net.set(status),
+                    Ok(CoreEvent::ReadElsewhere { contact_id }) => {
+                        crate::notify::mark_read(&contact_id);
+                        *rev.write() += 1;
+                    }
+                    Ok(CoreEvent::SettingsChanged) => {
+                        let mut s = settings;
+                        s.set(core.settings());
+                    }
+                    // Nothing of this person is left here: the next start is a new beginning.
+                    Ok(CoreEvent::RemovedFromPerson) => std::process::exit(0),
+                    Ok(CoreEvent::MessageGone { .. }) => {
+                        *msg_rev.write() += 1;
+                        *rev.write() += 1;
+                    }
                     Ok(_) => *rev.write() += 1,
                     Err(RecvError::Lagged(_)) => {
                         *rev.write() += 1;

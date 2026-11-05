@@ -1099,6 +1099,11 @@ pub fn DevicesScreen() -> Element {
     let mut show_words = use_signal(|| false);
     let mut restoring = use_signal(|| false);
     let mut busy = use_signal(|| false);
+    let mut linking = use_signal(|| false);
+    let mut confirm_remove = use_signal(|| false);
+    let rev = use_context::<Rev>().0;
+    let _ = rev();
+    let device = core.device_state();
     let s = settings();
     let last = if s.last_backup_at > 0 {
         t(&tr, "devices.last_backup").replace("{when}", &crate::fmt::when(&tr, s.last_backup_at))
@@ -1115,6 +1120,32 @@ pub fn DevicesScreen() -> Element {
                         title: t(&tr, "devices.this"),
                         note: t(&tr, "devices.active_now"),
                     }
+                    if device.linked {
+                        Row {
+                            icon: if cfg!(target_os = "android") { IconName::Monitor } else { IconName::Device },
+                            title: t(&tr, "devices.other"),
+                            note: t(&tr, if device.removing { "devices.removing" } else { "devices.other_note" }),
+                        }
+                    }
+                }
+                if device.linked {
+                    if !device.removing {
+                        button {
+                            class: "btn",
+                            "data-t": "remove-device",
+                            onclick: move |_| confirm_remove.set(true),
+                            "{t(&tr, \"devices.remove\")}"
+                        }
+                    }
+                } else {
+                    button {
+                        class: "btn main",
+                        "data-t": "link-device",
+                        onclick: move |_| linking.set(true),
+                        Icon { name: IconName::Qr, size: 20 }
+                        "{t(&tr, \"devices.link\")}"
+                    }
+                    p { class: "note", "{t(&tr, \"devices.link_note\")}" }
                 }
                 h2 { class: "gt", "{t(&tr, \"devices.lost\")}" }
                 div { class: "group",
@@ -1181,6 +1212,171 @@ pub fn DevicesScreen() -> Element {
             if restoring() {
                 RestoreSheet { on_close: move |_| restoring.set(false) }
             }
+            if linking() {
+                LinkSheet { on_close: move |_| linking.set(false) }
+            }
+            if confirm_remove() {
+                ConfirmDialog {
+                    title: t(&tr, "devices.remove_title"),
+                    message: t(&tr, "devices.remove_text"),
+                    confirm_label: t(&tr, "devices.remove"),
+                    on_confirm: {
+                        let core = core.clone();
+                        move |_| {
+                            core.remove_other_device();
+                            confirm_remove.set(false);
+                        }
+                    },
+                    on_cancel: move |_| confirm_remove.set(false),
+                }
+            }
+        }
+    }
+}
+
+/// The code for the other device. It closes by itself once that one has everything.
+#[component]
+fn LinkSheet(on_close: EventHandler<()>) -> Element {
+    let tr = use_tr();
+    let core = use_core();
+    let rev = use_context::<Rev>().0;
+    let mut toast_sig = use_context::<ToastSig>();
+    let code = {
+        let core = core.clone();
+        use_resource(move || {
+            let core = core.clone();
+            async move { core.start_link().await }
+        })
+    };
+    let _ = rev();
+    if core.device_state().linked {
+        on_close.call(());
+        return rsx! {};
+    }
+    let shown = code.read().clone();
+    rsx! {
+        Sheet { on_close: move |_| on_close.call(()), title: t(&tr, "devices.link"), tag: "link-sheet",
+            ol { class: "steps", style: "font-size:1rem;gap:8px",
+                li { b { style: "width:28px;height:28px;font-size:0.875rem", "1" } span { "{t(&tr, \"devices.link_step_1\")}" } }
+                li { b { style: "width:28px;height:28px;font-size:0.875rem", "2" } span { "{t(&tr, \"devices.link_step_2\")}" } }
+            }
+            if let Some(text) = shown {
+                div { style: "align-self:center",
+                    crate::components::QrCode { data: text.clone() }
+                }
+                button {
+                    class: "btn",
+                    "data-t": "copy-link-code",
+                    onclick: move |_| {
+                        js::copy_text(&text);
+                        toast(&mut toast_sig, t(&tr, "common.copied"), ToastLevel::Info);
+                    },
+                    Icon { name: IconName::Copy, size: 20 }
+                    "{t(&tr, \"common.copy\")}"
+                }
+            } else {
+                p { class: "note", "{t(&tr, \"add.looking\")}" }
+            }
+            p { class: "note", "{t(&tr, \"devices.link_files\")}" }
+        }
+    }
+}
+
+/// Becoming the other device: the code from the first one.
+#[component]
+pub fn JoinDeviceSheet(on_close: EventHandler<()>) -> Element {
+    let tr = use_tr();
+    let core = use_core();
+    let invite = use_context::<crate::links::InviteSig>();
+    let mut text = use_signal(String::new);
+    let mut error = use_signal(|| None::<String>);
+    let mut busy = use_signal(|| false);
+    let mut done = use_signal(|| false);
+    let mut scanning = use_signal(|| false);
+    let _ = invite;
+    if done() {
+        return rsx! {
+            Sheet { on_close: move |_| quit(), title: t(&tr, "restore.done_title"), tag: "restore-done",
+                p { class: "note", "{t(&tr, \"restore.done_text\")}" }
+                button { class: "btn main", "data-t": "restore-close", onclick: move |_| quit(),
+                    "{t(&tr, \"restore.close\")}"
+                }
+            }
+        };
+    }
+    rsx! {
+        Sheet { on_close: move |_| on_close.call(()), title: t(&tr, "devices.join"), tag: "join-device-sheet",
+            p { class: "note", "{t(&tr, \"devices.join_text\")}" }
+            if crate::components::scan::NATIVE_SCANNER {
+                button {
+                    class: "btn",
+                    "data-t": "join-scan",
+                    onclick: move |_| {
+                        spawn(async move {
+                            if let Some(code) = crate::components::scan::scan_native().await {
+                                text.set(code);
+                            }
+                        });
+                    },
+                    Icon { name: IconName::Camera, size: 20 }
+                    "{t(&tr, \"add.scan\")}"
+                }
+            } else {
+                button {
+                    class: "btn",
+                    "data-t": "join-scan",
+                    onclick: move |_| scanning.set(true),
+                    Icon { name: IconName::Camera, size: 20 }
+                    "{t(&tr, \"add.scan\")}"
+                }
+            }
+            input {
+                r#type: "text",
+                "data-t": "join-code",
+                placeholder: "{t(&tr, \"devices.join_placeholder\")}",
+                autocomplete: "off",
+                spellcheck: "false",
+                value: "{text}",
+                oninput: move |e| {
+                    text.set(e.value());
+                    error.set(None);
+                },
+            }
+            if let Some(e) = error() {
+                p { class: "field-error", "{e}" }
+            }
+            p { class: "note", "{t(&tr, \"restore.replaces\")}" }
+            button {
+                class: "btn main",
+                "data-t": "join-go",
+                disabled: text().trim().is_empty() || busy(),
+                onclick: move |_| {
+                    let code = text.peek().trim().to_owned();
+                    let core = core.clone();
+                    busy.set(true);
+                    spawn(async move {
+                        match core.join_device(&code).await {
+                            Ok(()) => done.set(true),
+                            Err(e) => error.set(Some(t(&tr, &format!("add.err.{e}")))),
+                        }
+                        busy.set(false);
+                    });
+                },
+                if busy() {
+                    "{t(&tr, \"add.looking\")}"
+                } else {
+                    "{t(&tr, \"devices.join\")}"
+                }
+            }
+        }
+        if scanning() {
+            crate::components::scan::ScanOverlay {
+                on_code: move |code: String| {
+                    scanning.set(false);
+                    text.set(code);
+                },
+                on_close: move |_| scanning.set(false),
+            }
         }
     }
 }
@@ -1194,6 +1390,7 @@ pub fn RestoreSheet(on_close: EventHandler<()>) -> Element {
     let mut file: Signal<Option<Picked>> = use_signal(|| None);
     let mut error = use_signal(|| None::<String>);
     let mut done = use_signal(|| false);
+    let mut join = use_signal(|| false);
     if done() {
         return rsx! {
             Sheet { on_close: move |_| quit(), title: t(&tr, "restore.done_title"), tag: "restore-done",
@@ -1204,11 +1401,21 @@ pub fn RestoreSheet(on_close: EventHandler<()>) -> Element {
             }
         };
     }
+    if join() {
+        return rsx! { JoinDeviceSheet { on_close: move |_| join.set(false) } };
+    }
     let file_label = file()
         .map(|f| f.name)
         .unwrap_or_else(|| t(&tr, "restore.pick"));
     rsx! {
         Sheet { on_close: move |_| on_close.call(()), title: t(&tr, "devices.restore"), tag: "restore-sheet",
+            button {
+                class: "btn",
+                "data-t": "use-other-device",
+                onclick: move |_| join.set(true),
+                Icon { name: IconName::Device, size: 20 }
+                "{t(&tr, \"devices.join\")}"
+            }
             p { class: "note", "{t(&tr, \"restore.text\")}" }
             label { class: "field",
                 span { class: "gt", "{t(&tr, \"devices.words\")}" }

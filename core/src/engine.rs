@@ -14,6 +14,7 @@
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -44,6 +45,7 @@ use crate::requests::{self, Request};
 use crate::retry;
 use crate::rich::{MessageChange, MessageExtra};
 use crate::sealing::{OpenError, Sealing};
+use crate::sibling::{DeviceState, SyncEvent};
 
 mod call;
 mod group;
@@ -67,6 +69,16 @@ const AWAKE_FOR: Duration = Duration::from_secs(30);
 const LOOK_AROUND_DIALS: usize = 8;
 /// A copy of a message can be under way for about as long as the sender keeps trying, at most.
 const SEEN_KEPT_MS: i64 = 400 * 24 * 3600 * 1000;
+/// How a connection ends when someone's other device takes over, and how long to leave that be.
+/// Sending something goes first anyway.
+const MOVED_ON: u32 = 4;
+const MOVED_ON_WAIT: Duration = Duration::from_secs(60);
+/// How long a code to link a device works, and how long the copying may take.
+const LINK_LASTS: Duration = Duration::from_secs(600);
+/// The most that can come over when linking: the database, not the files.
+const LINK_MOST: usize = 2 * 1024 * 1024 * 1024;
+/// How many changes can be under way to the other device at a time.
+const SYNC_WINDOW: u32 = 32;
 /// Who was away this long does not need to hear about an old reaction.
 const CHANGES_KEPT_MS: i64 = 30 * 24 * 3600 * 1000;
 /// Republish where we are at least this often, also if nothing changed.
@@ -119,6 +131,20 @@ pub(crate) enum Cmd {
     Report(tokio::sync::oneshot::Sender<crate::model::ConnectionReport>),
     /// Something changed for these people: send it if they are connected, get to them otherwise.
     SendChanges(Vec<PublicKey>),
+    /// There is something for our other device.
+    SyncOwed,
+    /// The device state on disk changed.
+    DeviceChanged,
+    /// A link code is out: wait for the other device.
+    StartLink {
+        secret: [u8; 32],
+        done: tokio::sync::oneshot::Sender<bool>,
+    },
+    /// Become the other device of whoever made this code.
+    JoinDevice {
+        secret: [u8; 32],
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
     /// A scheduled message, reminder or disappearing message was added or removed.
     TimersChanged,
     /// Leave this invitation under this code.
@@ -200,6 +226,10 @@ pub(crate) enum Cmd {
 
 /// Events from the connection tasks back into the engine.
 enum Internal {
+    /// Someone came in to become our other device.
+    LinkConn(Connection),
+    /// They have everything now.
+    LinkDone,
     /// A connection, before anyone has said who they are.
     Connected {
         conn: Connection,
@@ -234,6 +264,8 @@ enum Internal {
         sid: u64,
         /// It broke by itself, as opposed to either side closing it.
         broken: bool,
+        /// Someone's other device took over.
+        moved_on: bool,
     },
     Net(NetStatus),
     Progress {
@@ -356,6 +388,17 @@ pub(crate) struct Engine {
     /// How often a download failed its hash check (retried once).
     corrupt_retries: HashMap<String, u8>,
     call: Option<CallState>,
+    /// What this device is, next to another one of the same person.
+    this_device: DeviceState,
+    echoes: crate::sibling::Echoes,
+    linked: Arc<AtomicBool>,
+    /// Where a copy for the other device can be made.
+    link_dir: PathBuf,
+    /// A link code that is out, until when.
+    link_wait: Option<([u8; 32], Instant)>,
+    /// The last change sent to the other device, and how many are unconfirmed.
+    sync_sent: i64,
+    sync_in_flight: u32,
     /// When something is due, as far as known.
     next_timer: Option<crate::model::Millis>,
     timers_dirty: bool,
@@ -379,8 +422,12 @@ impl Engine {
         shared: Shared,
         media: PathBuf,
         media_sink: MediaSink,
+        linked: Arc<AtomicBool>,
+        echoes: crate::sibling::Echoes,
         mut cmds: mpsc::UnboundedReceiver<Cmd>,
     ) {
+        let this_device = crate::sibling::device_state(&db);
+        let link_dir = media.parent().map(PathBuf::from).unwrap_or_default();
         let (tx, mut rx) = mpsc::unbounded_channel();
         let key = identity.person();
         let me = key.public();
@@ -433,6 +480,13 @@ impl Engine {
             next_check: None,
             wanted: HashSet::new(),
             wanted_dirty: true,
+            this_device,
+            echoes,
+            linked,
+            link_dir,
+            link_wait: None,
+            sync_sent: 0,
+            sync_in_flight: 0,
             next_timer: None,
             timers_dirty: true,
             chat_open: None,
@@ -687,6 +741,9 @@ impl Engine {
             wanted.extend(c.members.iter().copied());
         }
         wanted.remove(&self.me);
+        if self.this_device.linked && self.db.sync_is_owed() {
+            wanted.insert(self.me);
+        }
         self.wanted = wanted;
     }
 
@@ -695,6 +752,9 @@ impl Engine {
         let in_groups: HashSet<String> = self.db.group_peer_ids().into_iter().collect();
         self.look_around.clear();
         self.tried_again.clear();
+        if self.this_device.linked {
+            self.look_around.push_back(self.me);
+        }
         for c in self.db.contacts_in(&[
             ContactState::Accepted,
             ContactState::PendingOut,
@@ -853,6 +913,404 @@ impl Engine {
             let _ = std::fs::remove_file(path);
         }
         let _ = std::fs::remove_file(files::partial_path(&self.media, &m.id));
+    }
+
+    // ---- our other device ----
+
+    /// What fits in the window goes: what is under way is not sent twice.
+    fn flush_sync(&mut self) {
+        if !self.this_device.linked || !self.sessions.contains_key(&self.me) {
+            return;
+        }
+        let room = SYNC_WINDOW.saturating_sub(self.sync_in_flight);
+        if room == 0 {
+            return;
+        }
+        for (seq, event) in self.db.sync_owed_after(self.sync_sent, room) {
+            if self.send(self.me, Frame::Sibling { seq, event }) {
+                self.sync_sent = seq;
+                self.sync_in_flight += 1;
+            }
+        }
+    }
+
+    /// A new connection, or a new encrypted session: what was under way is gone.
+    fn sync_again(&mut self) {
+        self.sync_sent = 0;
+        self.sync_in_flight = 0;
+        self.flush_sync();
+    }
+
+    fn on_sibling_frame(&mut self, frame: Frame) {
+        match frame {
+            Frame::Sibling { seq, event } => {
+                if let Ok(event) = serde_json::from_slice::<SyncEvent>(&event) {
+                    // Whatever this makes happen here came from there: it does not go back.
+                    self.echoes.expect(&event);
+                    self.apply_sync(event);
+                }
+                self.send(self.me, Frame::SiblingAck { seq });
+            }
+            Frame::SiblingAck { seq } => {
+                self.db.sync_arrived(seq);
+                self.wanted_dirty = true;
+                if self.this_device.removing && !self.db.sync_is_owed() {
+                    self.this_device.removing = false;
+                    self.set_linked(false);
+                }
+                self.sync_in_flight = self.sync_in_flight.saturating_sub(1);
+                self.flush_sync();
+            }
+            _ => {}
+        }
+    }
+
+    fn set_linked(&mut self, linked: bool) {
+        self.this_device.linked = linked;
+        self.linked
+            .store(linked, std::sync::atomic::Ordering::Relaxed);
+        crate::sibling::save_device_state(&self.db, &self.this_device);
+        self.wanted_dirty = true;
+        emit(&self.events, CoreEvent::ContactsChanged);
+    }
+
+    /// What the other device did. Whatever is the same already changes nothing and says nothing.
+    fn apply_sync(&mut self, event: SyncEvent) {
+        match event {
+            SyncEvent::Message(m) => self.apply_message(*m),
+            SyncEvent::Status { chat, id, status } => {
+                if self.db.advance_status(&chat, &id, status) {
+                    emit(
+                        &self.events,
+                        CoreEvent::MessageStatus {
+                            contact_id: chat,
+                            message_id: id,
+                            status,
+                        },
+                    );
+                }
+            }
+            SyncEvent::Gone { chat, id } => {
+                if let Some(m) = self.db.message(&id) {
+                    self.remove_message_files(&m);
+                    self.db.delete_message(&id);
+                    emit(
+                        &self.events,
+                        CoreEvent::MessageGone {
+                            contact_id: chat,
+                            message_id: id,
+                        },
+                    );
+                    emit(&self.events, CoreEvent::ContactsChanged);
+                }
+            }
+            SyncEvent::Read { chat } => {
+                if !self.db.mark_read(&chat).is_empty() {
+                    emit(&self.events, CoreEvent::ReadElsewhere { contact_id: chat });
+                    emit(&self.events, CoreEvent::ContactsChanged);
+                }
+            }
+            SyncEvent::Contact(c) => self.apply_contact(*c),
+            SyncEvent::ContactGone { id } => {
+                if self.db.contact(&id).is_some() {
+                    self.db.delete_contact(&id);
+                    if let Some(peer) = crate::identity::parse_key(&id)
+                        && let Some(s) = self.sessions.remove(&peer)
+                    {
+                        s.conn.close(0u32.into(), b"gone");
+                    }
+                    emit(&self.events, CoreEvent::ContactsChanged);
+                }
+            }
+            SyncEvent::Group {
+                state,
+                sig,
+                active,
+                secret,
+            } => {
+                let me = key_to_string(&self.me);
+                let newer = self
+                    .db
+                    .group(&state.id)
+                    .is_none_or(|(cur, _, was)| cur.version < state.version || was != active);
+                if newer && self.db.save_group(&state, &sig, active, &[], &me).is_ok() {
+                    if let Some(secret) = secret {
+                        let _ = self.db.set_secret(&groups::secret_name(&state.id), &secret);
+                    }
+                    self.published = None;
+                    self.wanted_dirty = true;
+                    emit(&self.events, CoreEvent::ContactsChanged);
+                }
+            }
+            SyncEvent::Invites(invites) => {
+                if self.db.invites() != invites {
+                    self.db.delete_invites();
+                    for invite in &invites {
+                        self.db.save_invite(invite);
+                    }
+                    emit(&self.events, CoreEvent::ContactsChanged);
+                }
+            }
+            SyncEvent::Location(secret) => {
+                if self.identity.location != secret {
+                    self.identity.follow_location(secret, now_ms());
+                    let _ = self.identity.save(&self.db);
+                    self.published = None;
+                    emit(&self.events, CoreEvent::ContactsChanged);
+                }
+            }
+            SyncEvent::Name(name) => {
+                let mut s = self.db.settings();
+                if s.display_name != name {
+                    s.display_name = name;
+                    let _ = self.db.save_settings(&s);
+                    emit(&self.events, CoreEvent::SettingsChanged);
+                }
+            }
+            SyncEvent::Folders(folders) => {
+                if let Ok(json) = serde_json::to_vec(&folders) {
+                    let _ = self.db.set_secret("folders", &json);
+                    emit(&self.events, CoreEvent::ContactsChanged);
+                }
+            }
+            SyncEvent::Remove => {
+                self.this_device.linked = false;
+                self.linked
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                let _ = self.db.wipe();
+                emit(&self.events, CoreEvent::RemovedFromPerson);
+                emit(&self.events, CoreEvent::ContactsChanged);
+            }
+        }
+    }
+
+    fn apply_message(&mut self, mut m: Message) {
+        match self.db.message(&m.id) {
+            None => {
+                if let Some(a) = &mut m.attachment {
+                    // The file is on the other device, and comes when someone asks for it.
+                    a.path = None;
+                    a.state = TransferState::Waiting;
+                    // Offered by whoever has it, not by us.
+                    if m.outgoing && m.status < MessageStatus::Delivered {
+                        m.status = MessageStatus::Delivered;
+                    }
+                }
+                if self.db.insert_message(&m).unwrap_or(false) {
+                    self.timers_dirty = true;
+                    self.wanted_dirty = true;
+                    self.echoes.expect(&SyncEvent::Message(Box::new(
+                        crate::sibling::without_path(&m),
+                    )));
+                    emit(&self.events, CoreEvent::MessageAdded(m));
+                    emit(&self.events, CoreEvent::ContactsChanged);
+                }
+            }
+            Some(here) => {
+                // What is on this device stays: its copy of a file, its own path.
+                let mut next = here.clone();
+                next.body = m.body;
+                next.extra = m.extra;
+                if m.attachment.is_none() {
+                    next.attachment = None;
+                }
+                if next != here {
+                    self.db.update_message(&next);
+                    self.echoes.expect(&SyncEvent::Message(Box::new(
+                        crate::sibling::without_path(&next),
+                    )));
+                    emit(&self.events, CoreEvent::MessageUpdated(next));
+                    emit(&self.events, CoreEvent::ContactsChanged);
+                }
+                if self.db.advance_status(&here.contact_id, &here.id, m.status) {
+                    emit(
+                        &self.events,
+                        CoreEvent::MessageStatus {
+                            contact_id: here.contact_id,
+                            message_id: here.id,
+                            status: m.status,
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    fn apply_contact(&mut self, c: crate::sibling::ContactSync) {
+        let before = self.db.contact(&c.id);
+        // What is decided stays decided: an old state on its way does not undo it.
+        if before.as_ref().is_some_and(|b| {
+            b.state == ContactState::Accepted
+                && matches!(c.state, ContactState::PendingIn | ContactState::PendingOut)
+        }) {
+            return;
+        }
+        let was_accepted = before
+            .as_ref()
+            .is_some_and(|b| b.state == ContactState::Accepted);
+        let same = before.as_ref().is_some_and(|b| {
+            b.state == c.state
+                && b.their_name == c.their_name
+                && b.nickname == c.nickname
+                && b.pinned == c.pinned
+                && b.muted == c.muted
+        });
+        if !same {
+            if c.kind == crate::model::ContactKind::Person {
+                let _ = self.db.upsert_contact(
+                    &c.id,
+                    c.state,
+                    Some(&c.their_name),
+                    c.nickname.as_deref(),
+                );
+            }
+            if before.is_some() || c.kind == crate::model::ContactKind::Person {
+                self.db.set_pinned(&c.id, c.pinned);
+                self.db.set_muted(&c.id, c.muted);
+                self.db.set_nickname(&c.id, c.nickname.as_deref());
+            }
+        }
+        let mine = self.db.contact_keys(&c.id).unwrap_or_default();
+        let mut keys = c.keys;
+        keys.curve = mine.curve;
+        keys.network = mine.network;
+        // They were told by the other device, but where we are is the same.
+        keys.told = mine.told;
+        let keys_changed = keys != mine;
+        if keys_changed {
+            self.db.set_contact_keys(&c.id, &keys);
+        }
+        let prefs_changed = self.db.chat_prefs(&c.id) != c.prefs;
+        if prefs_changed {
+            self.db.set_chat_prefs(&c.id, &c.prefs);
+        }
+        if !same || keys_changed || prefs_changed {
+            if c.state == ContactState::Blocked
+                && let Some(peer) = crate::identity::parse_key(&c.id)
+                && let Some(s) = self.sessions.remove(&peer)
+            {
+                s.conn.close(0u32.into(), b"gone");
+            }
+            self.wanted_dirty = true;
+            self.timers_dirty = true;
+            emit(&self.events, CoreEvent::ContactsChanged);
+        }
+        // Someone we were already connected to, who only now counts.
+        if !was_accepted
+            && c.state == ContactState::Accepted
+            && let Some(peer) = crate::identity::parse_key(&c.id)
+            && self.sessions.contains_key(&peer)
+        {
+            self.on_session_start(peer);
+        }
+    }
+
+    /// Someone came in with the link code: if it really is them, they get everything.
+    fn on_link_conn(&mut self, conn: Connection) {
+        let Some((secret, until)) = self.link_wait else {
+            conn.close(1u32.into(), b"no");
+            return;
+        };
+        if Instant::now() > until || self.this_device.linked {
+            conn.close(1u32.into(), b"no");
+            return;
+        }
+        let (db, tx, dir) = (self.db.clone(), self.tx.clone(), self.link_dir.clone());
+        tokio::spawn(async move {
+            let attempt = async {
+                let (mut send, mut recv) = conn.accept_bi().await?;
+                let mut exporter = [0u8; 32];
+                conn.export_keying_material(&mut exporter, b"whatsmine-link", b"")
+                    .map_err(|e| anyhow::anyhow!("no keying material: {e:?}"))?;
+                let mut proof = [0u8; 32];
+                recv.read_exact(&mut proof).await?;
+                anyhow::ensure!(
+                    proof == crate::sibling::link_proof(&secret, &exporter),
+                    "not the code"
+                );
+                let copy = dir.join("link.tmp");
+                db.snapshot(&copy)?;
+                let bytes = std::fs::read(&copy);
+                let _ = std::fs::remove_file(&copy);
+                let bundle = crate::sibling::Bundle {
+                    vault_key: *db.vault().key(),
+                    db: bytes?,
+                    slot: 1,
+                };
+                let plain = postcard::to_stdvec(&bundle)?;
+                send.write_all(&crate::sibling::seal_for_link(&secret, &plain))
+                    .await?;
+                send.finish()?;
+                // It says so once it has all of it.
+                let mut done = [0u8; 1];
+                recv.read_exact(&mut done).await?;
+                anyhow::Ok(())
+            };
+            let ok = match tokio::time::timeout(LINK_LASTS, attempt).await {
+                Ok(Ok(())) => true,
+                Ok(Err(e)) => {
+                    tracing::debug!("linking failed: {e:#}");
+                    false
+                }
+                Err(_) => false,
+            };
+            conn.close(0u32.into(), b"done");
+            if ok {
+                let _ = tx.send(Internal::LinkDone);
+            }
+        });
+    }
+
+    /// This device becomes the other one of whoever made the code.
+    fn join_device(
+        &mut self,
+        secret: [u8; 32],
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    ) {
+        let (Some(records), Some(ep)) = (self.records.clone(), self.ep.clone()) else {
+            let _ = reply.send(Err("no_network".to_owned()));
+            return;
+        };
+        let (db, dir) = (self.db.clone(), self.link_dir.clone());
+        tokio::spawn(async move {
+            let attempt = async {
+                let sealed = records
+                    .get(&crate::sibling::link_seed(&secret))
+                    .await
+                    .ok_or_else(|| anyhow::anyhow!("code_not_found"))?;
+                let plain = crate::sibling::open_from_link(&secret, &sealed)
+                    .ok_or_else(|| anyhow::anyhow!("code_not_found"))?;
+                let record: LocationRecord = postcard::from_bytes(&plain)?;
+                let addr = record
+                    .to_addr()
+                    .ok_or_else(|| anyhow::anyhow!("code_not_found"))?;
+                let conn = ep.connect(addr, crate::sibling::LINK_ALPN).await?;
+                let (mut send, mut recv) = conn.open_bi().await?;
+                let mut exporter = [0u8; 32];
+                conn.export_keying_material(&mut exporter, b"whatsmine-link", b"")
+                    .map_err(|e| anyhow::anyhow!("no keying material: {e:?}"))?;
+                send.write_all(&crate::sibling::link_proof(&secret, &exporter))
+                    .await?;
+                let sealed = recv.read_to_end(LINK_MOST).await?;
+                let plain = crate::sibling::open_from_link(&secret, &sealed)
+                    .ok_or_else(|| anyhow::anyhow!("code_not_found"))?;
+                crate::backup::leave_linked_for_next_start(&dir, db.vault(), plain)?;
+                send.write_all(&[1]).await?;
+                send.finish()?;
+                let _ = tokio::time::timeout(Duration::from_secs(2), conn.closed()).await;
+                anyhow::Ok(())
+            };
+            let result = match tokio::time::timeout(LINK_LASTS, attempt).await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(e)) => Err(if e.to_string() == "code_not_found" {
+                    "code_not_found".to_owned()
+                } else {
+                    "link_failed".to_owned()
+                }),
+                Err(_) => Err("link_failed".to_owned()),
+            };
+            let _ = reply.send(result);
+        });
     }
 
     // ---- changes to what was sent ----
@@ -1026,6 +1484,7 @@ impl Engine {
             return;
         }
         self.publishing = true;
+        let slot = self.this_device.slot;
         let mut secrets = vec![self.identity.location];
         for gid in self.db.active_groups() {
             if let Some(secret) = self.group_secret(&gid) {
@@ -1052,7 +1511,7 @@ impl Engine {
             let mut any = false;
             for secret in secrets {
                 let sealed = location::seal(&secret, record.clone(), &person);
-                any |= location::publish(&records, &secret, &sealed, at).await;
+                any |= location::publish(&records, &secret, &sealed, at, slot).await;
             }
             let _ = tx.send(Internal::Published(any.then_some(addr)));
         });
@@ -1100,7 +1559,10 @@ impl Engine {
             })
             .find_map(|m| {
                 let mid = protocol::id_to_bytes(&m.id)?;
-                let (kind, sealed) = self.sealing.seal(&id, m.body.as_bytes())?;
+                let curve = self.db.contact_keys(&id)?.curve?;
+                let (kind, sealed) = self
+                    .sealing
+                    .seal(&olm_name(&id, &curve), m.body.as_bytes())?;
                 Some(KnockText {
                     id: mid,
                     sent_at: m.sent_at,
@@ -1192,7 +1654,10 @@ impl Engine {
         // Known from the handshake, which is what makes a first sealed message readable. A knock
         // only ever comes after sessions exist, so without one there is nothing to read it with.
         let curve = keys.curve.unwrap_or_default();
-        let Ok(plain) = self.sealing.open(id, &curve, text.kind, &text.sealed) else {
+        let Ok(plain) = self
+            .sealing
+            .open(&olm_name(id, &curve), &curve, text.kind, &text.sealed)
+        else {
             return;
         };
         let Ok(body) = String::from_utf8(plain) else {
@@ -1566,6 +2031,7 @@ impl Engine {
         let peers = self
             .sessions
             .iter()
+            .filter(|(peer, _)| **peer != self.me)
             .map(|(peer, s)| {
                 let selected = s
                     .conn
@@ -1672,6 +2138,35 @@ impl Engine {
                 }
             }
             Cmd::TimersChanged => self.timers_dirty = true,
+            Cmd::SyncOwed => {
+                self.wanted_dirty = true;
+                self.backoff.remove(&self.me);
+                self.flush_sync();
+            }
+            Cmd::DeviceChanged => {
+                self.this_device = crate::sibling::device_state(&self.db);
+                self.wanted_dirty = true;
+                self.backoff.remove(&self.me);
+                self.flush_sync();
+            }
+            Cmd::StartLink { secret, done } => {
+                self.link_wait = Some((secret, Instant::now() + LINK_LASTS));
+                let (Some(records), Some(addr)) = (self.records.clone(), self.current_addr())
+                else {
+                    let _ = done.send(false);
+                    return;
+                };
+                tokio::spawn(async move {
+                    let record = LocationRecord::from_addr(&addr, now_ms());
+                    let plain = postcard::to_stdvec(&record).unwrap_or_default();
+                    let sealed = crate::sibling::seal_for_link(&secret, &plain);
+                    let ok = records
+                        .put(&crate::sibling::link_seed(&secret), &sealed)
+                        .await;
+                    let _ = done.send(ok);
+                });
+            }
+            Cmd::JoinDevice { secret, reply } => self.join_device(secret, reply),
             Cmd::PublishCode { code, invite, done } => {
                 let Some(records) = self.records.clone() else {
                     let _ = done.send(false);
@@ -1901,13 +2396,19 @@ impl Engine {
     }
 
     fn dial(&mut self, ep: &Endpoint, peer: PublicKey) {
-        if peer == self.me || !self.dialing.insert(peer) {
+        let sibling = peer == self.me;
+        if (sibling && !self.this_device.linked) || !self.dialing.insert(peer) {
             return;
         }
+        let skip = sibling.then_some(self.this_device.slot);
         let id = key_to_string(&peer);
         let keys = self.db.contact_keys(&id).unwrap_or_default();
         // What they can be looked up with: what they told us, and what we share in groups.
-        let mut secrets: Vec<[u8; 32]> = keys.location.into_iter().collect();
+        let mut secrets: Vec<[u8; 32]> = if sibling {
+            vec![self.identity.location]
+        } else {
+            keys.location.into_iter().collect()
+        };
         for gid in self.db.groups_with_member(&id) {
             if let Some(secret) = self.group_secret(&gid) {
                 secrets.push(location::group_secret(&secret, &peer));
@@ -1919,7 +2420,8 @@ impl Engine {
                 let mut addr = None;
                 if let Some(records) = &records {
                     for secret in &secrets {
-                        let found = location::lookup(records, secret, &peer, now_ms()).await;
+                        let found =
+                            location::lookup_skipping(records, secret, &peer, now_ms(), skip).await;
                         if let Some(record) = found.and_then(|r| r.to_addr()) {
                             addr = Some(record);
                             break;
@@ -2036,6 +2538,12 @@ impl Engine {
                     self.published = Some((addr, now));
                 }
             }
+            Internal::LinkConn(conn) => self.on_link_conn(conn),
+            Internal::LinkDone => {
+                self.link_wait = None;
+                self.this_device.slot = 0;
+                self.set_linked(true);
+            }
             Internal::RequestsFound(found) => self.on_requests_found(found),
             Internal::KnocksFound(found) => self.on_knocks_found(found),
             Internal::DialFailed(peer) => {
@@ -2056,8 +2564,20 @@ impl Engine {
                 }
                 self.on_wire_frame(peer, frame);
             }
-            Internal::Closed { peer, sid, broken } => {
+            Internal::Closed {
+                peer,
+                sid,
+                broken,
+                moved_on,
+            } => {
                 let current = self.sessions.get(&peer).map(|s| s.sid) == Some(sid);
+                // They talk to our other device now: not to be fought over.
+                let moved_on = moved_on && current;
+                let owed = self.db.peers_owed().contains(&key_to_string(&peer));
+                if moved_on && !owed {
+                    self.backoff
+                        .insert(peer, (Instant::now() + MOVED_ON_WAIT, 1));
+                }
                 self.on_closed(peer, sid);
                 if broken && current {
                     self.on_broken(peer);
@@ -2188,7 +2708,10 @@ impl Engine {
                 let Some(curve) = self.sessions.get(&peer).map(|s| s.curve) else {
                     return;
                 };
-                match self.sealing.open(&id, &curve, kind, &bytes) {
+                match self
+                    .sealing
+                    .open(&olm_name(&id, &curve), &curve, kind, &bytes)
+                {
                     Ok(plain) => {
                         self.flush_waiting(peer);
                         match postcard::from_bytes::<Frame>(&plain) {
@@ -2217,7 +2740,10 @@ impl Engine {
                 let Some((curve, one_time)) = keys else {
                     return;
                 };
-                if self.sealing.start_session(&id, &curve, &one_time) {
+                if self
+                    .sealing
+                    .start_session(&olm_name(&id, &curve), &curve, &one_time)
+                {
                     // A first message opens the session on their side.
                     self.send(
                         peer,
@@ -2228,7 +2754,11 @@ impl Engine {
                         },
                     );
                     self.flush_waiting(peer);
-                    self.on_session_start(peer);
+                    if peer == self.me {
+                        self.sync_again();
+                    } else {
+                        self.on_session_start(peer);
+                    }
                 }
             }
             // Anything else in the clear is not to be believed.
@@ -2278,7 +2808,9 @@ impl Engine {
     ) {
         // Whoever we have nothing to do with gets nothing. They should not even have the address.
         let known = self.db.contact(&key_to_string(&peer)).map(|c| c.state);
+        let sibling = peer == self.me;
         let allowed = match known {
+            _ if sibling => self.this_device.linked,
             Some(ContactState::Accepted | ContactState::PendingOut) => true,
             Some(ContactState::GroupPeer) => {
                 !self.db.groups_with_member(&key_to_string(&peer)).is_empty()
@@ -2304,7 +2836,7 @@ impl Engine {
         // For the same Wi-Fi without internet next time.
         let mut keys = self.db.contact_keys(&id).unwrap_or_default();
         let network = *conn.remote_id().as_bytes();
-        if keys.network != Some(network) || keys.curve != Some(curve) {
+        if !sibling && (keys.network != Some(network) || keys.curve != Some(curve)) {
             keys.network = Some(network);
             keys.curve = Some(curve);
             self.db.set_contact_keys(&id, &keys);
@@ -2313,8 +2845,21 @@ impl Engine {
         // Both sides may dial each other at the same moment. Both then apply
         // the same rule (keep the connection opened by the smaller key) and
         // agree on which one survives.
-        let initiator = if outgoing { self.me } else { peer };
+        let initiator = match (sibling, outgoing) {
+            // Between our own devices the person key says nothing: the network keys do.
+            (true, true) => self.identity.network().public(),
+            (true, false) => conn.remote_id(),
+            (false, true) => self.me,
+            (false, false) => peer,
+        };
+        // Someone's other device is no double: whoever is in use now is who we talk to.
+        let another_device = !sibling
+            && self
+                .sessions
+                .get(&peer)
+                .is_some_and(|s| s.conn.remote_id() != conn.remote_id());
         if let Some(existing) = self.sessions.get(&peer)
+            && !another_device
             && existing.initiator != initiator
             && existing.initiator.as_bytes() < initiator.as_bytes()
         {
@@ -2322,7 +2867,11 @@ impl Engine {
             return;
         }
         if let Some(old) = self.sessions.remove(&peer) {
-            old.conn.close(0u32.into(), b"replaced");
+            if another_device {
+                old.conn.close(MOVED_ON.into(), b"another device");
+            } else {
+                old.conn.close(0u32.into(), b"replaced");
+            }
         }
 
         self.next_sid += 1;
@@ -2358,8 +2907,17 @@ impl Engine {
             },
         );
         // One side starts the encrypted session, and which one is plain from the keys.
-        if !self.sealing.has_session(&id) && self.me.as_bytes() < peer.as_bytes() {
-            self.sealing.start_session(&id, &curve, &one_time);
+        let olm = olm_name(&id, &curve);
+        if !self.sealing.has_session(&olm)
+            && (self.me.as_bytes() < peer.as_bytes()
+                || (sibling && self.sealing.my_curve() < curve))
+        {
+            self.sealing.start_session(&olm, &curve, &one_time);
+        }
+        if sibling {
+            self.send_hello(peer);
+            self.sync_again();
+            return;
         }
         self.on_session_start(peer);
     }
@@ -2422,6 +2980,9 @@ impl Engine {
     }
 
     fn on_frame(&mut self, peer: PublicKey, frame: Frame) {
+        if peer == self.me {
+            return self.on_sibling_frame(frame);
+        }
         let id = key_to_string(&peer);
         let contact = self.db.contact(&id);
         let state = contact.as_ref().map(|c| c.state);
@@ -2586,8 +3147,12 @@ impl Engine {
                     emit(&self.events, CoreEvent::Typing { contact_id: id });
                 }
             }
-            // Only ever on the wire, and handled there.
-            Frame::Auth { .. } | Frame::Sealed { .. } | Frame::NeedSession => {}
+            // Only ever on the wire, and handled there. Only from our own other device.
+            Frame::Auth { .. }
+            | Frame::Sealed { .. }
+            | Frame::NeedSession
+            | Frame::Sibling { .. }
+            | Frame::SiblingAck { .. } => {}
             Frame::Profile { avatar } => {
                 if state == Some(ContactState::Accepted) {
                     self.on_profile(&id, contact.and_then(|c| c.avatar), avatar);
@@ -2814,7 +3379,10 @@ impl Engine {
         let Ok(plain) = postcard::to_stdvec(&frame) else {
             return false;
         };
-        match self.sealing.seal(&key_to_string(&peer), &plain) {
+        match self
+            .sealing
+            .seal(&olm_name(&key_to_string(&peer), &s.curve), &plain)
+        {
             Some((kind, bytes)) => s.out.send(Frame::Sealed { kind, bytes }).is_ok(),
             None => {
                 s.waiting.borrow_mut().push(frame);
@@ -3012,7 +3580,7 @@ async fn bind(key: SecretKey, mode: NetMode, settings: Settings) -> anyhow::Resu
         NetMode::Internet => {
             let ep = Endpoint::builder(presets::Minimal)
                 .secret_key(key)
-                .alpns(vec![ALPN.to_vec()])
+                .alpns(vec![ALPN.to_vec(), crate::sibling::LINK_ALPN.to_vec()])
                 .relay_mode(relay_mode(&settings))
                 // Where we are goes in the DHT sealed, see `location`. This only finds peers on the
                 // same Wi-Fi without the internet.
@@ -3024,7 +3592,7 @@ async fn bind(key: SecretKey, mode: NetMode, settings: Settings) -> anyhow::Resu
         NetMode::Local(_) => {
             let ep = Endpoint::builder(presets::Minimal)
                 .secret_key(key)
-                .alpns(vec![ALPN.to_vec()])
+                .alpns(vec![ALPN.to_vec(), crate::sibling::LINK_ALPN.to_vec()])
                 .relay_mode(iroh::RelayMode::Disabled)
                 .clear_ip_transports()
                 .bind_addr("127.0.0.1:0")?
@@ -3033,6 +3601,11 @@ async fn bind(key: SecretKey, mode: NetMode, settings: Settings) -> anyhow::Resu
             Ok(ep)
         }
     }
+}
+
+/// An encrypted session is with one device of a person: someone's phone and PC each have their own.
+fn olm_name(person: &str, curve: &[u8; 32]) -> String {
+    format!("{person}:{}", data_encoding::HEXLOWER.encode(&curve[..8]))
 }
 
 /// Names are display-only; keep them short and single-line.
@@ -3052,6 +3625,10 @@ fn spawn_accept_loop(ep: Endpoint, tx: mpsc::UnboundedSender<Internal>) {
             tokio::spawn(async move {
                 let attempt = async {
                     let conn = incoming.accept()?.await?;
+                    if conn.alpn() == crate::sibling::LINK_ALPN {
+                        let _ = tx.send(Internal::LinkConn(conn));
+                        anyhow::bail!("for linking");
+                    }
                     let (send, recv) = conn.accept_bi().await?;
                     anyhow::Ok((conn, send, recv))
                 };
@@ -3240,8 +3817,18 @@ fn spawn_reader(
                 Err(e) => {
                     tracing::debug!("session {sid} with {} ended: {e:#}", peer.fmt_short());
                     let broken = !closed_on_purpose(&conn);
+                    let moved_on = matches!(
+                        conn.close_reason(),
+                        Some(iroh::endpoint::ConnectionError::ApplicationClosed(closed))
+                            if closed.error_code == MOVED_ON.into()
+                    );
                     conn.close(0u32.into(), b"closed");
-                    let _ = tx.send(Internal::Closed { peer, sid, broken });
+                    let _ = tx.send(Internal::Closed {
+                        peer,
+                        sid,
+                        broken,
+                        moved_on,
+                    });
                     return;
                 }
             }
