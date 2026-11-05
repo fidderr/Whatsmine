@@ -586,7 +586,7 @@ impl Engine {
                 contact_id: group,
                 outgoing: false,
                 body: caption,
-                sent_at,
+                sent_at: sent_at.min(now_ms()),
                 received_at: now_ms(),
                 status: MessageStatus::Delivered,
                 read: false,

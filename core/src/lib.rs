@@ -1084,6 +1084,26 @@ impl Core {
         ));
     }
 
+    /// Sends a frame as it is. For tests that play someone who does not follow the rules.
+    #[doc(hidden)]
+    pub fn send_as_is(&self, peer: &str, frame: protocol::Frame) {
+        if let Some(peer) = identity::parse_key(peer) {
+            self.cmd(Cmd::SendAsIs(peer, frame));
+        }
+    }
+
+    /// Tells a chat of a change, whatever the rules. For tests, like [`Self::send_as_is`].
+    #[doc(hidden)]
+    pub fn tell_chat_as_is(&self, chat: &str, target: &str, change: &MessageChange) {
+        self.tell_chat(chat, target, change);
+    }
+
+    /// How many changes this person has not confirmed. For tests.
+    #[doc(hidden)]
+    pub fn changes_owed_to(&self, peer: &str) -> usize {
+        self.inner.db.changes_for(peer).len()
+    }
+
     fn changed(&self, m: Message) {
         self.inner.db.update_message(&m);
         self.emit(CoreEvent::MessageUpdated(m));
@@ -1152,6 +1172,10 @@ impl Core {
         let Some(mut m) = self.inner.db.message(message_id) else {
             return;
         };
+        // A place moves for whoever shared it.
+        if matches!(change, RichChange::Moved { .. }) && !m.outgoing {
+            return;
+        }
         let me = self.my_key();
         let Some(rich) = &mut m.extra.rich else {
             return;
@@ -1171,6 +1195,16 @@ impl Core {
     /// A new disappearing time goes for the others as well.
     pub fn set_chat_prefs(&self, chat: &str, prefs: &ChatPrefs) {
         let before = self.inner.db.chat_prefs(chat);
+        // Where only admins change things, that goes for the disappearing time too.
+        let mut prefs = prefs.clone();
+        if let Some(info) = self.group_info(chat)
+            && info.rules.only_admins_edit
+            && !info.i_am_admin
+            && !info.i_am_owner
+        {
+            prefs.disappear_ms = before.disappear_ms;
+        }
+        let prefs = &prefs;
         self.inner.db.set_chat_prefs(chat, prefs);
         if before.disappear_ms != prefs.disappear_ms {
             self.tell_chat(chat, "", &MessageChange::ChatTimer(prefs.disappear_ms));

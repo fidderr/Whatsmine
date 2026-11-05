@@ -106,6 +106,8 @@ const WAKE_SLACK: Duration = Duration::from_secs(5);
 pub(crate) enum Cmd {
     /// Connect to this contact now if not connected.
     Dial(PublicKey),
+    /// Sends this as it is, sealed like anything else.
+    SendAsIs(PublicKey, Frame),
     /// Leave this contact our request.
     SendRequest(PublicKey),
     /// Stop trying what was sent before this moment.
@@ -1342,26 +1344,36 @@ impl Engine {
         group: Option<String>,
     ) {
         let who = key_to_string(&peer);
-        let allowed = match &group {
-            Some(group) => self.group_allows(group, &who),
+        let in_chat = match &group {
+            Some(group) => {
+                self.db.is_group_member(group, &who)
+                    && self.db.is_group_member(group, &key_to_string(&self.me))
+            }
             None => self.db.contact(&who).map(|c| c.state) == Some(ContactState::Accepted),
         };
-        if !allowed {
-            return;
-        }
+        let in_group = group.is_some();
         let chat = group.unwrap_or_else(|| who.clone());
         let confirm = |engine: &Self| {
             engine.send(peer, Frame::ChangeAck { id: change_id });
         };
+        // Refused is refused for good: no reason to hear it again.
+        if !in_chat {
+            return confirm(self);
+        }
         // From a newer version: nothing to do with it, and no reason to hear it again.
         let Ok(change) = serde_json::from_slice::<MessageChange>(change) else {
             return confirm(self);
         };
         if let MessageChange::ChatTimer(ms) = change {
-            let mut prefs = self.db.chat_prefs(&chat);
-            prefs.disappear_ms = ms.filter(|ms| *ms > 0);
-            self.db.set_chat_prefs(&chat, &prefs);
-            emit(&self.events, CoreEvent::ContactsChanged);
+            let may = self.db.group(&chat).is_none_or(|(state, _, _)| {
+                !state.rules.only_admins_edit || state.is_manager(&who)
+            });
+            if may {
+                let mut prefs = self.db.chat_prefs(&chat);
+                prefs.disappear_ms = ms.filter(|ms| *ms > 0);
+                self.db.set_chat_prefs(&chat, &prefs);
+                emit(&self.events, CoreEvent::ContactsChanged);
+            }
             return confirm(self);
         }
         let message_id = id_from_bytes(&target);
@@ -1373,20 +1385,22 @@ impl Engine {
             return;
         };
         if m.contact_id != chat {
-            return;
+            return confirm(self);
         }
         let writer = if m.outgoing {
             key_to_string(&self.me)
         } else {
             m.sender.clone().unwrap_or_else(|| m.contact_id.clone())
         };
+        // In a group where only admins write, the others still react and vote.
+        let may_write = !in_group || self.group_allows(&chat, &who);
         match change {
             MessageChange::React(emoji) => {
                 let emoji = emoji.filter(|e| e.len() <= 64);
                 m.extra.react(&who, emoji.as_deref());
             }
             MessageChange::Edit(text)
-                if writer == who && !m.extra.unsent && text.len() <= MAX_TEXT =>
+                if writer == who && may_write && !m.extra.unsent && text.len() <= MAX_TEXT =>
             {
                 m.body = text;
                 m.extra.edited = true;
@@ -1403,6 +1417,10 @@ impl Engine {
                 m.attachment = None;
                 m.extra.rich = None;
                 m.extra.unsent = true;
+            }
+            // A place moves for whoever shared it, and for nobody else.
+            MessageChange::Rich(crate::rich::RichChange::Moved { .. }) if writer != who => {
+                return confirm(self);
             }
             MessageChange::Rich(change) => {
                 if let Some(rich) = &mut m.extra.rich {
@@ -2138,6 +2156,9 @@ impl Engine {
                 }
             }
             Cmd::TimersChanged => self.timers_dirty = true,
+            Cmd::SendAsIs(peer, frame) => {
+                self.send(peer, frame);
+            }
             Cmd::SyncOwed => {
                 self.wanted_dirty = true;
                 self.backoff.remove(&self.me);
@@ -3199,7 +3220,8 @@ impl Engine {
                         contact_id: id,
                         outgoing: false,
                         body: caption,
-                        sent_at,
+                        // A clock that is wrong on their side must not put it in the future.
+                        sent_at: sent_at.min(now_ms()),
                         received_at: now_ms(),
                         status: MessageStatus::Delivered,
                         read: false,

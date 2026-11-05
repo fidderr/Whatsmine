@@ -4,6 +4,7 @@
 use std::time::Duration;
 
 use whatsmine_core::model::now_ms;
+use whatsmine_core::protocol::{self, Frame};
 use whatsmine_core::records::LocalRecords;
 use whatsmine_core::rich::{ChatPrefs, PlanAnswer, Rich, RichChange, SearchHit, SearchIn};
 use whatsmine_core::{ContactState, Core, MessageStatus, NetMode};
@@ -195,6 +196,79 @@ async fn polls_lists_plans_and_places_work_for_both() {
             .summary(),
         "Gouda"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_place_moves_only_for_whoever_shared_it() {
+    let p = pair().await;
+    let place =
+        p.a.send_rich(
+            &p.kb,
+            Rich::Place {
+                lat: 52.0,
+                lon: 4.7,
+                label: "Gouda".into(),
+                live_until: None,
+            },
+        )
+        .unwrap();
+    until("the place", || p.b.message(&place.id).is_some()).await;
+    let lat_of = |core: &Core| match core.message(&place.id).unwrap().extra.rich.unwrap() {
+        Rich::Place { lat, .. } => lat,
+        other => panic!("not a place: {other:?}"),
+    };
+
+    // The app refuses it here, and whoever changes the app is refused over there.
+    let moved = RichChange::Moved { lat: 1.0, lon: 1.0 };
+    p.b.change_rich(&place.id, moved.clone());
+    assert_eq!(lat_of(&p.b), 52.0);
+    let target = protocol::id_to_bytes(&place.id).unwrap();
+    let change = serde_json::to_vec(&whatsmine_core::rich::MessageChange::Rich(moved)).unwrap();
+    p.b.send_as_is(
+        &p.ka,
+        Frame::Change {
+            id: [7; 16],
+            target,
+            change,
+            group: None,
+        },
+    );
+    // Whoever wrote it can: when that arrives, the one before it has been handled too.
+    p.a.change_rich(
+        &place.id,
+        RichChange::Moved {
+            lat: 53.0,
+            lon: 5.0,
+        },
+    );
+    until("the writer's move", || lat_of(&p.b) == 53.0).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(lat_of(&p.a), 53.0, "nobody else moved it");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wrong_clock_does_not_put_a_file_in_the_future() {
+    let p = pair().await;
+    let future = now_ms() + 24 * 3600 * 1000;
+    let id = [9; 16];
+    p.a.send_as_is(
+        &p.kb,
+        Frame::FileOffer {
+            id,
+            sent_at: future,
+            name: "a.txt".into(),
+            mime: "text/plain".into(),
+            size: 3,
+            sha256: [0; 32],
+            caption: String::new(),
+            duration_ms: None,
+            group: None,
+            extra: Vec::new(),
+        },
+    );
+    let mid = protocol::id_from_bytes(&id);
+    until("the offer", || p.b.message(&mid).is_some()).await;
+    assert!(p.b.message(&mid).unwrap().sent_at <= now_ms());
 }
 
 #[tokio::test(flavor = "multi_thread")]

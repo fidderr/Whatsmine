@@ -53,6 +53,51 @@ struct Trio {
     lookup: MemoryLookup,
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn what_only_admins_may_change_stays_theirs_and_everyone_can_react() {
+    let t = trio().await;
+    t.a.group_set_rules(&t.group, |r| {
+        r.only_admins_send = true;
+        r.only_admins_edit = true;
+    })
+    .unwrap();
+    until("the rules", || {
+        t.b.group_info(&t.group)
+            .is_some_and(|g| g.rules.only_admins_send)
+    })
+    .await;
+    let m = t.a.send(&t.group, "Saturday at ten").unwrap();
+    until("the post", || t.b.message(&m.id).is_some()).await;
+
+    // A member reacts, also where only admins write.
+    t.b.react(&m.id, Some("👍"));
+    until("the reaction", || {
+        t.a.message(&m.id)
+            .is_some_and(|m| !m.extra.reactions.is_empty())
+    })
+    .await;
+
+    // The disappearing time is not for a member to change: the app does not try.
+    let mut prefs = t.b.chat_prefs(&t.group);
+    prefs.disappear_ms = Some(60_000);
+    t.b.set_chat_prefs(&t.group, &prefs);
+    assert_eq!(t.b.chat_prefs(&t.group).disappear_ms, None);
+    assert_eq!(t.b.changes_owed_to(&t.a.my_key()), 0);
+
+    // Whoever changes the app is refused, and told so: it is not sent again and again.
+    t.b.tell_chat_as_is(
+        &t.group,
+        "",
+        &whatsmine_core::rich::MessageChange::ChatTimer(Some(60_000)),
+    );
+    assert_eq!(t.b.changes_owed_to(&t.a.my_key()), 1);
+    until("the refusal to be confirmed", || {
+        t.b.changes_owed_to(&t.a.my_key()) == 0
+    })
+    .await;
+    assert_eq!(t.a.chat_prefs(&t.group).disappear_ms, None);
+}
+
 async fn trio() -> Trio {
     let lookup = MemoryLookup::default();
     let dirs: Vec<_> = (0..3).map(|_| tempfile::tempdir().unwrap()).collect();
