@@ -509,10 +509,16 @@ fn ChatView(id: String) -> Element {
     let scheduled_label =
         t(&tr, "chat.scheduled_count").replace("{n}", &scheduled.len().to_string());
 
+    let chat_rule = format!(
+        "{}{}",
+        crate::look::rule(".chat.chat", &style.vars),
+        crate::look::rule(".chat.chat > .chat-wall", &style.wall)
+    );
     rsx! {
-        div { class: "chat{style.class}", style: "{style.vars}",
+        div { class: "chat{style.class}",
+            style { "{chat_rule}" }
             if !style.wall.is_empty() {
-                div { class: "chat-wall", style: "{style.wall}" }
+                div { class: "chat-wall" }
             }
             header { class: "hdr s",
                 button { class: "ib back-btn", aria_label: "{t(&tr, \"common.back\")}", onclick: move |_| nav.go_back(),
@@ -1577,7 +1583,7 @@ fn StyledText(styled: fmt::Styled, mentions: Vec<String>) -> Element {
         fmt::Styled::Code(text) => rsx! { code { "{text}" } },
         fmt::Styled::Spoiler(text) => rsx! {
             span {
-                style: if hidden() { "background:currentColor;border-radius:4px;cursor:pointer" } else { "" },
+                class: if hidden() { "spoiler hidden" } else { "spoiler" },
                 onclick: move |_| hidden.set(false),
                 "{text}"
             }

@@ -1056,13 +1056,12 @@ pub fn SpeedScreen() -> Element {
                         rsx! {
                             button {
                                 key: "{title}",
-                                class: "group row",
+                                class: if on { "group row choice on" } else { "group row choice" },
                                 role: "radio",
                                 aria_checked: "{on}",
                                 "data-t": "{title}",
-                                style: if on { "outline:2px solid var(--primary);outline-offset:-2px;align-items:flex-start;padding:12px" } else { "align-items:flex-start;padding:12px" },
                                 onclick: move |_| change(settings, |s| s.speed_mode = mode),
-                                span { style: if on { "flex:none;width:22px;height:22px;border-radius:11px;border:7px solid var(--primary)" } else { "flex:none;width:22px;height:22px;border-radius:11px;border:2px solid var(--text-secondary)" } }
+                                span { class: "choice-dot", aria_hidden: "true" }
                                 span { class: "stack",
                                     span { class: "row-t b", "{t(&tr, title)}" }
                                     span { class: "sub", "{t(&tr, text)}" }
@@ -1578,9 +1577,9 @@ pub fn StorageScreen() -> Element {
                         span { class: "sub", "{t(&tr, \"storage.used\")}" }
                     }
                     div { class: "usage-bar", role: "img",
-                        span { style: "flex:{part(report.media)};background:var(--primary)" }
-                        span { style: "flex:{part(report.files)};background:var(--secondary)" }
-                        span { style: "flex:{part(report.voice)};background:var(--success)" }
+                        span { class: "use-media", style: "flex:{part(report.media)}" }
+                        span { class: "use-files", style: "flex:{part(report.files)}" }
+                        span { class: "use-voice", style: "flex:{part(report.voice)}" }
                     }
                     div { class: "chips", style: "gap:12px",
                         span { class: "mark sub",

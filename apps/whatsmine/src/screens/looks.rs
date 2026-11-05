@@ -58,14 +58,28 @@ fn as_shown(mut look: Look) -> Look {
 pub fn LookPreview(look: Look) -> Element {
     let tr = use_tr();
     let style = look_style(&as_shown(look), true);
+    // Its own name, for a rule that follows every change while the look is made.
+    let id = use_hook(|| {
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        format!(
+            "lp{}",
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        )
+    });
+    let preview_rule = format!(
+        "{}{}",
+        crate::look::rule(&format!("#{id}.look-preview"), &style.vars),
+        crate::look::rule(&format!("#{id} > .chat-wall"), &style.wall)
+    );
     rsx! {
         section {
+            id: "{id}",
             class: "look-preview{style.class}",
-            style: "{style.vars}",
             "data-t": "look-preview",
             aria_label: "{t(&tr, \"look.preview\")}",
+            style { "{preview_rule}" }
             if !style.wall.is_empty() {
-                div { class: "chat-wall", style: "{style.wall}" }
+                div { class: "chat-wall" }
             }
             div { class: "bubble-wrap in",
                 div { class: "bubble in", "{t(&tr, \"look.sample_in\")}" }

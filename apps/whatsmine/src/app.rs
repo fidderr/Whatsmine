@@ -436,6 +436,8 @@ fn Main(core: AppCore) -> Element {
     #[cfg(not(target_os = "android"))]
     let theme_class = crate::look::theme_class(look.base);
     let look_style = crate::look::look_style(&look, false);
+    // Doubled for weight over the theme classes, which come before it.
+    let root_rule = crate::look::rule(".app-root.app-root", &look_style.vars);
     let app_font = look.app_font.clone();
     // Text follows the size chosen, and the font: everything is in rem.
     use_effect(use_reactive!(|text_size, app_font| {
@@ -512,11 +514,12 @@ fn Main(core: AppCore) -> Element {
     rsx! {
         style { "{STYLESHEET}" }
         style { "{own_fonts}" }
+        style { "{root_rule}" }
         document::Meta {
             name: "viewport",
             content: "width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content",
         }
-        div { class: "app-root {theme_class} {density_class}", style: "{safe_area.read()}{look_style.vars}",
+        div { class: "app-root {theme_class} {density_class}", style: "{safe_area.read()}",
             div { class: "status-bar-bg" }
             if onboarded {
                 Router::<Route> {}

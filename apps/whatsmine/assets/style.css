@@ -1201,6 +1201,12 @@ textarea::placeholder {
   inset: 0;
   pointer-events: none;
 }
+/* Hidden text in a message, until it is tapped. */
+.spoiler.hidden {
+  background: currentColor;
+  border-radius: 4px;
+  cursor: pointer;
+}
 .chat-peer {
   flex: 1;
   min-width: 0;
@@ -1792,6 +1798,35 @@ textarea::placeholder {
 }
 
 /* ===== Storage ===== */
+/* One of a few choices, as a card: the chosen one outlined, with a filled dot. */
+.choice {
+  align-items: flex-start;
+  padding: 12px;
+}
+.choice.on {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+}
+.choice-dot {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 11px;
+  border: 2px solid var(--text-secondary);
+}
+.choice.on .choice-dot {
+  border: 7px solid var(--primary);
+}
+.use-media {
+  background: var(--primary);
+}
+.use-files {
+  background: var(--secondary);
+}
+.use-voice {
+  background: var(--success);
+}
+
 .usage-bar {
   display: flex;
   gap: 2px;

@@ -132,9 +132,7 @@ pub struct LookStyle {
 /// `own_colors`: this look brings its colours itself, because the ones around it are another
 /// look's. Otherwise the theme class on the page's root has them already, if it can.
 pub fn look_style(look: &Look, own_colors: bool) -> LookStyle {
-    // Never empty: going from a look with colours of its own to one without has to replace what
-    // the element had, and an empty style left the old colours in place (seen on Windows).
-    let mut vars = String::from("--look:1;");
+    let mut vars = String::new();
     // A look that follows the device can only say so with the classes of the root.
     let follows_device = look.base == Base::System && look.colors.is_empty();
     if !follows_device && (own_colors || !look.colors.is_empty()) {
@@ -175,6 +173,16 @@ pub fn look_style(look: &Look, own_colors: bool) -> LookStyle {
 }
 
 /// The class on the page's root that a look starts from.
+/// A look as a rule for `selector`, for a `style` element: replaced whole when the look changes.
+/// Inline, Dioxus would keep the properties the new look leaves out.
+pub fn rule(selector: &str, css: &str) -> String {
+    if css.is_empty() {
+        String::new()
+    } else {
+        format!("{selector}{{{css}}}")
+    }
+}
+
 pub fn theme_class(base: Base) -> &'static str {
     match base {
         Base::System => "theme-system",
@@ -232,16 +240,12 @@ mod tests {
 
     #[test]
     fn a_look_without_changes_leaves_the_page_alone() {
-        // Nothing of its own, and still never empty: an empty style kept the colours of the look
-        // before it.
-        let nothing = LookStyle {
-            vars: "--look:1;".to_owned(),
-            ..LookStyle::default()
-        };
         let style = look_style(&Look::ready_made()[0], true);
-        assert_eq!(style, nothing);
+        assert_eq!(style, LookStyle::default());
         let dark = Look::ready_made()[1].clone();
-        assert_eq!(look_style(&dark, false), nothing);
+        assert_eq!(look_style(&dark, false), LookStyle::default());
+        // And nothing to write for it.
+        assert_eq!(rule(".x", &style.vars), "");
         assert!(look_style(&dark, true).vars.contains("--bg:#101218"));
     }
 
@@ -262,9 +266,11 @@ mod tests {
         assert!(style.vars.contains("'wm-own-xbodydisplaynone'"));
         assert!(style.wall.contains("/look-photo/secret)"));
         assert!(style.vars.contains("--msg-scale:1.500;"));
+        // It goes inside a rule of a style element: nothing may end the rule or the element.
         for text in [&style.vars, &style.wall] {
             assert!(!text.contains("../"));
             assert!(!text.contains('}'));
+            assert!(!text.contains('<'));
         }
     }
 
