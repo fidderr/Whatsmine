@@ -335,12 +335,13 @@ pub fn desktop_shell(
         });
     }
 
-    // The window's handle, for what needs it.
+    // The window's handle, for what needs it. Only Windows has one to give.
+    #[cfg(windows)]
     {
         use dioxus::desktop::tao::platform::windows::WindowExtWindows as _;
         crate::platform::set_main_window(window.window.hwnd() as isize);
-        crate::guard::reapply();
     }
+    crate::guard::reapply();
 
     // Closing hides to the tray while the background setting is on.
     {
