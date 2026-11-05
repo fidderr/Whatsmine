@@ -520,7 +520,7 @@
   "people.title": "Personnes",
   "privacy.address": "Votre adresse sur Internet",
   "privacy.app_lock": "Verrouillage de l'app",
-  "privacy.app_lock_note": "Empreinte ou verrouillage à l'ouverture",
+  "privacy.app_lock_note": "Empreinte, visage ou verrouillage à l'ouverture. L'app reste aussi hors des captures et des apps récentes",
   "privacy.block_screenshots": "Bloquer les captures d'écran",
   "privacy.disappear_default": "Éphémères par défaut",
   "privacy.hidden_chats": "Chats masqués",
@@ -736,5 +736,12 @@
   "chat.once_seen": "Photo vue",
   "chat.once_sent": "Photo à voir une fois",
   "chat.to_newest": "Au message le plus récent",
-  "devices.link_ready": "Préparation du code..."
+  "devices.link_ready": "Préparation du code...",
+  "privacy.lock_after": "Redemander à votre retour",
+  "privacy.lock_now": "Tout de suite",
+  "privacy.lock_1m": "Après 1 minute",
+  "privacy.lock_5m": "Après 5 minutes",
+  "privacy.no_lock": "Cet appareil n'a ni empreinte, ni visage, ni verrouillage d'écran. Il n'y a donc pas de verrouillage de l'app, et les discussions masquées et vos 12 mots s'ouvrent sans rien demander.",
+  "health.key_exposed": "Votre clé n'est pas protégée",
+  "health.key_exposed_note": "Cet appareil n'a pas voulu la garder : qui copie le dossier de l'app peut lire vos discussions. Nouvel essai à chaque démarrage."
 }

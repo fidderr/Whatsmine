@@ -94,6 +94,18 @@ pub fn Shell() -> Element {
         });
     }
 
+    // What stays out of pictures.
+    use_effect(move || {
+        let s = settings.read();
+        crate::guard::set(crate::guard::Reason::Asked, s.block_screenshots);
+        // Android shows the last picture of the app in its list of recent apps.
+        #[cfg(target_os = "android")]
+        crate::guard::set(
+            crate::guard::Reason::Lock,
+            s.app_lock && crate::lock::can_lock(),
+        );
+    });
+
     // Keep the background setting in force (and the texts in the right language).
     #[cfg(target_os = "android")]
     {
@@ -101,7 +113,6 @@ pub fn Shell() -> Element {
             let s = settings.read();
             crate::android::apply_texts(&s.locale);
             crate::android::apply_background(s.background);
-            mobile_sentinel::display::set_secure(s.block_screenshots);
         });
         // Android 13+ needs the user's yes before any notification shows:
         // ask once, a moment after the first screen is up.
@@ -314,6 +325,13 @@ pub fn desktop_shell(
                 }
             }
         });
+    }
+
+    // The window's handle, for what needs it.
+    {
+        use dioxus::desktop::tao::platform::windows::WindowExtWindows as _;
+        crate::platform::set_main_window(window.window.hwnd() as isize);
+        crate::guard::reapply();
     }
 
     // Closing hides to the tray while the background setting is on.

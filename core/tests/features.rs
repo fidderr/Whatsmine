@@ -233,7 +233,11 @@ async fn a_place_moves_only_for_whoever_shared_it() {
             group: None,
         },
     );
-    // Whoever wrote it can: when that arrives, the one before it has been handled too.
+    // What comes after it arrives after it, so by then it has been handled.
+    let after = p.b.send(&p.ka, "after").unwrap();
+    until("what came after", || p.a.message(&after.id).is_some()).await;
+    assert_eq!(lat_of(&p.a), 52.0, "nobody else moves it");
+
     p.a.change_rich(
         &place.id,
         RichChange::Moved {
@@ -242,8 +246,43 @@ async fn a_place_moves_only_for_whoever_shared_it() {
         },
     );
     until("the writer's move", || lat_of(&p.b) == 53.0).await;
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    assert_eq!(lat_of(&p.a), 53.0, "nobody else moved it");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hidden_chat_shows_nowhere_until_asked_for() {
+    let p = pair().await;
+    let m = p.sent("Our secret plan").await;
+    p.b.save_message(&m, &[]);
+    p.a.send_rich(
+        &p.kb,
+        Rich::Plan {
+            title: "Secret trip".into(),
+            at: now_ms() + 3_600_000,
+            place: String::new(),
+            answers: Vec::new(),
+        },
+    )
+    .unwrap();
+    assert!(!p.b.search("secret", SearchIn::All).is_empty());
+    assert_eq!(p.b.saved_messages().len(), 1);
+
+    let mut prefs = p.b.chat_prefs(&p.ka);
+    prefs.locked = true;
+    p.b.set_chat_prefs(&p.ka, &prefs);
+
+    assert!(p.b.chats().iter().all(|c| c.contact.id != p.ka));
+    assert_eq!(p.b.hidden_chats().len(), 1);
+    assert!(p.b.search("secret", SearchIn::All).is_empty());
+    assert!(p.b.search("", SearchIn::Media).is_empty());
+    assert!(p.b.saved_messages().is_empty());
+    assert!(p.b.address_book().iter().all(|c| c.id != p.ka));
+    // It is still there, for whoever opens it.
+    assert_eq!(p.b.search_chat(&p.ka, "secret", SearchIn::All).len(), 2);
+
+    prefs.locked = false;
+    p.b.set_chat_prefs(&p.ka, &prefs);
+    assert!(p.b.chats().iter().any(|c| c.contact.id == p.ka));
+    assert!(p.b.hidden_chats().is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]

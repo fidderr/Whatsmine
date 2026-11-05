@@ -20,6 +20,8 @@ pub enum Action {
     Notifications,
     Battery,
     AppPage,
+    /// There is nothing to tap: this is only to know.
+    Nothing,
 }
 
 /// Looks again every so often while the screen is open: the system's dialogs answer later.
@@ -39,6 +41,19 @@ pub fn use_watch() -> Signal<u32> {
 
 /// What is wrong right now. Nothing, on a system that has none of this.
 pub fn check(tr: &Translations) -> Vec<Item> {
+    let mut items = device_check(tr);
+    if !whatsmine_core::vault::key_is_held() {
+        items.push(Item {
+            key: "vault",
+            title: t(tr, "health.key_exposed"),
+            note: t(tr, "health.key_exposed_note"),
+            action: Action::Nothing,
+        });
+    }
+    items
+}
+
+fn device_check(tr: &Translations) -> Vec<Item> {
     #[cfg(target_os = "android")]
     {
         use mobile_sentinel::battery;
@@ -103,6 +118,7 @@ fn act(action: Action) {
         }
         Action::Battery => mobile_sentinel::battery::request_exemption(),
         Action::AppPage => mobile_sentinel::permissions::open_app_settings(),
+        Action::Nothing => {}
     }
     #[cfg(not(target_os = "android"))]
     let _ = action;
@@ -121,10 +137,12 @@ pub fn HealthRow(item: Item) -> Element {
                 span { class: "row-t", "{item.title}" }
                 span { class: "sub", "{item.note}" }
             }
-            button {
-                class: "btn small-btn",
-                onclick: move |_| act(action),
-                "{t(&tr, \"health.allow\")}"
+            if action != Action::Nothing {
+                button {
+                    class: "btn small-btn",
+                    onclick: move |_| act(action),
+                    "{t(&tr, \"health.allow\")}"
+                }
             }
         }
     }

@@ -374,25 +374,24 @@ impl Engine {
         self.enter_call();
     }
 
-    /// Leave the call (or cancel it while it rings).
-    pub(super) fn call_hangup(&mut self) {
+    /// Tells everyone we are out of this call, and notes it for ourselves.
+    fn say_we_left(&mut self) {
         let Some(c) = self.call.as_ref() else { return };
         let (call, group) = (c.id, c.group.clone());
-        let ringing_out = c.outgoing && c.connected.is_none();
-        let targets: Vec<PublicKey> = c
-            .members
-            .iter()
-            .chain(c.peers.iter())
-            .copied()
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect();
+        let targets: HashSet<PublicKey> = c.members.iter().chain(c.peers.iter()).copied().collect();
         for t in targets {
             self.send(t, Frame::CallEnd { call });
         }
         if let Some(g) = &group {
             self.track_participant(g, call, self.me, false);
         }
+    }
+
+    /// Leave the call (or cancel it while it rings).
+    pub(super) fn call_hangup(&mut self) {
+        let Some(c) = self.call.as_ref() else { return };
+        let ringing_out = c.outgoing && c.connected.is_none();
+        self.say_we_left();
         self.end_call(if ringing_out {
             CallEndReason::Cancelled
         } else {
@@ -442,6 +441,11 @@ impl Engine {
         let empty = c.peers.is_empty();
         if c.connected.is_some() {
             if empty {
+                // The last one in a group call says so too: else everyone who heard of the call
+                // goes on seeing it, and this device as well.
+                if c.group.is_some() {
+                    self.say_we_left();
+                }
                 self.end_call(if lost {
                     CallEndReason::Lost
                 } else {

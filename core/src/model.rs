@@ -317,6 +317,8 @@ pub struct Settings {
     pub request_filter: Vec<String>,
     /// Ask for the fingerprint or screen lock when the app opens.
     pub app_lock: bool,
+    /// How long the app may be away before it asks again, in seconds. 0 means at once.
+    pub lock_after_s: u32,
     /// No screenshots, and a blank picture in the list of recent apps.
     pub block_screenshots: bool,
     /// Asks the keyboard not to learn from what is typed.
@@ -370,6 +372,7 @@ impl Default for Settings {
             quiet_requests: false,
             request_filter: Vec::new(),
             app_lock: false,
+            lock_after_s: 60,
             block_screenshots: false,
             incognito_keyboard: false,
             disappear_default_ms: 0,

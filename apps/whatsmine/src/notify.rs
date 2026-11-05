@@ -64,6 +64,10 @@ pub trait Lookup {
     fn muted(&self, _id: &str) -> bool {
         false
     }
+    /// Hidden chats show nowhere, and that goes for notifications too.
+    fn hidden(&self, _id: &str) -> bool {
+        false
+    }
     /// Whether this key is the person using this device.
     fn is_me(&self, _id: &str) -> bool {
         false
@@ -102,6 +106,16 @@ impl Hub {
                 if ui_active || ((look.muted(&m.contact_id) || m.extra.silent) && !named) {
                     return Vec::new();
                 }
+                if look.hidden(&m.contact_id) {
+                    let (title, body) = generic(look, "notify.new_message");
+                    return vec![Action::Post(Notice {
+                        tag: "hidden".into(),
+                        kind: Kind::Message,
+                        title,
+                        body,
+                        chat: None,
+                    })];
+                }
                 let tag = format!("chat:{}", m.contact_id);
                 let (title, body) = if settings.notification_previews {
                     let line = preview(m, look);
@@ -126,6 +140,15 @@ impl Hub {
                 let Some((chat, line)) = look.message_line(message_id) else {
                     return Vec::new();
                 };
+                if look.hidden(&chat) {
+                    return vec![Action::Post(Notice {
+                        tag: format!("reminder:{message_id}"),
+                        kind: Kind::Message,
+                        title: look.text("app.name"),
+                        body: look.text("notify.reminder"),
+                        chat: None,
+                    })];
+                }
                 vec![Action::Post(Notice {
                     tag: format!("reminder:{message_id}"),
                     kind: Kind::Message,
@@ -171,7 +194,8 @@ impl Hub {
                 } else {
                     "call.incoming_voice"
                 };
-                let (title, body) = if settings.notification_previews {
+                let hidden = look.hidden(contact_id);
+                let (title, body) = if settings.notification_previews && !hidden {
                     let mut body = look.text(key);
                     if contact_id != from {
                         body = format!("{body} · {}", look.name(from));
@@ -185,7 +209,7 @@ impl Hub {
                     kind: Kind::Call,
                     title,
                     body,
-                    chat: Some(contact_id.clone()),
+                    chat: (!hidden).then(|| contact_id.clone()),
                 })]
             }
             CoreEvent::Call(CallEvent::Connected { call_id, .. }) => {
@@ -201,7 +225,8 @@ impl Hub {
                 let was_ringing = self.ringing.remove(call_id);
                 let mut out = vec![Action::Cancel("call".into())];
                 if was_ringing && *reason == CallEndReason::Missed && !ui_active {
-                    let (title, body) = if settings.notification_previews {
+                    let hidden = look.hidden(contact_id);
+                    let (title, body) = if settings.notification_previews && !hidden {
                         let name = look.name(contact_id);
                         (
                             name.clone(),
@@ -215,7 +240,7 @@ impl Hub {
                         kind: Kind::Missed,
                         title,
                         body,
-                        chat: Some(contact_id.clone()),
+                        chat: (!hidden).then(|| contact_id.clone()),
                     }));
                 }
                 out
@@ -284,6 +309,9 @@ impl Lookup for CoreLookup<'_> {
     }
     fn is_me(&self, id: &str) -> bool {
         self.core.my_key() == id
+    }
+    fn hidden(&self, id: &str) -> bool {
+        self.core.chat_prefs(id).locked
     }
     fn message_line(&self, message_id: &str) -> Option<(String, String)> {
         let m = self.core.message(message_id)?;
@@ -414,6 +442,49 @@ mod tests {
                 other => other.into(),
             }
         }
+    }
+
+    struct HiddenBob;
+    impl Lookup for HiddenBob {
+        fn name(&self, id: &str) -> String {
+            id.into()
+        }
+        fn text(&self, key: &str) -> String {
+            key.into()
+        }
+        fn hidden(&self, id: &str) -> bool {
+            id == "bob"
+        }
+    }
+
+    #[test]
+    fn a_hidden_chat_shows_in_no_notification() {
+        let m = Message {
+            id: "m".into(),
+            contact_id: "bob".into(),
+            outgoing: false,
+            body: "Our secret".into(),
+            sent_at: 1,
+            received_at: 1,
+            status: whatsmine_core::MessageStatus::Delivered,
+            read: false,
+            attachment: None,
+            sender: None,
+            extra: Default::default(),
+        };
+        let out = Hub::default().decide(
+            &CoreEvent::MessageAdded(m),
+            &Settings::default(),
+            false,
+            &HiddenBob,
+        );
+        let [Action::Post(notice)] = out.as_slice() else {
+            panic!("one notification: {out:?}");
+        };
+        assert_eq!(notice.title, "app.name");
+        assert_eq!(notice.body, "notify.new_message");
+        assert_eq!(notice.chat, None);
+        assert!(!notice.tag.contains("bob"));
     }
 
     struct MutedBob;

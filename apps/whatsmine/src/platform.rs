@@ -19,6 +19,20 @@ pub fn safe_area_style() -> String {
     String::new()
 }
 
+static MAIN_WINDOW: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+/// Remembers this app's window, for the few things that need its handle.
+pub fn set_main_window(handle: isize) {
+    MAIN_WINDOW.store(handle, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The handle of this app's window, once there is one.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn main_window() -> Option<isize> {
+    let handle = MAIN_WINDOW.load(std::sync::atomic::Ordering::Relaxed);
+    (handle != 0).then_some(handle)
+}
+
 /// The key that seals everything on disk is held by the system: the Android Keystore, or
 /// Windows' DPAPI. A copied folder is then no stolen identity and no readable chats.
 pub fn install_key_protector() {

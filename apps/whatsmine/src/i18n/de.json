@@ -520,7 +520,7 @@
   "people.title": "Personen",
   "privacy.address": "Deine Adresse im Internet",
   "privacy.app_lock": "App-Sperre",
-  "privacy.app_lock_note": "Fingerabdruck oder Bildschirmsperre beim Öffnen",
+  "privacy.app_lock_note": "Fingerabdruck, Gesicht oder Bildschirmsperre beim Öffnen. Die App bleibt auch aus Screenshots und zuletzt verwendeten Apps",
   "privacy.block_screenshots": "Screenshots blockieren",
   "privacy.disappear_default": "Standardmäßig verschwindend",
   "privacy.hidden_chats": "Verborgene Chats",
@@ -736,5 +736,12 @@
   "chat.once_seen": "Foto gesehen",
   "chat.once_sent": "Foto, nur einmal zu sehen",
   "chat.to_newest": "Zur neuesten Nachricht",
-  "devices.link_ready": "Code wird vorbereitet..."
+  "devices.link_ready": "Code wird vorbereitet...",
+  "privacy.lock_after": "Bei Rückkehr erneut fragen",
+  "privacy.lock_now": "Sofort",
+  "privacy.lock_1m": "Nach 1 Minute",
+  "privacy.lock_5m": "Nach 5 Minuten",
+  "privacy.no_lock": "Auf diesem Gerät sind weder Fingerabdruck, Gesicht noch Bildschirmsperre eingerichtet. Es gibt also keine App-Sperre, und versteckte Chats und deine 12 Wörter öffnen sich ohne Nachfrage.",
+  "health.key_exposed": "Dein Schlüssel ist nicht geschützt",
+  "health.key_exposed_note": "Dieses Gerät wollte ihn nicht verwahren. Wer den App-Ordner kopiert, kann deine Chats lesen. Bei jedem Start wird es erneut versucht."
 }

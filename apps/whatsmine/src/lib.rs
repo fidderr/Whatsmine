@@ -13,6 +13,7 @@ pub mod debug_hooks;
 #[cfg(feature = "desktop")]
 pub mod desktop;
 pub mod fmt;
+pub mod guard;
 mod health;
 pub mod i18n;
 pub mod js;

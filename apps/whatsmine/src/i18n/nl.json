@@ -520,7 +520,7 @@
   "people.title": "Mensen",
   "privacy.address": "Je adres op internet",
   "privacy.app_lock": "App-vergrendeling",
-  "privacy.app_lock_note": "Vingerafdruk of schermvergrendeling bij het openen",
+  "privacy.app_lock_note": "Vingerafdruk, gezicht of schermvergrendeling bij het openen. De app blijft ook uit schermafbeeldingen en recente apps",
   "privacy.block_screenshots": "Schermafbeeldingen blokkeren",
   "privacy.disappear_default": "Standaard verdwijnend",
   "privacy.hidden_chats": "Verborgen chats",
@@ -736,5 +736,12 @@
   "chat.once_seen": "Foto gezien",
   "chat.once_sent": "Foto, één keer te zien",
   "chat.to_newest": "Naar het nieuwste bericht",
-  "devices.link_ready": "Code wordt klaargezet..."
+  "devices.link_ready": "Code wordt klaargezet...",
+  "privacy.lock_after": "Opnieuw vragen als je terugkomt",
+  "privacy.lock_now": "Meteen",
+  "privacy.lock_1m": "Na 1 minuut",
+  "privacy.lock_5m": "Na 5 minuten",
+  "privacy.no_lock": "Dit apparaat heeft geen vingerafdruk, gezicht of schermvergrendeling ingesteld. Er is dus geen app-vergrendeling, en verborgen chats en je 12 woorden openen zonder te vragen.",
+  "health.key_exposed": "Je sleutel is niet beschermd",
+  "health.key_exposed_note": "Dit apparaat wilde hem niet bewaren, dus wie de app-map kopieert kan je chats lezen. Bij elke start wordt het opnieuw geprobeerd."
 }

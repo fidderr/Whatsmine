@@ -8104,6 +8104,8 @@ dependencies = [
  "tokio",
  "uuid",
  "whatsmine-core",
+ "windows 0.61.3",
+ "windows-future 0.2.1",
  "windows-registry",
  "windows-sys 0.61.2",
 ]

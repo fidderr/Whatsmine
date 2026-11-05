@@ -520,7 +520,7 @@
   "people.title": "People",
   "privacy.address": "Your address on the internet",
   "privacy.app_lock": "App lock",
-  "privacy.app_lock_note": "Fingerprint or screen lock when the app opens",
+  "privacy.app_lock_note": "Fingerprint, face or screen lock when the app opens. The app also stays out of screenshots and recent apps",
   "privacy.block_screenshots": "Block screenshots",
   "privacy.disappear_default": "Disappearing by default",
   "privacy.hidden_chats": "Hidden chats",
@@ -736,5 +736,12 @@
   "chat.once_seen": "Photo seen",
   "chat.once_sent": "Photo, can be seen once",
   "chat.to_newest": "To the newest message",
-  "devices.link_ready": "Getting the code ready..."
+  "devices.link_ready": "Getting the code ready...",
+  "privacy.lock_after": "Ask again when you come back",
+  "privacy.lock_now": "At once",
+  "privacy.lock_1m": "After 1 minute",
+  "privacy.lock_5m": "After 5 minutes",
+  "privacy.no_lock": "This device has no fingerprint, face or screen lock set up, so there is no app lock, and hidden chats and your 12 words open without asking.",
+  "health.key_exposed": "Your key is not protected",
+  "health.key_exposed_note": "This device would not hold it, so whoever copies the app folder can read your chats. It tries again at each start."
 }

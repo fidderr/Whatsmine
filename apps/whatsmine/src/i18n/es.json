@@ -520,7 +520,7 @@
   "people.title": "Personas",
   "privacy.address": "Tu dirección en internet",
   "privacy.app_lock": "Bloqueo de la app",
-  "privacy.app_lock_note": "Huella o bloqueo de pantalla al abrir",
+  "privacy.app_lock_note": "Huella, cara o bloqueo de pantalla al abrir. La app tampoco aparece en capturas ni en apps recientes",
   "privacy.block_screenshots": "Bloquear capturas de pantalla",
   "privacy.disappear_default": "Temporales por defecto",
   "privacy.hidden_chats": "Chats ocultos",
@@ -736,5 +736,12 @@
   "chat.once_seen": "Foto vista",
   "chat.once_sent": "Foto, se puede ver una vez",
   "chat.to_newest": "Al mensaje más reciente",
-  "devices.link_ready": "Preparando el código..."
+  "devices.link_ready": "Preparando el código...",
+  "privacy.lock_after": "Volver a pedir al regresar",
+  "privacy.lock_now": "Al instante",
+  "privacy.lock_1m": "Tras 1 minuto",
+  "privacy.lock_5m": "Tras 5 minutos",
+  "privacy.no_lock": "Este dispositivo no tiene huella, cara ni bloqueo de pantalla, así que no hay bloqueo de la app, y los chats ocultos y tus 12 palabras se abren sin preguntar.",
+  "health.key_exposed": "Tu clave no está protegida",
+  "health.key_exposed_note": "Este dispositivo no quiso guardarla, así que quien copie la carpeta de la app puede leer tus chats. Se vuelve a intentar en cada inicio."
 }

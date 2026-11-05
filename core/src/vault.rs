@@ -7,6 +7,7 @@
 
 use std::path::Path;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
@@ -24,6 +25,13 @@ pub struct KeyProtector {
 }
 
 static PROTECTOR: OnceLock<KeyProtector> = OnceLock::new();
+static KEY_HELD: AtomicBool = AtomicBool::new(true);
+
+/// False when this device should hold our key and would not: then it lies in the folder, in the
+/// clear, and whoever copies the folder can read it. The app says so.
+pub fn key_is_held() -> bool {
+    KEY_HELD.load(Ordering::Relaxed)
+}
 
 /// Called once, by the app, before the core starts. Without it the key lies in the folder, as in
 /// tests and in the test peer.
@@ -33,6 +41,8 @@ pub fn set_protector(protector: KeyProtector) {
 
 pub struct Vault {
     key: [u8; 32],
+    /// The system holds the key, rather than the folder.
+    held: bool,
 }
 
 /// Random bytes, or nothing works at all.
@@ -81,6 +91,13 @@ impl Vault {
     /// The vault of this folder, made the first time. A key the system cannot give back is an
     /// error, not a reason to start over: the data may still come back.
     pub fn open_or_create(dir: &Path) -> anyhow::Result<Self> {
+        let protector = PROTECTOR.get().copied();
+        let vault = Self::open_with(dir, protector)?;
+        KEY_HELD.store(vault.held || protector.is_none(), Ordering::Relaxed);
+        Ok(vault)
+    }
+
+    fn open_with(dir: &Path, protector: Option<KeyProtector>) -> anyhow::Result<Self> {
         let path = dir.join(KEY_FILE);
         if let Ok(bytes) = std::fs::read(&path) {
             let (&mark, held) = bytes
@@ -88,8 +105,7 @@ impl Vault {
                 .ok_or_else(|| anyhow::anyhow!("{} is empty", path.display()))?;
             let key = match mark {
                 HELD_BY_SYSTEM => {
-                    let protector = PROTECTOR
-                        .get()
+                    let protector = protector
                         .ok_or_else(|| anyhow::anyhow!("no way to read the key on this device"))?;
                     (protector.unwrap)(held)
                         .ok_or_else(|| anyhow::anyhow!("the system does not give the key back"))?
@@ -100,18 +116,33 @@ impl Vault {
             let key: [u8; 32] = key
                 .try_into()
                 .map_err(|_| anyhow::anyhow!("{} is damaged", path.display()))?;
-            return Ok(Self { key });
+            // In the folder, while the system is there now: it may have failed only that time.
+            let held = mark == HELD_BY_SYSTEM
+                || (protector.is_some() && Self::write_key(dir, &key, protector)?);
+            return Ok(Self { key, held });
         }
         let key = random::<32>();
-        Self::replace_key(dir, &key)?;
-        Ok(Self { key })
+        let held = Self::write_key(dir, &key, protector)?;
+        Ok(Self { key, held })
     }
 
     /// This key from now on, held the way this device holds keys.
     pub fn replace_key(dir: &Path, key: &[u8; 32]) -> anyhow::Result<()> {
-        let held = PROTECTOR.get().and_then(|p| (p.wrap)(key));
+        let held = Self::write_key(dir, key, PROTECTOR.get().copied())?;
+        KEY_HELD.store(held || PROTECTOR.get().is_none(), Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// True if the system holds it now, false if it lies in the file.
+    fn write_key(
+        dir: &Path,
+        key: &[u8; 32],
+        protector: Option<KeyProtector>,
+    ) -> anyhow::Result<bool> {
+        let wrapped = protector.and_then(|p| (p.wrap)(key));
+        let held = wrapped.is_some();
         let mut file = Vec::new();
-        match held {
+        match wrapped {
             Some(wrapped) => {
                 file.push(HELD_BY_SYSTEM);
                 file.extend_from_slice(&wrapped);
@@ -125,7 +156,7 @@ impl Vault {
         let unfinished = dir.join("vault.key.tmp");
         std::fs::write(&unfinished, file)?;
         std::fs::rename(unfinished, dir.join(KEY_FILE))?;
-        Ok(())
+        Ok(held)
     }
 
     /// For a backup, which has to open somewhere else.
@@ -135,7 +166,10 @@ impl Vault {
 
     /// A vault for what does not outlive the process.
     pub fn in_memory() -> Self {
-        Self { key: random() }
+        Self {
+            key: random(),
+            held: false,
+        }
     }
 
     pub fn seal(&self, plain: &[u8]) -> Vec<u8> {
@@ -187,6 +221,51 @@ mod tests {
         let sealed = Vault::open_or_create(dir.path()).unwrap().seal(b"later");
         let again = Vault::open_or_create(dir.path()).unwrap();
         assert_eq!(again.open(&sealed).as_deref(), Some(&b"later"[..]));
+    }
+
+    fn flip(bytes: &[u8]) -> Option<Vec<u8>> {
+        Some(bytes.iter().map(|b| b ^ 0x5a).collect())
+    }
+
+    fn refuse(_: &[u8]) -> Option<Vec<u8>> {
+        None
+    }
+
+    const GOOD: KeyProtector = KeyProtector {
+        wrap: flip,
+        unwrap: flip,
+    };
+    const BAD: KeyProtector = KeyProtector {
+        wrap: refuse,
+        unwrap: refuse,
+    };
+
+    #[test]
+    fn a_key_the_system_would_not_hold_says_so_and_moves_there_when_it_can() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = Vault::open_with(dir.path(), Some(BAD)).unwrap();
+        assert!(!first.held, "it lies in the folder, and that shows");
+        let sealed = first.seal(b"later");
+        assert_eq!(
+            std::fs::read(dir.path().join(KEY_FILE)).unwrap()[0],
+            IN_THE_FILE
+        );
+
+        // Still not: nothing is lost.
+        let again = Vault::open_with(dir.path(), Some(BAD)).unwrap();
+        assert!(!again.held);
+        assert_eq!(again.open(&sealed).as_deref(), Some(&b"later"[..]));
+
+        // The system takes it now, and from then on the clear key is gone.
+        let later = Vault::open_with(dir.path(), Some(GOOD)).unwrap();
+        assert!(later.held);
+        assert_eq!(later.open(&sealed).as_deref(), Some(&b"later"[..]));
+        let file = std::fs::read(dir.path().join(KEY_FILE)).unwrap();
+        assert_eq!(file[0], HELD_BY_SYSTEM);
+        assert_ne!(&file[1..33], &later.key[..]);
+        let last = Vault::open_with(dir.path(), Some(GOOD)).unwrap();
+        assert!(last.held);
+        assert_eq!(last.open(&sealed).as_deref(), Some(&b"later"[..]));
     }
 
     #[test]

@@ -498,7 +498,23 @@ impl Core {
 
     /// Chats: accepted contacts and requests we sent, most recent first.
     pub fn chats(&self) -> Vec<ChatSummary> {
-        self.inner.db.chat_summaries()
+        let mut chats = self.inner.db.chat_summaries();
+        chats.retain(|c| !c.prefs.locked);
+        chats
+    }
+
+    /// The chats that show nowhere until they are asked for.
+    pub fn hidden_chats(&self) -> Vec<ChatSummary> {
+        let mut chats = self.inner.db.chat_summaries();
+        chats.retain(|c| c.prefs.locked);
+        chats
+    }
+
+    fn hidden_ids(&self) -> HashSet<String> {
+        self.hidden_chats()
+            .into_iter()
+            .map(|c| c.contact.id)
+            .collect()
     }
 
     /// Requests from people who want to add us.
@@ -509,12 +525,15 @@ impl Core {
     /// Everyone we have added (and everyone we asked), by name. Chats that
     /// were deleted from the chat list are still here.
     pub fn address_book(&self) -> Vec<Contact> {
+        let hidden = self.hidden_ids();
         let mut people: Vec<Contact> = self
             .inner
             .db
             .contacts_in(&[ContactState::Accepted, ContactState::PendingOut])
             .into_iter()
-            .filter(|c| c.kind == ContactKind::Person && c.id != self.my_key())
+            .filter(|c| {
+                c.kind == ContactKind::Person && c.id != self.my_key() && !hidden.contains(&c.id)
+            })
             .collect();
         people.sort_by_cached_key(|c| c.display_name().to_lowercase());
         people
@@ -1264,7 +1283,10 @@ impl Core {
     }
 
     pub fn saved_messages(&self) -> Vec<Message> {
-        self.inner.db.saved_messages()
+        let hidden = self.hidden_ids();
+        let mut saved = self.inner.db.saved_messages();
+        saved.retain(|m| !hidden.contains(&m.contact_id));
+        saved
     }
 
     pub fn remind_me(&self, message_id: &str, at: Millis) {
@@ -1285,7 +1307,15 @@ impl Core {
 
     /// Message, moment: soonest first.
     pub fn reminders(&self) -> Vec<(String, Millis)> {
-        self.inner.db.reminders()
+        let hidden = self.hidden_ids();
+        let mut reminders = self.inner.db.reminders();
+        reminders.retain(|(id, _)| {
+            self.inner
+                .db
+                .message(id)
+                .is_none_or(|m| !hidden.contains(&m.contact_id))
+        });
+        reminders
     }
 
     // ---- finding ----
@@ -1295,9 +1325,10 @@ impl Core {
         const MOST: usize = 500;
         let query = query.trim().to_lowercase();
         let mut hits = Vec::new();
+        let hidden = self.hidden_ids();
         if matches!(within, SearchIn::All | SearchIn::People) && !query.is_empty() {
             for c in self.inner.db.contacts_in(&[ContactState::Accepted]) {
-                if c.display_name().to_lowercase().contains(&query) {
+                if !hidden.contains(&c.id) && c.display_name().to_lowercase().contains(&query) {
                     hits.push(SearchHit::Person(c.id));
                 }
             }
@@ -1308,6 +1339,9 @@ impl Core {
         for m in self.inner.db.searchable(None) {
             if hits.len() >= MOST {
                 break;
+            }
+            if hidden.contains(&m.contact_id) {
+                continue;
             }
             if message_fits(&m, &query, within) {
                 hits.push(SearchHit::Message {
@@ -1403,7 +1437,10 @@ impl Core {
 
     /// Newest first.
     pub fn call_records(&self) -> Vec<CallRecord> {
-        self.inner.db.call_records()
+        let hidden = self.hidden_ids();
+        let mut records = self.inner.db.call_records();
+        records.retain(|r| !hidden.contains(&r.contact_id));
+        records
     }
 
     pub fn delete_call_record(&self, id: &str) {

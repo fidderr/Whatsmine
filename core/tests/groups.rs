@@ -54,6 +54,46 @@ struct Trio {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_group_call_is_over_for_everyone_when_the_last_one_is_left_alone() {
+    let t = trio().await;
+    let (mut eb, mut ec) = (t.b.subscribe(), t.c.subscribe());
+    t.a.call_invite(&t.group, false).unwrap();
+    for rx in [&mut eb, &mut ec] {
+        loop {
+            let ev = tokio::time::timeout(Duration::from_secs(30), rx.recv())
+                .await
+                .expect("incoming")
+                .unwrap();
+            if matches!(ev, CoreEvent::Call(CallEvent::Incoming { .. })) {
+                break;
+            }
+        }
+    }
+    t.b.call_answer(true);
+    t.c.call_answer(true);
+    until("all three in the call", || {
+        [&t.a, &t.b, &t.c]
+            .iter()
+            .all(|core| core.call_snapshot().is_some_and(|c| c.peers.len() == 2))
+    })
+    .await;
+
+    // Two leave. Carol does nothing: her call ends by itself, and nobody sees a call any more.
+    t.a.call_end();
+    t.b.call_end();
+    until("the call to end for Carol", || {
+        t.c.call_snapshot().is_none()
+    })
+    .await;
+    until("no call left for anyone", || {
+        [&t.a, &t.b, &t.c]
+            .iter()
+            .all(|core| core.group_call(&t.group).is_none())
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn what_only_admins_may_change_stays_theirs_and_everyone_can_react() {
     let t = trio().await;
     t.a.group_set_rules(&t.group, |r| {

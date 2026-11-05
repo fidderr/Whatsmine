@@ -14,3 +14,5 @@ window_background = "F5F6F9"
 window_background_dark = "101218"
 
 link_scheme = "whatsmine"
+# The key that seals everything stays in the Keystore, so a backup could never be opened again.
+no_backup = "true"

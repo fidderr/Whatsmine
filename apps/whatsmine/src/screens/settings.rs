@@ -108,6 +108,25 @@ pub fn SettingsScreen() -> Element {
     }
 }
 
+/// Your 12 words. While they are on screen, no picture and no shared screen can show them.
+#[component]
+fn WordsSheet(on_close: EventHandler<()>) -> Element {
+    let tr = use_tr();
+    let core = use_core();
+    use_hook(|| crate::guard::set(crate::guard::Reason::Words, true));
+    use_drop(|| crate::guard::set(crate::guard::Reason::Words, false));
+    rsx! {
+        Sheet { on_close: move |_| on_close.call(()), title: t(&tr, "devices.words"), tag: "words-sheet",
+            p { class: "note", "{t(&tr, \"devices.words_text\")}" }
+            div { class: "words",
+                for (i, word) in core.recovery_words().into_iter().enumerate() {
+                    span { key: "{i}", "{i + 1}. {word}" }
+                }
+            }
+        }
+    }
+}
+
 /// Your name and photo.
 #[component]
 fn ProfileSheet(on_close: EventHandler<()>) -> Element {
@@ -555,7 +574,16 @@ pub fn PrivacyScreen() -> Element {
     let _ = rev();
     let s = settings();
     let blocked = core.blocked();
-    let hidden = core.chats().iter().filter(|c| c.prefs.locked).count();
+    let hidden = core.hidden_chats().len();
+    let can_lock = crate::lock::can_lock();
+    let lock_after = opt(
+        &tr,
+        &[
+            ("0", "privacy.lock_now"),
+            ("60", "privacy.lock_1m"),
+            ("300", "privacy.lock_5m"),
+        ],
+    );
     let default_label = disappear_label(
         &tr,
         (s.disappear_default_ms > 0).then_some(s.disappear_default_ms),
@@ -588,12 +616,37 @@ pub fn PrivacyScreen() -> Element {
                 }
                 h2 { class: "gt", "{t(&tr, \"privacy.on_device\")}" }
                 div { class: "group",
-                    if crate::lock::CAN_LOCK {
+                    if can_lock {
                         SwitchRow {
                             title: t(&tr, "privacy.app_lock"),
                             note: t(&tr, "privacy.app_lock_note"),
                             checked: s.app_lock,
-                            on_change: move |v| change(settings, |s| s.app_lock = v),
+                            tag: "app-lock",
+                            // Only someone who can answer may turn it on or off.
+                            on_change: move |v| {
+                                spawn(async move {
+                                    if crate::lock::prove(&t(&tr, "lock.reason")).await {
+                                        change(settings, |s| s.app_lock = v);
+                                    }
+                                });
+                            },
+                        }
+                        if s.app_lock {
+                            div { class: "row sm", style: "flex-direction:column;align-items:stretch",
+                                span { class: "sub", "{t(&tr, \"privacy.lock_after\")}" }
+                                Chips {
+                                    options: lock_after,
+                                    value: s.lock_after_s.to_string(),
+                                    on_change: move |v: String| {
+                                        let seconds = v.parse::<u32>().unwrap_or(60);
+                                        change(settings, |s| s.lock_after_s = seconds);
+                                    },
+                                }
+                            }
+                        }
+                    } else {
+                        div { class: "row sm still",
+                            span { class: "sub", "{t(&tr, \"privacy.no_lock\")}" }
                         }
                     }
                     if hidden > 0 {
@@ -611,13 +664,11 @@ pub fn PrivacyScreen() -> Element {
                             },
                         }
                     }
-                    if cfg!(target_os = "android") {
-                        SwitchRow {
-                            title: t(&tr, "privacy.block_screenshots"),
-                            small: true,
-                            checked: s.block_screenshots,
-                            on_change: move |v| change(settings, |s| s.block_screenshots = v),
-                        }
+                    SwitchRow {
+                        title: t(&tr, "privacy.block_screenshots"),
+                        small: true,
+                        checked: s.block_screenshots,
+                        on_change: move |v| change(settings, |s| s.block_screenshots = v),
                     }
                     SwitchRow {
                         title: t(&tr, "privacy.incognito_keyboard"),
@@ -687,11 +738,7 @@ fn HiddenSheet(on_close: EventHandler<()>) -> Element {
     let nav = use_navigator();
     let rev = use_context::<Rev>().0;
     let _ = rev();
-    let chats: Vec<_> = core
-        .chats()
-        .into_iter()
-        .filter(|c| c.prefs.locked)
-        .collect();
+    let chats = core.hidden_chats();
     rsx! {
         Sheet { on_close: move |_| on_close.call(()), title: t(&tr, "privacy.hidden_chats"), tag: "hidden-sheet",
             div { class: "sheet-list",
@@ -1154,7 +1201,14 @@ pub fn DevicesScreen() -> Element {
                         title: t(&tr, "devices.words"),
                         note: t(&tr, "devices.words_note"),
                         tag: "words",
-                        on_tap: move |_| show_words.set(true),
+                        // Whoever has these words is you.
+                        on_tap: move |_| {
+                            spawn(async move {
+                                if crate::lock::prove(&t(&tr, "lock.reason")).await {
+                                    show_words.set(true);
+                                }
+                            });
+                        },
                     }
                     SwitchRow {
                         title: t(&tr, "devices.auto_backup"),
@@ -1200,14 +1254,7 @@ pub fn DevicesScreen() -> Element {
                 }
             }
             if show_words() {
-                Sheet { on_close: move |_| show_words.set(false), title: t(&tr, "devices.words"), tag: "words-sheet",
-                    p { class: "note", "{t(&tr, \"devices.words_text\")}" }
-                    div { class: "words",
-                        for (i, word) in core.recovery_words().into_iter().enumerate() {
-                            span { key: "{i}", "{i + 1}. {word}" }
-                        }
-                    }
-                }
+                WordsSheet { on_close: move |_| show_words.set(false) }
             }
             if restoring() {
                 RestoreSheet { on_close: move |_| restoring.set(false) }
