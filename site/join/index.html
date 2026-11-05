@@ -27,9 +27,10 @@
 <script>
   // Everything after the # stays in the browser: it never reaches any server.
   const code = location.hash.slice(1);
-  const kind = location.pathname.includes('/join') ? 'join' : 'add';
+  const kind = location.pathname.includes('/channel') ? 'channel' : location.pathname.includes('/join') ? 'join' : 'add';
   const open = document.getElementById('open');
   if (kind === 'join') document.getElementById('title').textContent = 'You are invited to a group';
+  if (kind === 'channel') document.getElementById('title').textContent = 'A channel to follow';
   if (/^[a-z2-7]+$/i.test(code)) {
     open.href = 'whatsmine://' + kind + '/' + code;
     open.classList.remove('hidden');

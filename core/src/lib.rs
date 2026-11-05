@@ -14,6 +14,7 @@
 
 pub mod backup;
 pub mod calls;
+pub mod channel;
 pub mod codes;
 pub mod control;
 pub mod db;
@@ -203,6 +204,7 @@ impl Core {
             net: Arc::new(Mutex::new(NetStatus::Connecting)),
             group_calls: Arc::new(Mutex::new(std::collections::HashMap::new())),
             group_call_people: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            channel_swarm_keys: Arc::new(Mutex::new(Vec::new())),
             call: Arc::new(Mutex::new(None)),
             tries: Arc::new(Mutex::new(std::collections::HashMap::new())),
         };
@@ -432,6 +434,164 @@ impl Core {
             self.emit(CoreEvent::MessageAdded(message));
             self.emit(CoreEvent::ContactsChanged);
         }
+    }
+
+    /// A new channel, that we run.
+    pub fn channel_create(&self, name: &str) -> anyhow::Result<channel::Channel> {
+        let c = channel::new_channel(name, now_ms());
+        ensure!(!c.name.is_empty(), "empty");
+        self.inner.db.save_channel(&c);
+        self.emit(CoreEvent::ChannelsChanged);
+        Ok(c)
+    }
+
+    /// Follows the channel of a link.
+    pub fn channel_follow(&self, link: &str) -> anyhow::Result<channel::Channel> {
+        let Some(link) = channel::parse_link(link) else {
+            bail!("invalid_link");
+        };
+        if let Some(have) = self.inner.db.channel(&link.id()) {
+            ensure!(!have.runs_it(), "own_channel");
+            return Ok(have);
+        }
+        let c = channel::from_link(&link, now_ms());
+        self.inner.db.save_channel(&c);
+        self.cmd(Cmd::ChannelOut(c.id.clone()));
+        self.emit(CoreEvent::ChannelsChanged);
+        Ok(c)
+    }
+
+    pub fn channels(&self) -> Vec<channel::Channel> {
+        let mut channels = self.inner.db.channels();
+        channels.sort_by_key(|c| std::cmp::Reverse(c.at));
+        channels
+    }
+
+    pub fn channel(&self, id: &str) -> Option<channel::Channel> {
+        self.inner.db.channel(id)
+    }
+
+    /// Oldest first, the newest two hundred.
+    pub fn channel_posts(&self, id: &str) -> Vec<channel::ChannelPost> {
+        if self.inner.db.channel(id).is_none() {
+            return Vec::new();
+        }
+        self.inner.db.channel_posts(id, 200)
+    }
+
+    /// Writes in a channel we run. Returns the number of the post.
+    pub fn channel_write(&self, id: &str, text: &str, photo: Option<&Path>) -> anyhow::Result<u64> {
+        let db = &self.inner.db;
+        let Some(mut c) = db.channel(id) else {
+            bail!("no_channel");
+        };
+        let Some(secret) = c.secret else {
+            bail!("not_yours");
+        };
+        let text: String = text.trim().chars().take(channel::MAX_TEXT).collect();
+        let jpeg = photo.map(files::wallpaper_jpeg).transpose()?;
+        ensure!(!text.is_empty() || jpeg.is_some(), "nothing_to_post");
+        let number = c.last + 1;
+        let short = channel::short_part(&text).to_owned();
+        let needs_body = jpeg.is_some() || short.len() < text.len();
+        let body = needs_body.then(|| channel::Body {
+            text: text.clone(),
+            photo: jpeg,
+        });
+        let sealed_body = match &body {
+            Some(body) => {
+                Some(channel::seal_body(&c.read, body).ok_or_else(|| anyhow::anyhow!("too_big"))?)
+            }
+            None => None,
+        };
+        if let Some(sealed) = &sealed_body {
+            ensure!(sealed.len() <= channel::MAX_BODY, "too_big");
+        }
+        let more = sealed_body.as_ref().map(|sealed| channel::More {
+            hash: channel::hash_of(sealed),
+            size: sealed.len() as u32,
+            photo: body.as_ref().is_some_and(|b| b.photo.is_some()),
+        });
+        let post = channel::Post {
+            number,
+            at: now_ms(),
+            text: short,
+            more: more.clone(),
+        };
+        let value = channel::seal_post(&secret, &c.read, &post)
+            .ok_or_else(|| anyhow::anyhow!("too_big"))?;
+        let seq = number as i64;
+        let salt = channel::post_salt(number);
+        let record = records::SignedRecord::sign(&secret, &value, seq, Some(&salt));
+        let head = records::SignedRecord::sign(&secret, &value, seq, None);
+        db.add_channel_post(id, &post, &record);
+        if let (Some(more), Some(sealed)) = (&more, &sealed_body) {
+            db.set_channel_body(id, number, more, sealed, &text);
+        }
+        c.last = number;
+        c.head = Some(head.to_bytes());
+        db.save_channel(&c);
+        self.cmd(Cmd::ChannelOut(id.to_owned()));
+        self.emit(CoreEvent::ChannelsChanged);
+        Ok(number)
+    }
+
+    /// The photo of a post, when we have it.
+    pub fn channel_photo(&self, id: &str, number: u64) -> Option<Vec<u8>> {
+        let db = &self.inner.db;
+        let c = db.channel(id)?;
+        let more = db.channel_post(id, number)?.more?;
+        let sealed = db.channel_body(id, &more.hash)?;
+        channel::open_body(&c.read, &sealed)?.photo
+    }
+
+    /// Stops following, or stops running it here. What is in the DHT goes by itself.
+    pub fn channel_leave(&self, id: &str) {
+        self.inner.db.delete_channel(id);
+        self.cmd(Cmd::ChannelForget(id.to_owned()));
+        self.emit(CoreEvent::ChannelsChanged);
+    }
+
+    pub fn channel_set_muted(&self, id: &str, muted: bool) {
+        if let Some(mut c) = self.inner.db.channel(id) {
+            c.muted = muted;
+            self.inner.db.save_channel(&c);
+            self.emit(CoreEvent::ChannelsChanged);
+        }
+    }
+
+    pub fn channel_set_keep_days(&self, id: &str, days: u32) {
+        if let Some(mut c) = self.inner.db.channel(id) {
+            c.keep_days = days.clamp(1, 365);
+            self.inner.db.save_channel(&c);
+            self.emit(CoreEvent::ChannelsChanged);
+        }
+    }
+
+    /// One of [`channel::EMOJI`] on a post. Nobody can tell who, and it cannot be taken back.
+    pub fn channel_react(&self, id: &str, number: u64, emoji: usize) {
+        if emoji < channel::EMOJI.len() {
+            self.inner
+                .db
+                .add_channel_reaction_of_mine(id, number, emoji as u8);
+            self.cmd(Cmd::ChannelReact {
+                id: id.to_owned(),
+                number,
+                emoji,
+            });
+            self.emit(CoreEvent::ChannelsChanged);
+        }
+    }
+
+    /// The keys a channel's endpoints used here. For tests.
+    #[doc(hidden)]
+    pub fn channel_swarm_keys(&self) -> Vec<(String, [u8; 32])> {
+        self.inner
+            .shared
+            .channel_swarm_keys
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
     /// Posts something for the people chosen in the settings, for a day.
@@ -2337,7 +2497,10 @@ impl Core {
             .children
             .into_iter()
             .map(|child| {
-                let state = if self.group_info(&child.id).is_some_and(|g| g.active) {
+                let state = if self.group_info(&child.id).is_some_and(|g| g.active)
+                    || (child.kind == protocol::ChildKind::Channel
+                        && self.inner.db.channel(&child.id).is_some())
+                {
                     groups::ChildState::In
                 } else if self.asked_to_join(&child.link) {
                     groups::ChildState::Asked
@@ -2384,6 +2547,12 @@ impl Core {
                 (info.active && !info.rules.space && (info.i_am_admin || info.i_am_owner))
                     .then(|| (c.contact.id.clone(), info.name))
             })
+            .chain(
+                self.channels()
+                    .into_iter()
+                    .filter(|c| c.runs_it() && !inside.contains(&c.id))
+                    .map(|c| (c.id, c.name)),
+            )
             .collect()
     }
 
@@ -2399,6 +2568,21 @@ impl Core {
             !state.rules.children.iter().any(|c| c.id == child),
             "already_in"
         );
+        // A channel we run: anyone in the space gets the link, which is all it takes to read.
+        if let Some(c) = self
+            .inner
+            .db
+            .channel(child)
+            .filter(channel::Channel::runs_it)
+        {
+            let item = protocol::SpaceChild {
+                id: c.id.clone(),
+                name: c.name.clone(),
+                kind: protocol::ChildKind::Channel,
+                link: c.link(),
+            };
+            return self.group_set_rules(space, |r| r.children.push(item));
+        }
         let child_state = self.managed_state(child)?;
         ensure!(!child_state.rules.space, "not_a_group");
         let link = self.group_link(child)?;
@@ -2427,6 +2611,14 @@ impl Core {
         let Some(item) = info.rules.children.iter().find(|c| c.id == child) else {
             bail!("not_in_space");
         };
+        if item.kind == protocol::ChildKind::Channel {
+            let Some(link) = channel::parse_link(&item.link) else {
+                bail!("invalid_key");
+            };
+            ensure!(link.id() == item.id, "wrong_link");
+            self.channel_follow(&item.link)?;
+            return Ok(());
+        }
         // The list comes from whoever runs the space. A link that goes somewhere else than it
         // says is not followed.
         let Some(link) = identity::parse_group_link(&item.link) else {

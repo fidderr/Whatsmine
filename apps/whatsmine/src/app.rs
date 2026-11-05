@@ -16,6 +16,7 @@ use crate::screens::{
     NewGroup, NotificationsScreen, People, PrivacyScreen, PublicAddress, Requests, SavedScreen,
     SearchScreen, SettingsScreen, SharedMedia, SpeedScreen, Start, StorageScreen,
 };
+use crate::screens::{ChannelInfo, ChannelView, ChannelsScreen};
 use crate::screens::{StatusNew, StatusScreen, StatusView, StatusWho};
 use crate::shell::Shell;
 
@@ -53,6 +54,12 @@ pub enum Route {
     ContactInfo { id: String },
     #[route("/look/:id")]
     ChatLook { id: String },
+    #[route("/channels")]
+    ChannelsScreen {},
+    #[route("/channel/:id")]
+    ChannelView { id: String },
+    #[route("/channel/:id/info")]
+    ChannelInfo { id: String },
     #[route("/status")]
     StatusScreen {},
     #[route("/status/new")]
@@ -346,7 +353,7 @@ fn Main(core: AppCore) -> Element {
                         );
                         *rev.write() += 1;
                     }
-                    Ok(CoreEvent::StatusChanged) => *rev.write() += 1,
+                    Ok(CoreEvent::StatusChanged | CoreEvent::ChannelsChanged) => *rev.write() += 1,
                     Ok(CoreEvent::Presence {
                         contact_id, online, ..
                     }) => {

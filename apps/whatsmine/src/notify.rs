@@ -136,6 +136,22 @@ impl Hub {
                     chat: Some(m.contact_id.clone()),
                 })]
             }
+            CoreEvent::ChannelPost {
+                channel,
+                name,
+                text,
+            } => {
+                if ui_active {
+                    return Vec::new();
+                }
+                vec![Action::Post(Notice {
+                    tag: format!("channel:{channel}"),
+                    kind: Kind::Message,
+                    title: name.clone(),
+                    body: text.chars().take(120).collect(),
+                    chat: None,
+                })]
+            }
             CoreEvent::Reminder { message_id } => {
                 let Some((chat, line)) = look.message_line(message_id) else {
                     return Vec::new();

@@ -86,3 +86,65 @@ async fn add_and_talk_over_the_real_dht() {
     a.shutdown();
     b.shutdown();
 }
+
+/// A channel over the real DHT, and a long post from the author over the real internet. With
+/// `only_relays` the follower's address stays hidden. Times are printed, to report.
+async fn channel_run(only_relays: bool) {
+    let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let author = start(da.path(), "Roy");
+    let follower = start(db.path(), "Noor");
+    let mut settings = follower.settings();
+    settings.channel_relays_only = only_relays;
+    follower.save_settings(&settings).unwrap();
+    for core in [&author, &follower] {
+        core.set_in_front(true);
+    }
+    let c = author.channel_create("A real channel").unwrap();
+    let started = Instant::now();
+    author
+        .channel_write(&c.id, "Short, by itself", None)
+        .unwrap();
+    let long = "A longer story that does not fit in a record. ".repeat(40);
+    author.channel_write(&c.id, &long, None).unwrap();
+    // Give the DHT a moment for the writes: they take seconds.
+    tokio::time::sleep(Duration::from_secs(12)).await;
+    let _ = follower.channel_follow(&c.link()).unwrap();
+    let followed = Instant::now();
+    until("the short post", 180, || {
+        follower.channel_posts(&c.id).iter().any(|p| p.number == 1)
+    })
+    .await;
+    println!(
+        "short post {} ms after following, {} ms after writing",
+        followed.elapsed().as_millis(),
+        started.elapsed().as_millis()
+    );
+    until("the long post", 240, || {
+        follower
+            .channel_posts(&c.id)
+            .iter()
+            .any(|p| p.number == 2 && p.has_body)
+    })
+    .await;
+    println!(
+        "long post {} ms after following (only relays: {only_relays})",
+        followed.elapsed().as_millis()
+    );
+    let got = follower.channel_posts(&c.id);
+    assert_eq!(
+        got.iter().find(|p| p.number == 2).unwrap().text,
+        long.trim()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "uses the real internet"]
+async fn a_channel_over_the_real_dht() {
+    channel_run(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "uses the real internet"]
+async fn a_channel_only_through_relays() {
+    channel_run(true).await;
+}

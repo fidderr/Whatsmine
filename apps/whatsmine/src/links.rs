@@ -17,6 +17,9 @@ pub struct InviteSig(pub Signal<Option<Invite>>);
 /// Looks for an invitation in `text` and, if there is one, asks about it.
 /// False if the text holds none.
 pub fn offer(mut sig: InviteSig, text: &str) -> bool {
+    if offer_channel(text) {
+        return true;
+    }
     if let Some(link) = whatsmine_core::identity::parse_group_link(text) {
         // Asked about in the same way, with a dialog of its own.
         if let Ok(mut pending) = PENDING_JOIN.lock() {
@@ -37,6 +40,84 @@ pub fn offer(mut sig: InviteSig, text: &str) -> bool {
 static PENDING_JOIN: std::sync::Mutex<Option<whatsmine_core::identity::GroupLink>> =
     std::sync::Mutex::new(None);
 static JOIN_NEWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+static PENDING_CHANNEL: std::sync::Mutex<Option<whatsmine_core::channel::ChannelLink>> =
+    std::sync::Mutex::new(None);
+static CHANNEL_NEWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A channel's link, if this holds one: asked about in a dialog of its own.
+pub fn offer_channel(text: &str) -> bool {
+    let Some(link) = whatsmine_core::channel::parse_link(text) else {
+        return false;
+    };
+    if let Ok(mut pending) = PENDING_CHANNEL.lock() {
+        *pending = Some(link);
+    }
+    CHANNEL_NEWS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    true
+}
+
+/// Before following: what it means, once, in words.
+#[component]
+pub fn ChannelDialog() -> Element {
+    let tr = use_tr();
+    let core = use_core();
+    let nav = use_navigator();
+    let settings = crate::components::use_settings();
+    let mut toast_sig = use_context::<ToastSig>();
+    let mut shown: Signal<Option<whatsmine_core::channel::ChannelLink>> = use_signal(|| None);
+    let mut seen = use_signal(|| 0u64);
+    use_future(move || async move {
+        loop {
+            let news = CHANNEL_NEWS.load(std::sync::atomic::Ordering::Relaxed);
+            if news != *seen.peek() {
+                seen.set(news);
+                shown.set(PENDING_CHANNEL.lock().ok().and_then(|mut p| p.take()));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    });
+    let Some(link) = shown() else {
+        return rsx! {};
+    };
+    let text = link.link();
+    rsx! {
+        div { class: "scrim center", onclick: move |_| shown.set(None),
+            BackLayer { on_back: move |_| shown.set(None) }
+            div { class: "confirm-dialog invite-dialog", "data-t": "channel-dialog", onclick: move |e| e.stop_propagation(),
+                h3 { "{link.name}" }
+                p { "{t(&tr, \"channel.follow_body\")}" }
+                p { class: "note", "{t(&tr, \"channel.follow_address\")}" }
+                div { class: "group",
+                    crate::components::SwitchRow {
+                        title: t(&tr, "channel.relays"),
+                        note: t(&tr, "channel.relays_note"),
+                        checked: settings().channel_relays_only,
+                        tag: "channel-follow-relays",
+                        on_change: move |v: bool| crate::components::change(settings, |s| s.channel_relays_only = v),
+                    }
+                }
+                div { class: "btns",
+                    button { class: "btn", onclick: move |_| shown.set(None), "{t(&tr, \"channel.not_now\")}" }
+                    button {
+                        class: "btn main",
+                        "data-t": "channel-follow",
+                        onclick: move |_| {
+                            shown.set(None);
+                            match core.channel_follow(&text) {
+                                Ok(c) => {
+                                    nav.push(crate::app::Route::ChannelView { id: c.id });
+                                }
+                                Err(_) => toast(&mut toast_sig, t(&tr, "channel.follow_failed"), ToastLevel::Error),
+                            }
+                        },
+                        "{t(&tr, \"channel.follow\")}"
+                    }
+                }
+            }
+        }
+    }
+}
 
 /// The question: join this group?
 #[component]

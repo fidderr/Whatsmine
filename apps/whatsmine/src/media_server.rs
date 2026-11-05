@@ -233,6 +233,29 @@ pub fn serve_avatar(core: &Core, path: &str) -> Served {
 }
 
 /// A look's photo. It lies sealed in the database, and comes from there.
+/// A channel post's photo: `/channel-photo/<channel>/<number>`. Only what the database has.
+pub fn serve_channel_photo(core: &Core, path: &str) -> Served {
+    let mut parts = path.trim_start_matches('/').rsplit('/');
+    let number = parts.next().and_then(|n| n.parse::<u64>().ok());
+    let channel = parts.next().unwrap_or("");
+    match number.and_then(|number| core.channel_photo(channel, number)) {
+        Some(body) => Served {
+            status: 200,
+            headers: vec![
+                ("Content-Type", "image/jpeg".to_string()),
+                ("X-Content-Type-Options", "nosniff".to_string()),
+                ("Cache-Control", "no-store".to_string()),
+            ],
+            body,
+        },
+        None => Served {
+            status: 404,
+            headers: Vec::new(),
+            body: Vec::new(),
+        },
+    }
+}
+
 /// A post's photo, by the id of the post. Goes with the post.
 pub fn serve_status_photo(core: &Core, path: &str) -> Served {
     let id = path
@@ -382,6 +405,10 @@ pub fn use_media_server(core: Core) {
         let c = core.clone();
         host::use_asset_handler("look-photo", move |req, responder| {
             reply(responder, serve_look_photo(&c, req.uri().path()));
+        });
+        let c = core.clone();
+        host::use_asset_handler("channel-photo", move |req, responder| {
+            reply(responder, serve_channel_photo(&c, req.uri().path()));
         });
         let c = core.clone();
         host::use_asset_handler("status-photo", move |req, responder| {

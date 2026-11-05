@@ -48,6 +48,7 @@ use crate::sealing::{OpenError, Sealing};
 use crate::sibling::{DeviceState, SyncEvent};
 
 mod call;
+mod channel;
 mod control;
 mod group;
 mod status;
@@ -242,6 +243,15 @@ pub(crate) enum Cmd {
     /// We need a whole picture of the screen we are watching.
     CallScreenKey,
     CallHand(bool),
+    /// We wrote in a channel, or started following one.
+    ChannelOut(String),
+    /// We left: nothing that was on its way brings it back.
+    ChannelForget(String),
+    ChannelReact {
+        id: String,
+        number: u64,
+        emoji: usize,
+    },
     /// What we owe changed: posts to send, or one taken back. The app is in use.
     StatusOut,
     /// We looked at something.
@@ -265,6 +275,14 @@ pub(crate) enum Cmd {
 
 /// Events from the connection tasks back into the engine.
 enum Internal {
+    ChannelsFound(Vec<channel::Found>, bool),
+    /// All of a post, checked, from another follower.
+    ChannelBody {
+        id: String,
+        number: u64,
+        sealed: Vec<u8>,
+    },
+    ChannelSwarmOver(String),
     /// Input off the wire, not opened yet.
     ControlBatch {
         peer: PublicKey,
@@ -367,6 +385,8 @@ pub(crate) struct Shared {
     pub group_calls: Arc<Mutex<HashMap<String, bool>>>,
     /// Who is in each group's call, as far as we heard.
     pub group_call_people: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    /// The keys a channel's endpoints used, for a test to see they are not anyone's.
+    pub channel_swarm_keys: channel::KeysUsed,
     /// The call we are in or being rung for, if any.
     pub call: Arc<Mutex<Option<CallSnapshot>>>,
 }
@@ -439,6 +459,7 @@ pub(crate) struct Engine {
     corrupt_retries: HashMap<String, u8>,
     call: Option<CallState>,
     control: control::ControlSide,
+    channel: channel::ChannelSide,
     control_sink: calls::ControlSink,
     control_scope_was_whole: bool,
     /// What this device is, next to another one of the same person.
@@ -513,6 +534,7 @@ impl Engine {
             corrupt_retries: HashMap::new(),
             call: None,
             control: control::ControlSide::new(),
+            channel: channel::ChannelSide::default(),
             control_sink,
             control_scope_was_whole: false,
             group_calls: HashMap::new(),
@@ -573,6 +595,7 @@ impl Engine {
             tokio::select! {
                 cmd = cmds.recv() => match cmd {
                     Some(Cmd::Shutdown(done)) => {
+                        engine.channels_stop();
                         for (_, s) in engine.sessions.drain() {
                             s.conn.close(0u32.into(), b"bye");
                         }
@@ -673,6 +696,7 @@ impl Engine {
         self.dial_due(now);
         self.publish_due(now);
         self.poll_requests_due(&plan, now);
+        self.channels_due(&plan, now);
         self.leave_requests_due(now);
         self.ask_for_wake(&plan, now);
     }
@@ -738,6 +762,7 @@ impl Engine {
     /// Nothing held: the radio can rest.
     fn take_down(&mut self) {
         let Some(ep) = self.ep.take() else { return };
+        self.channels_stop();
         self.records = None;
         self.published = None;
         self.publishing = false;
@@ -879,6 +904,9 @@ impl Engine {
                 }
             }
             if let Some(at) = self.next_request_poll {
+                sooner(at);
+            }
+            if let Some(at) = self.next_channel_look() {
                 sooner(at);
             }
             for (at, _) in self.requests_out.values() {
@@ -2419,6 +2447,9 @@ impl Engine {
                 height,
                 can_control,
             } => self.call_screen_on(on, width, height, can_control),
+            Cmd::ChannelOut(id) => self.channel_out(&id),
+            Cmd::ChannelForget(id) => self.db.delete_channel(&id),
+            Cmd::ChannelReact { id, number, emoji } => self.channel_react(&id, number, emoji),
             Cmd::StatusOut => self.status_out(),
             Cmd::StatusTell => {
                 let peers: Vec<PublicKey> = self.sessions.keys().copied().collect();
@@ -2666,6 +2697,11 @@ impl Engine {
                 sealed,
             } => self.on_control_batch(peer, session, &sealed),
             Internal::ControlStrike => self.control_strike(),
+            Internal::ChannelsFound(found, pass_on) => self.on_channels_found(found, pass_on),
+            Internal::ChannelBody { id, number, sealed } => {
+                self.on_channel_body(&id, number, &sealed);
+            }
+            Internal::ChannelSwarmOver(id) => self.on_channel_swarm_over(&id),
             Internal::Connected {
                 conn,
                 send,
@@ -2735,6 +2771,8 @@ impl Engine {
                     self.on_broken(peer);
                 }
             }
+            // An endpoint that went down can still say it is online, a moment too late.
+            Internal::Net(NetStatus::Online) if self.ep.is_none() => {}
             Internal::Net(status) => self.set_net(status),
             Internal::Progress {
                 contact_id,

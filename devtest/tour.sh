@@ -393,6 +393,36 @@ if wanted status; then
     fi
 fi
 
+scenario channels
+if wanted channels; then
+    fresh "demo name=Roy theme=$THEME locale=$LOCALE"
+    if on_screen .bottom-nav 60; then
+        tap tab-people 0 0.3
+        on_screen '[data-t="channels-row"]' 6 && tap channels-row 0 0.3
+        if on_screen '[data-t="channel-row"]' 6; then
+            look_through channels
+            tap channel-new 0 0.3
+            on_screen '[data-t="channel-new-sheet"]' 4 && picture channel_new
+            press_back
+            js "var r = [...document.querySelectorAll('[data-t=\"channel-row\"]')].find(x => x.textContent.includes('Hill climbing')); r.click(); return 'ok'" > /dev/null
+            on_screen '[data-t="channel"]' 6 && look_through channel_mine
+            tap channel-info 0 0.3
+            on_screen '[data-t="channel-info-screen"]' 6 && look_through channel_info
+            go_back
+            on_screen '[data-t="channel"]' 6
+            go_back
+            on_screen '[data-t="channel-row"]' 6
+            js "var r = [...document.querySelectorAll('[data-t=\"channel-row\"]')].find(x => x.textContent.includes('Gouda')); r.click(); return 'ok'" > /dev/null
+            on_screen '[data-t="channel"]' 6 && look_through channel_theirs
+            pass
+        else
+            fail "no channels"
+        fi
+    else
+        fail "the app did not come up"
+    fi
+fi
+
 scenario space
 if wanted space; then
     fresh "demo name=Roy theme=$THEME locale=$LOCALE"

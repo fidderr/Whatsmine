@@ -119,6 +119,13 @@ pub fn People() -> Element {
                         tag: "status-row",
                     }
                     Row {
+                        icon: IconName::Bell,
+                        title: t(&tr, "channel.title"),
+                        small: true,
+                        to: Route::ChannelsScreen {},
+                        tag: "channels-row",
+                    }
+                    Row {
                         icon: IconName::UserPlus,
                         title: t(&tr, "add.title"),
                         small: true,

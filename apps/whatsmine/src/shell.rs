@@ -216,12 +216,14 @@ pub fn Shell() -> Element {
             }
             InviteDialog {}
             crate::links::JoinDialog {}
+            crate::links::ChannelDialog {}
         };
     }
     rsx! {
         Outlet::<Route> {}
         InviteDialog {}
         crate::links::JoinDialog {}
+            crate::links::ChannelDialog {}
     }
 }
 

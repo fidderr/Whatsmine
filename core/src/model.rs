@@ -322,6 +322,13 @@ pub struct Settings {
     /// Who sees what we post.
     #[serde(default)]
     pub status_audience: crate::status::Audience,
+    /// Writing posts of channels we follow again, and giving them to other followers. Only happens
+    /// when the power rules allow it.
+    #[serde(default = "yes")]
+    pub channel_pass_on: bool,
+    /// A channel's long posts only through relays: other followers do not see our address.
+    #[serde(default)]
+    pub channel_relays_only: bool,
     /// Since when someone may ask to control this PC, if anyone. Never set during a call: what was
     /// turned on while a call runs does not count for that call.
     #[serde(default)]
@@ -379,6 +386,8 @@ impl Default for Settings {
             quiet_requests: false,
             request_filter: Vec::new(),
             status_audience: crate::status::Audience::All,
+            channel_pass_on: true,
+            channel_relays_only: false,
             control_on_since: None,
             app_lock: false,
             lock_after_s: 60,
@@ -406,6 +415,14 @@ pub enum CoreEvent {
     ContactsChanged,
     /// Posts came, went, or were looked at.
     StatusChanged,
+    /// Something in a channel changed.
+    ChannelsChanged,
+    /// A new post in a channel we follow.
+    ChannelPost {
+        channel: String,
+        name: String,
+        text: String,
+    },
     MessageAdded(Message),
     MessageStatus {
         contact_id: String,
@@ -588,4 +605,8 @@ pub enum NetStatus {
     Connecting,
     Online,
     Offline,
+}
+
+fn yes() -> bool {
+    true
 }

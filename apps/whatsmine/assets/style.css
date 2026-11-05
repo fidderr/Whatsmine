@@ -3335,6 +3335,77 @@ input[type='range'] {
 .space-open:disabled {
   cursor: default;
 }
+.channel-post {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 16px;
+  border-radius: var(--radius-lg, 16px);
+  background: var(--surface);
+}
+.channel-photo {
+  width: 100%;
+  max-height: 60vh;
+  object-fit: contain;
+  border-radius: var(--radius-md);
+}
+.channel-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.channel-meta {
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+}
+.channel-reactions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.channel-react {
+  min-height: 36px;
+  min-width: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 18px;
+  background: var(--surface2);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.875rem;
+  cursor: pointer;
+}
+.channel-react.on {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+}
+.channel-screen {
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
+  padding-bottom: var(--safe-bottom);
+}
+.channel-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+.channel-share {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  padding: 8px 16px 16px;
+}
+.channel-share .btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
 .chat-note {
   align-self: center;
   margin: 8px auto;

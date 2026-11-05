@@ -141,6 +141,25 @@ CREATE TABLE IF NOT EXISTS contact_keys (
     contact_id TEXT PRIMARY KEY REFERENCES contacts(id) ON DELETE CASCADE,
     sealed     BLOB NOT NULL
 );
+CREATE TABLE IF NOT EXISTS channels (
+    id     TEXT PRIMARY KEY,
+    sealed BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS channel_posts (
+    channel TEXT NOT NULL,
+    number  INTEGER NOT NULL,
+    at      INTEGER NOT NULL,
+    sealed  BLOB NOT NULL,
+    record  BLOB NOT NULL,
+    PRIMARY KEY (channel, number)
+);
+CREATE TABLE IF NOT EXISTS channel_bodies (
+    channel TEXT NOT NULL,
+    hash    BLOB NOT NULL,
+    number  INTEGER NOT NULL,
+    data    BLOB NOT NULL,
+    PRIMARY KEY (channel, hash)
+);
 CREATE TABLE IF NOT EXISTS status_posts (
     id        TEXT PRIMARY KEY,
     author    TEXT NOT NULL,
@@ -1074,6 +1093,264 @@ impl Database {
         if let Ok(json) = serde_json::to_vec(folders) {
             let _ = self.set_secret("folders", &json);
         }
+    }
+
+    pub fn save_channel(&self, c: &crate::channel::Channel) {
+        let Ok(json) = serde_json::to_vec(c) else {
+            return;
+        };
+        let _ = self.lock().execute(
+            "INSERT OR REPLACE INTO channels (id, sealed) VALUES (?1, ?2)",
+            params![c.id, self.vault.seal(&json)],
+        );
+    }
+
+    /// Only one that is still there: whoever left it, stays gone.
+    pub fn update_channel(&self, c: &crate::channel::Channel) {
+        let Ok(json) = serde_json::to_vec(c) else {
+            return;
+        };
+        let _ = self.lock().execute(
+            "UPDATE channels SET sealed = ?2 WHERE id = ?1",
+            params![c.id, self.vault.seal(&json)],
+        );
+    }
+
+    pub fn channel(&self, id: &str) -> Option<crate::channel::Channel> {
+        let sealed: Vec<u8> = self
+            .lock()
+            .query_row(
+                "SELECT sealed FROM channels WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .ok()?;
+        serde_json::from_slice(&self.vault.open(&sealed)?).ok()
+    }
+
+    pub fn channels(&self) -> Vec<crate::channel::Channel> {
+        let conn = self.lock();
+        let Ok(mut stmt) = conn.prepare("SELECT sealed FROM channels") else {
+            return Vec::new();
+        };
+        let found: Vec<Vec<u8>> = stmt
+            .query_map([], |r| r.get(0))
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default();
+        found
+            .iter()
+            .filter_map(|sealed| self.vault.open(sealed))
+            .filter_map(|json| serde_json::from_slice(&json).ok())
+            .collect()
+    }
+
+    pub fn delete_channel(&self, id: &str) {
+        let conn = self.lock();
+        let _ = conn.execute("DELETE FROM channels WHERE id = ?1", params![id]);
+        let _ = conn.execute("DELETE FROM channel_posts WHERE channel = ?1", params![id]);
+        let _ = conn.execute("DELETE FROM channel_bodies WHERE channel = ?1", params![id]);
+    }
+
+    fn write_channel_post(&self, post: &crate::channel::ChannelPost, record: &[u8]) -> bool {
+        let Ok(json) = serde_json::to_vec(post) else {
+            return false;
+        };
+        self.lock()
+            .execute(
+                "INSERT OR IGNORE INTO channel_posts (channel, number, at, sealed, record)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    post.channel,
+                    post.number as i64,
+                    post.at,
+                    self.vault.seal(&json),
+                    record
+                ],
+            )
+            .is_ok_and(|n| n > 0)
+    }
+
+    fn update_channel_post(&self, post: &crate::channel::ChannelPost) {
+        let Ok(json) = serde_json::to_vec(post) else {
+            return;
+        };
+        let _ = self.lock().execute(
+            "UPDATE channel_posts SET sealed = ?3 WHERE channel = ?1 AND number = ?2",
+            params![post.channel, post.number as i64, self.vault.seal(&json)],
+        );
+    }
+
+    /// Whether this post is new here.
+    pub fn add_channel_post(
+        &self,
+        channel: &str,
+        post: &crate::channel::Post,
+        record: &crate::records::SignedRecord,
+    ) -> bool {
+        self.write_channel_post(
+            &crate::channel::ChannelPost {
+                channel: channel.to_owned(),
+                number: post.number,
+                at: post.at,
+                text: post.text.clone(),
+                more: post.more.clone(),
+                has_body: post.more.is_none(),
+                reactions: vec![0; crate::channel::EMOJI.len()],
+                mine: Vec::new(),
+            },
+            &record.to_bytes(),
+        )
+    }
+
+    pub fn channel_post(&self, channel: &str, number: u64) -> Option<crate::channel::ChannelPost> {
+        let sealed: Vec<u8> = self
+            .lock()
+            .query_row(
+                "SELECT sealed FROM channel_posts WHERE channel = ?1 AND number = ?2",
+                params![channel, number as i64],
+                |r| r.get(0),
+            )
+            .ok()?;
+        serde_json::from_slice(&self.vault.open(&sealed)?).ok()
+    }
+
+    /// Oldest first, the newest ones.
+    pub fn channel_posts(&self, channel: &str, most: usize) -> Vec<crate::channel::ChannelPost> {
+        let conn = self.lock();
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT sealed FROM channel_posts WHERE channel = ?1 ORDER BY number DESC LIMIT ?2",
+        ) else {
+            return Vec::new();
+        };
+        let found: Vec<Vec<u8>> = stmt
+            .query_map(params![channel, most as i64], |r| r.get(0))
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default();
+        let mut posts: Vec<crate::channel::ChannelPost> = found
+            .iter()
+            .filter_map(|sealed| self.vault.open(sealed))
+            .filter_map(|json| serde_json::from_slice(&json).ok())
+            .collect();
+        posts.reverse();
+        posts
+    }
+
+    pub fn channel_recent_numbers(&self, channel: &str, most: usize) -> Vec<u64> {
+        let conn = self.lock();
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT number FROM channel_posts WHERE channel = ?1 ORDER BY number DESC LIMIT ?2",
+        ) else {
+            return Vec::new();
+        };
+        stmt.query_map(params![channel, most as i64], |r| r.get::<_, i64>(0))
+            .map(|rows| rows.flatten().map(|n| n as u64).collect())
+            .unwrap_or_default()
+    }
+
+    /// The newest posts as they sit in the DHT, to write them again.
+    pub fn channel_newest_records(
+        &self,
+        channel: &str,
+        most: usize,
+    ) -> Vec<crate::records::SignedRecord> {
+        let conn = self.lock();
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT record FROM channel_posts WHERE channel = ?1 ORDER BY number DESC LIMIT ?2",
+        ) else {
+            return Vec::new();
+        };
+        stmt.query_map(params![channel, most as i64], |r| r.get::<_, Vec<u8>>(0))
+            .map(|rows| {
+                rows.flatten()
+                    .filter_map(|bytes| crate::records::SignedRecord::from_bytes(&bytes))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// What we still miss of the posts we know of.
+    pub fn channel_wants(&self, channel: &str) -> Vec<(u64, crate::channel::More)> {
+        self.channel_posts(channel, 64)
+            .into_iter()
+            .filter(|p| !p.has_body)
+            .filter_map(|p| p.more.map(|more| (p.number, more)))
+            .collect()
+    }
+
+    pub fn channel_has_bodies(&self, channel: &str) -> bool {
+        self.lock()
+            .query_row(
+                "SELECT 1 FROM channel_bodies WHERE channel = ?1 LIMIT 1",
+                params![channel],
+                |_| Ok(()),
+            )
+            .is_ok()
+    }
+
+    /// As it travels: sealed with the read key, so it is stored as it is.
+    pub fn channel_body(&self, channel: &str, hash: &[u8; 32]) -> Option<Vec<u8>> {
+        self.lock()
+            .query_row(
+                "SELECT data FROM channel_bodies WHERE channel = ?1 AND hash = ?2",
+                params![channel, hash.as_slice()],
+                |r| r.get(0),
+            )
+            .ok()
+    }
+
+    pub fn set_channel_body(
+        &self,
+        channel: &str,
+        number: u64,
+        more: &crate::channel::More,
+        sealed: &[u8],
+        text: &str,
+    ) {
+        let _ = self.lock().execute(
+            "INSERT OR REPLACE INTO channel_bodies (channel, hash, number, data)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![channel, more.hash.as_slice(), number as i64, sealed],
+        );
+        if let Some(mut post) = self.channel_post(channel, number) {
+            post.has_body = true;
+            post.text = text.to_owned();
+            self.update_channel_post(&post);
+        }
+    }
+
+    /// Whether this changed what is shown.
+    pub fn set_channel_reactions(&self, channel: &str, number: u64, counts: &[u32]) -> bool {
+        let Some(mut post) = self.channel_post(channel, number) else {
+            return false;
+        };
+        if post.reactions == counts {
+            return false;
+        }
+        post.reactions = counts.to_vec();
+        self.update_channel_post(&post);
+        true
+    }
+
+    pub fn add_channel_reaction_of_mine(&self, channel: &str, number: u64, emoji: u8) {
+        if let Some(mut post) = self.channel_post(channel, number)
+            && !post.mine.contains(&emoji)
+        {
+            post.mine.push(emoji);
+            self.update_channel_post(&post);
+        }
+    }
+
+    pub fn expire_channel_posts(&self, channel: &str, before: Millis) {
+        let conn = self.lock();
+        let _ = conn.execute(
+            "DELETE FROM channel_bodies WHERE channel = ?1 AND number IN
+             (SELECT number FROM channel_posts WHERE channel = ?1 AND at < ?2)",
+            params![channel, before],
+        );
+        let _ = conn.execute(
+            "DELETE FROM channel_posts WHERE channel = ?1 AND at < ?2",
+            params![channel, before],
+        );
     }
 
     /// Whether this post is new here.

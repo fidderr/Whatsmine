@@ -235,6 +235,23 @@ async fn a_link_that_goes_somewhere_else_than_it_says_is_not_followed() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_channel_in_a_space_is_followed_through_its_own_link() {
+    let t = club().await;
+    let news = t.a.channel_create("Hill climbing news").unwrap();
+    t.a.channel_write(&news.id, "Saturday at ten", None)
+        .unwrap();
+    t.a.space_add_child(&t.space, &news.id).unwrap();
+    until("Carol sees it", || t.c.space_children(&t.space).len() == 1).await;
+    let row = t.c.space_children(&t.space).remove(0);
+    assert_eq!(row.child.kind, ChildKind::Channel);
+    assert_eq!(row.state, ChildState::Out);
+    t.c.space_open_child(&t.space, &news.id).unwrap();
+    assert_eq!(t.c.space_children(&t.space)[0].state, ChildState::In);
+    until("the post", || !t.c.channel_posts(&news.id).is_empty()).await;
+    assert_eq!(t.c.channel_posts(&news.id)[0].text, "Saturday at ten");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn not_more_than_a_list_can_hold() {
     let t = club().await;
     let mut last = Ok(());

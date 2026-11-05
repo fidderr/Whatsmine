@@ -171,6 +171,61 @@ impl Core {
             for child in [&general, &trips, &evening, &training] {
                 self.space_add_child(&space, child)?;
             }
+            // A channel of our own, and one of someone else's.
+            let news = self.channel_create("Hill climbing news")?;
+            self.channel_write(
+                &news.id,
+                "The route to the north face opens again on Saturday. Bring your own rope.",
+                None,
+            )?;
+            self.channel_write(
+                &news.id,
+                "Next meetup: Sunday 10:00 at the lower car park.",
+                None,
+            )?;
+            db.set_channel_reactions(&news.id, 1, &[12, 3, 0, 0, 0]);
+            db.set_channel_reactions(&news.id, 2, &[5, 0, 0, 0, 0]);
+            let mut mine = db.channel(&news.id).expect("just made");
+            mine.followers = 83;
+            db.save_channel(&mine);
+            self.space_add_child(&space, &news.id)?;
+            let theirs = crate::channel::new_channel("Gouda market", now_ms());
+            let secret = theirs.secret.expect("just made");
+            let mut follow = theirs.clone();
+            follow.secret = None;
+            follow.followers = 340;
+            follow.last = 2;
+            db.save_channel(&follow);
+            for (number, text, more) in [
+                (1u64, "Market is open until 17:00 this Saturday.", None),
+                (
+                    2,
+                    "The cheese weighing starts at ten. The photos follow",
+                    Some(crate::channel::More {
+                        hash: [1; 32],
+                        size: 90_000,
+                        photo: true,
+                    }),
+                ),
+            ] {
+                let post = crate::channel::Post {
+                    number,
+                    at: now_ms() - (3 - number as i64) * 3_600_000,
+                    text: text.to_owned(),
+                    more,
+                };
+                if let Some(value) = crate::channel::seal_post(&secret, &follow.read, &post) {
+                    let salt = crate::channel::post_salt(number);
+                    let record = crate::records::SignedRecord::sign(
+                        &secret,
+                        &value,
+                        number as i64,
+                        Some(&salt),
+                    );
+                    db.add_channel_post(&follow.id, &post, &record);
+                }
+            }
+            db.set_channel_reactions(&follow.id, 1, &[47, 8, 0, 0, 0]);
             // Something run by someone else, that we are not in yet.
             self.group_set_rules(&space, |r| {
                 r.children.push(protocol::SpaceChild {

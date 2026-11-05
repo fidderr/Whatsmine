@@ -144,6 +144,7 @@ fn ChildRow(space: String, view: SpaceChildView, can_remove: bool) -> Element {
     let mut toast_sig = use_context::<ToastSig>();
     let child = view.child.clone();
     let room = child.kind == ChildKind::Room;
+    let is_channel = child.kind == ChildKind::Channel;
     let icon = match child.kind {
         ChildKind::Group => IconName::Users,
         ChildKind::Room => IconName::Mic,
@@ -191,7 +192,11 @@ fn ChildRow(space: String, view: SpaceChildView, can_remove: bool) -> Element {
                 "data-t": "space-child-open",
                 disabled: !is_in,
                 onclick: move |_| {
-                    nav.push(Route::Chat { id: open_id.clone() });
+                    if is_channel {
+                        nav.push(Route::ChannelView { id: open_id.clone() });
+                    } else {
+                        nav.push(Route::Chat { id: open_id.clone() });
+                    }
                 },
                 Icon { name: icon, size: 20 }
                 div { class: "stack",

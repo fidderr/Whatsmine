@@ -1,6 +1,7 @@
 pub mod add;
 mod address;
 mod calls;
+mod channel;
 mod chat;
 mod chat_rich;
 mod chats;
@@ -18,6 +19,7 @@ mod status;
 pub use add::{AddContact, AddType};
 pub use address::PublicAddress;
 pub use calls::{Calls, calls_seen_at};
+pub use channel::{ChannelInfo, ChannelView, ChannelsScreen};
 pub use chat::Chat;
 pub use chats::{ChatList, Chats};
 pub use contact::ContactInfo;
