@@ -46,10 +46,7 @@ async fn confirm(reason: &str) -> bool {
     {
         let reason = reason.to_owned();
         tokio::task::spawn_blocking(move || {
-            matches!(
-                mobile_sentinel::biometric::authenticate(&reason),
-                Ok(mobile_sentinel::biometric::AuthResult::Success)
-            )
+            mobile_sentinel::biometric::authenticate(&reason).is_ok()
         })
         .await
         .unwrap_or(false)
