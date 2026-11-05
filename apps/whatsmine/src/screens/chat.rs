@@ -77,6 +77,37 @@ async fn send_and_report(
     }
 }
 
+/// A chat as plain text, oldest first.
+fn export_text(core: &Core, chat: &str, tr: &Translations) -> String {
+    let me = core.settings().display_name;
+    let them = core
+        .contact(chat)
+        .map(|c| c.display_name())
+        .unwrap_or_default();
+    let mut lines: Vec<String> = core
+        .messages(chat, None, u32::MAX)
+        .into_iter()
+        .map(|m| {
+            let who = if m.outgoing {
+                me.clone()
+            } else {
+                m.sender
+                    .as_ref()
+                    .and_then(|s| core.contact(s))
+                    .map_or_else(|| them.clone(), |c| c.display_name())
+            };
+            let what = match &m.attachment {
+                Some(a) if m.body.is_empty() => format!("[{}]", a.name),
+                Some(a) => format!("[{}] {}", a.name, m.body),
+                None => m.body.clone(),
+            };
+            format!("{} {who}: {what}", fmt::when(tr, m.sent_at))
+        })
+        .collect();
+    lines.push(String::new());
+    lines.join("\n")
+}
+
 /// Who is named with an @ in this text.
 fn mentions_in(text: &str, members: &[(String, String)]) -> Vec<String> {
     members
@@ -128,6 +159,7 @@ fn ChatView(id: String) -> Element {
     let mut disappear = use_signal(|| false);
     let mut typed_simple = use_signal(|| false);
     let mut query = use_signal(String::new);
+    let mut selection: Signal<Option<Vec<String>>> = use_signal(|| None);
 
     // Read while open: on mount and whenever messages change.
     {
@@ -177,7 +209,7 @@ fn ChatView(id: String) -> Element {
     let call_ready = if is_group {
         can_write
     } else {
-        contact.state == ContactState::Accepted
+        contact.state == ContactState::Accepted && id != core.my_key()
     };
     let ongoing_call = if is_group { core.group_call(&id) } else { None };
     let group_status = group_info.as_ref().map(|g| {
@@ -633,6 +665,16 @@ fn ChatView(id: String) -> Element {
                         Bubble {
                             message: m.clone(),
                             read_aloud: simple,
+                            selected: selection.read().as_ref().map(|s| s.contains(&m.id)),
+                            on_select: move |id: String| {
+                                if let Some(list) = selection.write().as_mut() {
+                                    if let Some(at) = list.iter().position(|x| *x == id) {
+                                        list.remove(at);
+                                    } else {
+                                        list.push(id);
+                                    }
+                                }
+                            },
                             sender: m.sender.as_ref().map(|s| {
                                 let name = group_info
                                     .as_ref()
@@ -649,7 +691,12 @@ fn ChatView(id: String) -> Element {
                     }
                 }
             }
-            if !can_write {
+            if let Some(chosen) = selection() {
+                SelectBar {
+                    chosen,
+                    on_close: move |_| selection.set(None),
+                }
+            } else if !can_write {
                 div { class: "sys-line", style: "margin:8px", "{t(&tr, \"group.inactive\")}" }
             } else if recording() {
                 VoiceBar {
@@ -835,23 +882,23 @@ fn ChatView(id: String) -> Element {
                             let mut a = attach_file;
                             move |_| a(Attach::File)
                         } }
-                        AttachTile { label: t(&tr, "rich.poll"), icon: IconName::Poll, tag: "poll", on_tap: move |_| {
+                        AttachTile { label: t(&tr, "rich.poll"), icon: IconName::Poll, tag: "new-poll", on_tap: move |_| {
                             sheet.set(false);
                             compose.set(Some(ComposeKind::Poll));
                         } }
-                        AttachTile { label: t(&tr, "rich.list"), icon: IconName::ListCheck, tag: "list", on_tap: move |_| {
+                        AttachTile { label: t(&tr, "rich.list"), icon: IconName::ListCheck, tag: "new-list", on_tap: move |_| {
                             sheet.set(false);
                             compose.set(Some(ComposeKind::List));
                         } }
-                        AttachTile { label: t(&tr, "rich.plan"), icon: IconName::Calendar, tag: "plan", on_tap: move |_| {
+                        AttachTile { label: t(&tr, "rich.plan"), icon: IconName::Calendar, tag: "new-plan", on_tap: move |_| {
                             sheet.set(false);
                             compose.set(Some(ComposeKind::Plan));
                         } }
-                        AttachTile { label: t(&tr, "rich.place"), icon: IconName::Place, tag: "place", on_tap: move |_| {
+                        AttachTile { label: t(&tr, "rich.place"), icon: IconName::Place, tag: "new-place", on_tap: move |_| {
                             sheet.set(false);
                             compose.set(Some(ComposeKind::Place));
                         } }
-                        AttachTile { label: t(&tr, "rich.contact"), icon: IconName::Card, tag: "card", on_tap: move |_| {
+                        AttachTile { label: t(&tr, "rich.contact"), icon: IconName::Card, tag: "new-card", on_tap: move |_| {
                             sheet.set(false);
                             compose.set(Some(ComposeKind::Contact));
                         } }
@@ -919,6 +966,33 @@ fn ChatView(id: String) -> Element {
                                 nav.push(Route::ChatLook { id: look_id.clone() });
                             },
                         }
+                        SheetItem {
+                            label: t(&tr, "chat.export"),
+                            icon: IconName::Download,
+                            tag: "export",
+                            on_tap: {
+                                let (core, id, name) = (core.clone(), id.clone(), name.clone());
+                                move |_| {
+                                    more.set(false);
+                                    let text = export_text(&core, &id, &tr);
+                                    let (core, name) = (core.clone(), name.clone());
+                                    spawn(async move {
+                                        let saved = crate::screens::settings::save_text_file(
+                                            &core,
+                                            &format!("{name}.txt"),
+                                            "text/plain",
+                                            text.into_bytes(),
+                                        )
+                                        .await;
+                                        let mut sig = toast_sig;
+                                        match saved {
+                                            Some(place) => toast(&mut sig, t(&tr, "file.saved").replace("{path}", &place), ToastLevel::Info),
+                                            None => toast(&mut sig, t(&tr, "file.save_failed"), ToastLevel::Error),
+                                        }
+                                    });
+                                }
+                            },
+                        }
                     }
                 }
             }
@@ -984,10 +1058,57 @@ fn ChatView(id: String) -> Element {
                         js::focus("composer");
                     },
                     on_delivery: move |id: String| delivery.set(Some(id)),
+                    on_select: move |id: String| selection.set(Some(vec![id])),
                 }
             }
             if let Some(m) = forward() {
                 ForwardSheet { message: m, on_close: move |_| forward.set(None) }
+            }
+        }
+    }
+}
+
+/// Several messages at once: what can be done with all of them.
+#[component]
+fn SelectBar(chosen: Vec<String>, on_close: EventHandler<()>) -> Element {
+    let tr = use_tr();
+    let core = use_core();
+    let mut toast_sig = use_context::<ToastSig>();
+    let count = t(&tr, "chat.selected").replace("{n}", &chosen.len().to_string());
+    let (copy_core, delete_core) = (core.clone(), core);
+    let (copy_list, delete_list) = (chosen.clone(), chosen);
+    rsx! {
+        div { class: "bar-note", "data-t": "select-bar", style: "padding-bottom:calc(4px + var(--safe-bottom))",
+            button { class: "ib", aria_label: "{t(&tr, \"common.cancel\")}", onclick: move |_| on_close.call(()),
+                Icon { name: IconName::Xmark, size: 20 }
+            }
+            span { class: "stack b", "{count}" }
+            button {
+                class: "ib",
+                "data-t": "select-copy",
+                aria_label: "{t(&tr, \"chat.copy\")}",
+                onclick: move |_| {
+                    // In the order they were written, whichever order they were tapped.
+                    let mut found: Vec<Message> = copy_list.iter().filter_map(|id| copy_core.message(id)).collect();
+                    found.sort_by_key(|m| m.sent_at);
+                    let text: Vec<String> = found.into_iter().map(|m| m.body).filter(|b| !b.is_empty()).collect();
+                    js::copy_text(&text.join("\n"));
+                    toast(&mut toast_sig, t(&tr, "common.copied"), ToastLevel::Info);
+                    on_close.call(());
+                },
+                Icon { name: IconName::Copy, size: 20 }
+            }
+            button {
+                class: "ib danger-text",
+                "data-t": "select-delete",
+                aria_label: "{t(&tr, \"chat.delete_for_me\")}",
+                onclick: move |_| {
+                    for id in &delete_list {
+                        delete_core.delete_message(id);
+                    }
+                    on_close.call(());
+                },
+                Icon { name: IconName::Trash, size: 20 }
             }
         }
     }
@@ -1058,6 +1179,10 @@ fn Bubble(
     message: Message,
     #[props(default)] sender: Option<(String, String)>,
     #[props(default)] read_aloud: bool,
+    /// While choosing several: whether this one is chosen.
+    #[props(default)]
+    selected: Option<bool>,
+    on_select: EventHandler<String>,
     on_menu: EventHandler<Message>,
     on_view: EventHandler<String>,
     on_delivery: EventHandler<String>,
@@ -1113,9 +1238,17 @@ fn Bubble(
         })
         .collect();
     let body_for_voice = message.body.clone();
+    let tap_id = message.id.clone();
 
     rsx! {
-        div { class: "bubble-wrap {dir}", id: "msg-{message.id}",
+        div {
+            class: if selected == Some(true) { "bubble-wrap {dir} chosen" } else { "bubble-wrap {dir}" },
+            id: "msg-{message.id}",
+            onclick: move |_| {
+                if selected.is_some() {
+                    on_select.call(tap_id.clone());
+                }
+            },
             div {
                 class,
                 "data-t": "bubble",
@@ -1338,6 +1471,7 @@ fn MessageMenu(
     on_reply: EventHandler<Message>,
     on_edit: EventHandler<Message>,
     on_delivery: EventHandler<String>,
+    on_select: EventHandler<String>,
 ) -> Element {
     let tr = use_tr();
     let core = use_core();
@@ -1571,6 +1705,18 @@ fn MessageMenu(
                             on_close.call(());
                         },
                     }
+                }
+                SheetItem {
+                    label: t(&tr, "chat.select"),
+                    icon: IconName::CheckDouble,
+                    tag: "select",
+                    on_tap: {
+                        let id = id.clone();
+                        move |_| {
+                            on_select.call(id.clone());
+                            on_close.call(());
+                        }
+                    },
                 }
                 if message.outgoing && !unsent {
                     SheetItem {

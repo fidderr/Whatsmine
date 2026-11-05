@@ -198,23 +198,23 @@ if wanted group; then
     if on_screen '[data-t="poll"]' 6 || on_screen '[data-t="attach"]' 2; then
         look_through group_chat
         tap attach 0 0.3
-        tap poll 0 0.3 && picture compose_poll
+        tap new-poll 0 0.3 && picture compose_poll
         press_back
         sleep 0.2
         tap attach 0 0.3
-        tap plan 0 0.3 && picture compose_plan
+        tap new-plan 0 0.3 && picture compose_plan
         press_back
         sleep 0.2
         tap attach 0 0.3
-        tap list 0 0.3 && picture compose_list
+        tap new-list 0 0.3 && picture compose_list
         press_back
         sleep 0.2
         tap attach 0 0.3
-        tap place 0 0.3 && picture compose_place
+        tap new-place 0 0.3 && picture compose_place
         press_back
         sleep 0.2
         tap attach 0 0.3
-        tap card 0 0.3 && picture compose_card
+        tap new-card 0 0.3 && picture compose_card
         press_back
         sleep 0.2
         if tap chat-peer; then

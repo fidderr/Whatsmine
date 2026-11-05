@@ -45,7 +45,16 @@ pub fn ForwardSheet(message: Message, on_close: EventHandler<()>) -> Element {
                 Some(file) => {
                     media::send_files(core, contact.id, vec![file], message.body.clone()).await
                 }
-                None => match core.send(&contact.id, &message.body) {
+                None => match core.send_with(
+                    &contact.id,
+                    &message.body,
+                    whatsmine_core::rich::MessageExtra {
+                        forwarded: true,
+                        rich: message.extra.rich.clone(),
+                        ..Default::default()
+                    },
+                    None,
+                ) {
                     Ok(_) => Vec::new(),
                     Err(e) => vec![e.to_string()],
                 },

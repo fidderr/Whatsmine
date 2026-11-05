@@ -35,6 +35,7 @@ fn Welcome(on_next: EventHandler<()>) -> Element {
     let mut name = use_signal(String::new);
     let mut choosing = use_signal(|| false);
     let mut camera = use_signal(|| false);
+    let mut restoring = use_signal(|| false);
     let s = settings();
 
     let apply_photo = {
@@ -105,11 +106,21 @@ fn Welcome(on_next: EventHandler<()>) -> Element {
             p { class: "note", "{t(&tr, \"start.name_note\")}" }
             div { class: "grow" }
             button {
+                class: "btn",
+                style: "background:transparent",
+                "data-t": "start-restore",
+                onclick: move |_| restoring.set(true),
+                "{t(&tr, \"start.used_before\")}"
+            }
+            button {
                 class: "btn main",
                 "data-t": "start-next",
                 disabled: name().trim().is_empty(),
                 onclick: move |_| finish(),
                 "{t(&tr, \"start.continue\")}"
+            }
+            if restoring() {
+                crate::screens::settings::RestoreSheet { on_close: move |_| restoring.set(false) }
             }
             if choosing() {
                 Sheet { on_close: move |_| choosing.set(false),

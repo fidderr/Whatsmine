@@ -12,6 +12,7 @@
 //! (local database work plus a message to the engine), so they can be called
 //! straight from UI event handlers. Updates arrive through [`Core::subscribe`].
 
+pub mod backup;
 pub mod calls;
 pub mod codes;
 pub mod db;
@@ -135,9 +136,16 @@ impl Core {
     pub fn start(dir: &Path, mode: NetMode) -> anyhow::Result<Core> {
         std::fs::create_dir_all(dir)?;
         let started_clean = paths::clean_start(dir).context("removing old data")?;
+        let restored = {
+            let vault = vault::Vault::open_or_create(dir).context("opening the vault")?;
+            backup::apply_if_left(dir, &vault).context("restoring")?
+        };
         let vault = Arc::new(vault::Vault::open_or_create(dir).context("opening the vault")?);
         let (db, recovery) = Database::open_with_recovery(&dir.join(DB_FILE), vault);
         let db = Arc::new(db);
+        if let backup::Restored::Words(words) = &restored {
+            identity::Identity::from_words(words)?.save(&db)?;
+        }
         let me = identity::Identity::load_or_create(&db).context("loading identity")?;
         let key = me.person();
         ensure_main_invite(&db);
@@ -473,7 +481,7 @@ impl Core {
             .db
             .contacts_in(&[ContactState::Accepted, ContactState::PendingOut])
             .into_iter()
-            .filter(|c| c.kind == ContactKind::Person)
+            .filter(|c| c.kind == ContactKind::Person && c.id != self.my_key())
             .collect();
         people.sort_by_cached_key(|c| c.display_name().to_lowercase());
         people
@@ -679,6 +687,39 @@ impl Core {
             .unwrap_or_default()
     }
 
+    /// Everything except the files, in one file only the 12 words open.
+    pub fn make_backup(&self) -> anyhow::Result<Vec<u8>> {
+        let me = identity::Identity::load_or_create(&self.inner.db)?;
+        let copy = self.inner.dir.join("backup.tmp");
+        self.inner.db.snapshot(&copy)?;
+        let read = std::fs::read(&copy);
+        let _ = std::fs::remove_file(&copy);
+        backup::seal(&me, self.inner.db.vault().key(), read?)
+    }
+
+    /// Who you are from the words, with a backup or without. Happens at the next start, which
+    /// replaces what is here now. Errors: `wrong_words`, `wrong_backup`.
+    pub fn restore_on_next_start(
+        &self,
+        words: &str,
+        backup_file: Option<Vec<u8>>,
+    ) -> anyhow::Result<()> {
+        backup::leave_for_next_start(&self.inner.dir, self.inner.db.vault(), words, backup_file)
+    }
+
+    /// Your own chat: nobody else is in it and it needs no network. Made the first time.
+    pub fn notes_chat(&self, name: &str) -> String {
+        let me = self.my_key();
+        if self.inner.db.contact(&me).is_none() {
+            let _ =
+                self.inner
+                    .db
+                    .upsert_contact(&me, ContactState::Accepted, Some(name), Some(name));
+            self.emit(CoreEvent::ContactsChanged);
+        }
+        me
+    }
+
     /// What we know about how this contact got here.
     pub fn contact_keys(&self, id: &str) -> ContactKeys {
         self.inner.db.contact_keys(id).unwrap_or_default()
@@ -822,6 +863,7 @@ impl Core {
         extra.disappear_ms = self.inner.db.chat_prefs(contact_id).disappear_ms;
         let now = now_ms();
         let later = at.filter(|at| *at > now);
+        let to_self = contact_id == self.my_key();
         let message = Message {
             id: uuid::Uuid::now_v7().to_string(),
             contact_id: contact_id.to_string(),
@@ -831,6 +873,8 @@ impl Core {
             received_at: now,
             status: if later.is_some() {
                 MessageStatus::Scheduled
+            } else if to_self {
+                MessageStatus::Read
             } else {
                 MessageStatus::Queued
             },
@@ -851,7 +895,9 @@ impl Core {
         }
         self.emit(CoreEvent::MessageAdded(message.clone()));
         self.emit(CoreEvent::ContactsChanged);
-        self.dispatch(contact_id, peer, &message);
+        if !to_self {
+            self.dispatch(contact_id, peer, &message);
+        }
         Ok(message)
     }
 
@@ -1346,7 +1392,11 @@ impl Core {
             body: caption.to_string(),
             sent_at: now,
             received_at: now,
-            status: MessageStatus::Queued,
+            status: if contact_id == self.my_key() {
+                MessageStatus::Read
+            } else {
+                MessageStatus::Queued
+            },
             read: true,
             attachment: Some(Attachment {
                 name,
@@ -1354,7 +1404,11 @@ impl Core {
                 size,
                 sha256: files::to_hex(&sha),
                 path: Some(dest.to_string_lossy().into_owned()),
-                state: TransferState::Transferring,
+                state: if contact_id == self.my_key() {
+                    TransferState::Done
+                } else {
+                    TransferState::Transferring
+                },
                 duration_ms,
             }),
             sender: None,
@@ -1369,7 +1423,9 @@ impl Core {
         }
         self.emit(CoreEvent::MessageAdded(message.clone()));
         self.emit(CoreEvent::ContactsChanged);
-        self.dispatch(contact_id, peer, &message);
+        if contact_id != self.my_key() {
+            self.dispatch(contact_id, peer, &message);
+        }
         Ok(message)
     }
 

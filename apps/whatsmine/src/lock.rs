@@ -41,6 +41,11 @@ pub fn LockScreen() -> Element {
     }
 }
 
+/// Whoever holds the device proves it is them, where it can ask at all.
+pub async fn prove(reason: &str) -> bool {
+    confirm(reason).await
+}
+
 async fn confirm(reason: &str) -> bool {
     #[cfg(target_os = "android")]
     {

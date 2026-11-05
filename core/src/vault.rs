@@ -103,7 +103,13 @@ impl Vault {
             return Ok(Self { key });
         }
         let key = random::<32>();
-        let held = PROTECTOR.get().and_then(|p| (p.wrap)(&key));
+        Self::replace_key(dir, &key)?;
+        Ok(Self { key })
+    }
+
+    /// This key from now on, held the way this device holds keys.
+    pub fn replace_key(dir: &Path, key: &[u8; 32]) -> anyhow::Result<()> {
+        let held = PROTECTOR.get().and_then(|p| (p.wrap)(key));
         let mut file = Vec::new();
         match held {
             Some(wrapped) => {
@@ -112,14 +118,19 @@ impl Vault {
             }
             None => {
                 file.push(IN_THE_FILE);
-                file.extend_from_slice(&key);
+                file.extend_from_slice(key);
             }
         }
         // In one go: half a key file would lose everything sealed with it.
         let unfinished = dir.join("vault.key.tmp");
         std::fs::write(&unfinished, file)?;
-        std::fs::rename(unfinished, &path)?;
-        Ok(Self { key })
+        std::fs::rename(unfinished, dir.join(KEY_FILE))?;
+        Ok(())
+    }
+
+    /// For a backup, which has to open somewhere else.
+    pub fn key(&self) -> &[u8; 32] {
+        &self.key
     }
 
     /// A vault for what does not outlive the process.

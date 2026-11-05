@@ -207,6 +207,18 @@ impl Database {
         self.conn.lock().unwrap_or_else(|p| p.into_inner())
     }
 
+    pub fn vault(&self) -> &Vault {
+        &self.vault
+    }
+
+    /// A consistent copy of the whole database, while it is in use.
+    pub fn snapshot(&self, to: &Path) -> rusqlite::Result<()> {
+        let _ = std::fs::remove_file(to);
+        self.lock()
+            .execute("VACUUM INTO ?1", params![to.to_string_lossy()])?;
+        Ok(())
+    }
+
     /// Deletes every row and compacts the file so nothing lingers on disk.
     pub fn wipe(&self) -> rusqlite::Result<()> {
         self.lock().execute_batch(

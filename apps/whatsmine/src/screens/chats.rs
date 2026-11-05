@@ -234,8 +234,12 @@ fn ChatMenu(chat: ChatSummary, on_close: EventHandler<()>) -> Element {
             core.set_chat_prefs(&id, &p);
         }
     };
-    let (for_unread, for_archive, for_snooze) =
-        (with_prefs.clone(), with_prefs.clone(), with_prefs);
+    let (for_unread, for_archive, for_snooze, for_hide) = (
+        with_prefs.clone(),
+        with_prefs.clone(),
+        with_prefs.clone(),
+        with_prefs,
+    );
     let (read_core, pin_core, mute_core, del_core) =
         (core.clone(), core.clone(), core.clone(), core.clone());
     let (read_id, pin_id, mute_id, del_id) = (id.clone(), id.clone(), id.clone(), id.clone());
@@ -321,6 +325,15 @@ fn ChatMenu(chat: ChatSummary, on_close: EventHandler<()>) -> Element {
                     icon: IconName::Archive,
                     on_tap: move |_| {
                         for_archive(&|p| p.archived = !archived);
+                        on_close.call(());
+                    },
+                }
+                SheetItem {
+                    label: t(&tr, "chats.hide"),
+                    icon: IconName::Lock,
+                    tag: "chat-hide",
+                    on_tap: move |_| {
+                        for_hide(&|p| p.locked = true);
                         on_close.call(());
                     },
                 }

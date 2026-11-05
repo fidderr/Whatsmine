@@ -329,6 +329,9 @@ pub struct Settings {
     pub reactions: Vec<String>,
     /// Texts to send with one tap.
     pub quick_replies: Vec<String>,
+    /// A backup every week, without being asked.
+    pub auto_backup: bool,
+    pub last_backup_at: Millis,
 }
 
 /// Default for [`Settings::max_file_mb`].
@@ -375,6 +378,8 @@ impl Default for Settings {
                 .map(str::to_owned)
                 .to_vec(),
             quick_replies: Vec::new(),
+            auto_backup: false,
+            last_backup_at: 0,
         }
     }
 }

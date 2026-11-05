@@ -1166,6 +1166,11 @@ textarea::placeholder {
   flex-direction: column;
   max-width: min(78%, 520px);
 }
+.bubble-wrap.chosen {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+  border-radius: 16px;
+}
 .bubble-wrap.out {
   align-self: flex-end;
   align-items: flex-end;
@@ -1420,6 +1425,10 @@ textarea::placeholder {
   padding: 10px 0;
   border: none;
   background: transparent;
+}
+.pill textarea:focus-visible,
+.search-box input:focus-visible {
+  outline: none;
 }
 .pill .ib {
   width: 36px;

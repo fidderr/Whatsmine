@@ -151,6 +151,22 @@ pub fn Shell() -> Element {
     #[cfg(not(target_os = "android"))]
     let _ = &core;
 
+    // A backup every week, if asked for, once things have settled.
+    {
+        let core = core.clone();
+        use_future(move || {
+            let core = core.clone();
+            async move {
+                const WEEK: i64 = 7 * 24 * 3600 * 1000;
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                let s = settings.peek().clone();
+                if s.auto_backup && whatsmine_core::model::now_ms() - s.last_backup_at > WEEK {
+                    let _ = crate::screens::settings::back_up_now(core, settings).await;
+                }
+            }
+        });
+    }
+
     let simple = settings.read().simple_mode;
     let route = use_route::<Route>();
     if wide() && !simple {

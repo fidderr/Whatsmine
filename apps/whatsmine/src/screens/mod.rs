@@ -9,7 +9,7 @@ mod finding;
 mod group;
 mod people;
 mod requests;
-mod settings;
+pub mod settings;
 mod simple;
 mod start;
 

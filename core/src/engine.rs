@@ -702,7 +702,9 @@ impl Engine {
             if c.state == ContactState::GroupPeer && !in_groups.contains(&c.id) {
                 continue;
             }
-            if let Some(peer) = crate::identity::parse_key(&c.id) {
+            if let Some(peer) = crate::identity::parse_key(&c.id)
+                && peer != self.me
+            {
                 self.look_around.push_back(peer);
             }
         }
@@ -962,6 +964,9 @@ impl Engine {
             let Some(peer) = crate::identity::parse_key(&c.id) else {
                 continue;
             };
+            if peer == self.me {
+                continue;
+            }
             let keys = self.db.contact_keys(&c.id).unwrap_or_default();
             match c.state {
                 ContactState::Accepted

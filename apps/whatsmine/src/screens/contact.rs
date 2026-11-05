@@ -93,7 +93,7 @@ pub fn ContactInfo(id: String) -> Element {
     let files = core.search_chat(&id, "", SearchIn::Files).len();
     let links = core.search_chat(&id, "", SearchIn::Links).len();
     let shared_count = media.len() + files + links;
-    let shared_note = t(&tr, "contact.shared_count").replace("{n}", &shared_count.to_string());
+    let shared_note = shared_count.to_string();
     let notes_value: String = prefs.notes.chars().take(24).collect();
     let block_label = t(&tr, "contact.block_name").replace("{name}", &name);
 

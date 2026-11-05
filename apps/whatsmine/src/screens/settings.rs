@@ -551,6 +551,7 @@ pub fn PrivacyScreen() -> Element {
     let settings = use_settings();
     let mut sheet_disappear = use_signal(|| false);
     let mut filter = use_signal(|| false);
+    let mut show_hidden = use_signal(|| false);
     let _ = rev();
     let s = settings();
     let blocked = core.blocked();
@@ -600,6 +601,14 @@ pub fn PrivacyScreen() -> Element {
                             title: t(&tr, "privacy.hidden_chats"),
                             value: hidden.to_string(),
                             small: true,
+                            tag: "hidden-chats",
+                            on_tap: move |_| {
+                                spawn(async move {
+                                    if crate::lock::prove(&t(&tr, "lock.reason")).await {
+                                        show_hidden.set(true);
+                                    }
+                                });
+                            },
                         }
                     }
                     if cfg!(target_os = "android") {
@@ -663,6 +672,58 @@ pub fn PrivacyScreen() -> Element {
             }
             if filter() {
                 FilterSheet { on_close: move |_| filter.set(false) }
+            }
+            if show_hidden() {
+                HiddenSheet { on_close: move |_| show_hidden.set(false) }
+            }
+        }
+    }
+}
+
+#[component]
+fn HiddenSheet(on_close: EventHandler<()>) -> Element {
+    let tr = use_tr();
+    let core = use_core();
+    let nav = use_navigator();
+    let rev = use_context::<Rev>().0;
+    let _ = rev();
+    let chats: Vec<_> = core
+        .chats()
+        .into_iter()
+        .filter(|c| c.prefs.locked)
+        .collect();
+    rsx! {
+        Sheet { on_close: move |_| on_close.call(()), title: t(&tr, "privacy.hidden_chats"), tag: "hidden-sheet",
+            div { class: "sheet-list",
+                for c in chats {
+                    {
+                        let (open_id, show_id, core) = (c.contact.id.clone(), c.contact.id.clone(), core.clone());
+                        let prefs = c.prefs.clone();
+                        rsx! {
+                            div { key: "{c.contact.id}", class: "sheet-item",
+                                Avatar { id: c.contact.id.clone(), name: c.contact.display_name(), size: "tiny", image: c.contact.avatar.clone() }
+                                button {
+                                    class: "stack one-line row-t",
+                                    style: "border:none;background:none;color:inherit;font:inherit;text-align:left;cursor:pointer",
+                                    onclick: move |_| {
+                                        on_close.call(());
+                                        nav.push(Route::Chat { id: open_id.clone() });
+                                    },
+                                    "{c.contact.display_name()}"
+                                }
+                                button {
+                                    class: "btn small-btn",
+                                    onclick: move |_| {
+                                        let mut p = prefs.clone();
+                                        p.locked = false;
+                                        core.set_chat_prefs(&show_id, &p);
+                                    },
+                                    "{t(&tr, \"privacy.show_again\")}"
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -982,12 +1043,68 @@ pub fn SpeedScreen() -> Element {
     }
 }
 
+/// Puts bytes in a file where the person can find it, and says where.
+pub async fn save_text_file(
+    core: &whatsmine_core::Core,
+    name: &str,
+    mime: &str,
+    bytes: Vec<u8>,
+) -> Option<String> {
+    let dir = core.data_dir().join("outgoing.tmp");
+    std::fs::create_dir_all(&dir).ok()?;
+    let safe: String = name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || ".-_ ".contains(c) {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let path = dir.join(&safe);
+    std::fs::write(&path, bytes).ok()?;
+    let saved =
+        media::save_to_downloads(path.to_string_lossy().into_owned(), safe, mime.to_owned()).await;
+    let _ = std::fs::remove_file(&path);
+    saved
+}
+
+/// Makes a backup and saves it. What to tell the person, or nothing if it worked by itself.
+pub async fn back_up_now(core: whatsmine_core::Core, settings: Signal<Settings>) -> Option<String> {
+    let made = {
+        let core = core.clone();
+        media::blocking(move || core.make_backup().ok())
+            .await
+            .flatten()
+    }?;
+    let name = format!(
+        "whatsmine-backup-{}.wmbackup",
+        chrono::Local::now().format("%Y-%m-%d")
+    );
+    let place = save_text_file(&core, &name, "application/octet-stream", made).await?;
+    change(settings, |s| {
+        s.last_backup_at = whatsmine_core::model::now_ms()
+    });
+    Some(place)
+}
+
 #[component]
 pub fn DevicesScreen() -> Element {
     let tr = use_tr();
     crate::js::use_scroll_top();
     let core = use_core();
+    let settings = use_settings();
+    let mut toast_sig = use_context::<ToastSig>();
     let mut show_words = use_signal(|| false);
+    let mut restoring = use_signal(|| false);
+    let mut busy = use_signal(|| false);
+    let s = settings();
+    let last = if s.last_backup_at > 0 {
+        t(&tr, "devices.last_backup").replace("{when}", &crate::fmt::when(&tr, s.last_backup_at))
+    } else {
+        t(&tr, "devices.no_backup")
+    };
     rsx! {
         div { class: "screen no-nav",
             Header { title: t(&tr, "devices.title") }
@@ -1008,6 +1125,47 @@ pub fn DevicesScreen() -> Element {
                         tag: "words",
                         on_tap: move |_| show_words.set(true),
                     }
+                    SwitchRow {
+                        title: t(&tr, "devices.auto_backup"),
+                        note: t(&tr, "devices.auto_backup_note"),
+                        checked: s.auto_backup,
+                        tag: "auto-backup",
+                        on_change: move |on| change(settings, |s| s.auto_backup = on),
+                    }
+                    Row { title: last, small: true }
+                }
+                p { class: "note", "{t(&tr, \"devices.backup_note\")}" }
+                div { class: "btns",
+                    button {
+                        class: "btn",
+                        style: "background:var(--surface)",
+                        "data-t": "back-up",
+                        disabled: busy(),
+                        onclick: {
+                            let core = core.clone();
+                            move |_| {
+                                let core = core.clone();
+                                busy.set(true);
+                                spawn(async move {
+                                    match back_up_now(core, settings).await {
+                                        Some(place) => toast(&mut toast_sig, t(&tr, "file.saved").replace("{path}", &place), ToastLevel::Info),
+                                        None => toast(&mut toast_sig, t(&tr, "file.save_failed"), ToastLevel::Error),
+                                    }
+                                    busy.set(false);
+                                });
+                            }
+                        },
+                        Icon { name: IconName::Download, size: 20 }
+                        "{t(&tr, \"devices.back_up\")}"
+                    }
+                    button {
+                        class: "btn",
+                        style: "background:var(--surface)",
+                        "data-t": "restore",
+                        onclick: move |_| restoring.set(true),
+                        Icon { name: IconName::Restart, size: 20 }
+                        "{t(&tr, \"devices.restore\")}"
+                    }
                 }
             }
             if show_words() {
@@ -1019,6 +1177,94 @@ pub fn DevicesScreen() -> Element {
                         }
                     }
                 }
+            }
+            if restoring() {
+                RestoreSheet { on_close: move |_| restoring.set(false) }
+            }
+        }
+    }
+}
+
+/// Coming back: the 12 words, and a backup if there is one.
+#[component]
+pub fn RestoreSheet(on_close: EventHandler<()>) -> Element {
+    let tr = use_tr();
+    let core = use_core();
+    let mut words = use_signal(String::new);
+    let mut file: Signal<Option<Picked>> = use_signal(|| None);
+    let mut error = use_signal(|| None::<String>);
+    let mut done = use_signal(|| false);
+    if done() {
+        return rsx! {
+            Sheet { on_close: move |_| quit(), title: t(&tr, "restore.done_title"), tag: "restore-done",
+                p { class: "note", "{t(&tr, \"restore.done_text\")}" }
+                button { class: "btn main", "data-t": "restore-close", onclick: move |_| quit(),
+                    "{t(&tr, \"restore.close\")}"
+                }
+            }
+        };
+    }
+    let file_label = file()
+        .map(|f| f.name)
+        .unwrap_or_else(|| t(&tr, "restore.pick"));
+    rsx! {
+        Sheet { on_close: move |_| on_close.call(()), title: t(&tr, "devices.restore"), tag: "restore-sheet",
+            p { class: "note", "{t(&tr, \"restore.text\")}" }
+            label { class: "field",
+                span { class: "gt", "{t(&tr, \"devices.words\")}" }
+                textarea {
+                    rows: "3",
+                    "data-t": "restore-words",
+                    spellcheck: "false",
+                    autocomplete: "off",
+                    value: "{words}",
+                    oninput: move |e| {
+                        words.set(e.value());
+                        error.set(None);
+                    },
+                }
+            }
+            button {
+                class: "btn",
+                "data-t": "restore-pick",
+                onclick: move |_| {
+                    spawn(async move {
+                        if let Some(mut picked) = media::pick(media::ANY_FILE, false).await
+                            && !picked.is_empty()
+                        {
+                            file.set(Some(picked.remove(0)));
+                            error.set(None);
+                        }
+                    });
+                },
+                Icon { name: IconName::File, size: 20 }
+                span { class: "one-line", "{file_label}" }
+            }
+            if let Some(e) = error() {
+                p { class: "field-error", "{e}" }
+            }
+            p { class: "note", "{t(&tr, \"restore.replaces\")}" }
+            button {
+                class: "btn main",
+                "data-t": "restore-go",
+                disabled: words().split_whitespace().count() != 12,
+                onclick: move |_| {
+                    let bytes = match file.peek().as_ref() {
+                        Some(f) => match std::fs::read(&f.path) {
+                            Ok(bytes) => Some(bytes),
+                            Err(_) => {
+                                error.set(Some(t(&tr, "restore.err.wrong_backup")));
+                                return;
+                            }
+                        },
+                        None => None,
+                    };
+                    match core.restore_on_next_start(words.peek().trim(), bytes) {
+                        Ok(()) => done.set(true),
+                        Err(e) => error.set(Some(t(&tr, &format!("restore.err.{e}")))),
+                    }
+                },
+                "{t(&tr, \"devices.restore\")}"
             }
         }
     }

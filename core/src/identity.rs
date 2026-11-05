@@ -76,6 +76,11 @@ impl Identity {
         SecretKey::from_bytes(&self.network)
     }
 
+    /// What a backup is sealed with: only the words make it.
+    pub fn backup_key(&self) -> [u8; 32] {
+        blake3::derive_key("whatsmine backup key v1", &self.entropy)
+    }
+
     /// The 12 words that bring this person key back.
     pub fn recovery_words(&self) -> Vec<String> {
         bip39::Mnemonic::from_entropy(&self.entropy)

@@ -5,7 +5,9 @@ use whatsmine_core::Message;
 use whatsmine_core::rich::{Folder, SearchHit, SearchIn};
 
 use crate::app::{Rev, Route, t, use_core, use_tr};
-use crate::components::{Avatar, BackButton, Chips, Header, Icon, IconName, Row, Sheet, SwitchRow};
+use crate::components::{
+    Avatar, BackButton, Chips, Header, Icon, IconName, Row, Sheet, SwitchRow, change, use_settings,
+};
 use crate::fmt;
 
 fn message_line(m: &Message) -> String {
@@ -144,6 +146,7 @@ pub fn SavedScreen() -> Element {
     let tr = use_tr();
     crate::js::use_scroll_top();
     let core = use_core();
+    let nav = use_navigator();
     let rev = use_context::<Rev>().0;
     let _ = rev();
     let saved = core.saved_messages();
@@ -162,6 +165,21 @@ pub fn SavedScreen() -> Element {
         div { class: "screen no-nav",
             Header { title: t(&tr, "saved.title") }
             div { class: "body",
+                div { class: "group",
+                    Row {
+                        icon: IconName::Pencil,
+                        title: t(&tr, "saved.notes"),
+                        note: t(&tr, "saved.notes_note"),
+                        tag: "notes-chat",
+                        on_tap: {
+                            let core = core.clone();
+                            move |_| {
+                                let id = core.notes_chat(&t(&tr, "saved.notes"));
+                                nav.push(Route::Chat { id });
+                            }
+                        },
+                    }
+                }
                 if all_empty {
                     div { class: "empty-state",
                         Icon { name: IconName::Bookmark, size: 56 }
@@ -297,6 +315,9 @@ pub fn FoldersScreen() -> Element {
     let rev = use_context::<Rev>().0;
     let _ = rev();
     let mut editing = use_signal(|| None::<(usize, Folder)>);
+    let settings = use_settings();
+    let mut quick = use_signal(|| false);
+    let mut reacting = use_signal(|| false);
     let folders = core.folders();
     let archived = core.chats().iter().filter(|c| c.prefs.archived).count();
     let count = folders.len();
@@ -325,6 +346,22 @@ pub fn FoldersScreen() -> Element {
                         }
                     }
                 }
+                div { class: "group",
+                    Row {
+                        icon: IconName::Reply,
+                        title: t(&tr, "folders.quick_replies"),
+                        note: t(&tr, "folders.quick_replies_note"),
+                        tag: "quick-replies",
+                        on_tap: move |_| quick.set(true),
+                    }
+                    Row {
+                        icon: IconName::Smile,
+                        title: t(&tr, "folders.reactions"),
+                        value: settings.read().reactions.join(" "),
+                        tag: "reactions",
+                        on_tap: move |_| reacting.set(true),
+                    }
+                }
                 button {
                     class: "btn",
                     "data-t": "new-folder",
@@ -346,6 +383,71 @@ pub fn FoldersScreen() -> Element {
             }
             if let Some((index, folder)) = editing() {
                 FolderSheet { index, folder, on_close: move |_| editing.set(None) }
+            }
+            if quick() {
+                WordsSheet {
+                    title: t(&tr, "folders.quick_replies"),
+                    note: t(&tr, "folders.quick_replies_note"),
+                    start: settings.read().quick_replies.join("\n"),
+                    split_on: "\n",
+                    on_save: move |lines: Vec<String>| change(settings, |s| s.quick_replies = lines),
+                    on_close: move |_| quick.set(false),
+                }
+            }
+            if reacting() {
+                WordsSheet {
+                    title: t(&tr, "folders.reactions"),
+                    note: t(&tr, "folders.reactions_note"),
+                    start: settings.read().reactions.join(" "),
+                    split_on: " ",
+                    on_save: move |lines: Vec<String>| {
+                        if !lines.is_empty() {
+                            change(settings, |s| s.reactions = lines);
+                        }
+                    },
+                    on_close: move |_| reacting.set(false),
+                }
+            }
+        }
+    }
+}
+
+/// A short list a person writes themselves.
+#[component]
+fn WordsSheet(
+    title: String,
+    note: String,
+    start: String,
+    split_on: &'static str,
+    on_save: EventHandler<Vec<String>>,
+    on_close: EventHandler<()>,
+) -> Element {
+    let tr = use_tr();
+    let mut text = use_signal(|| start);
+    rsx! {
+        Sheet { on_close: move |_| on_close.call(()), title,
+            p { class: "note", "{note}" }
+            textarea {
+                rows: "4",
+                autofocus: true,
+                "data-t": "words-text",
+                value: "{text}",
+                oninput: move |e| text.set(e.value()),
+            }
+            button {
+                class: "btn main",
+                "data-t": "save",
+                onclick: move |_| {
+                    let lines: Vec<String> = text
+                        .peek()
+                        .split(split_on)
+                        .map(|l| l.trim().to_owned())
+                        .filter(|l| !l.is_empty())
+                        .collect();
+                    on_save.call(lines);
+                    on_close.call(());
+                },
+                "{t(&tr, \"common.save\")}"
             }
         }
     }
