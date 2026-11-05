@@ -424,6 +424,7 @@ mod tests {
             read: false,
             attachment: None,
             sender: sender.map(Into::into),
+            extra: Default::default(),
         }
     }
 

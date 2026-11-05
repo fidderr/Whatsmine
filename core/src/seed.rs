@@ -33,6 +33,7 @@ fn message(contact: &str, outgoing: bool, ago: i64, body: &str, status: MessageS
         read: true,
         attachment: None,
         sender: None,
+        extra: Default::default(),
     }
 }
 

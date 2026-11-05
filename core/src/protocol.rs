@@ -57,6 +57,8 @@ pub enum Frame {
         sent_at: i64,
         /// Set for a group message: the group's id.
         group: Option<String>,
+        /// Replies, polls and the rest, as `MessageExtra::to_wire`. Nothing for a plain text.
+        extra: Vec<u8>,
     },
     Receipt {
         kind: ReceiptKind,
@@ -80,6 +82,7 @@ pub enum Frame {
         caption: String,
         duration_ms: Option<u64>,
         group: Option<String>,
+        extra: Vec<u8>,
     },
     /// "Send me this file, starting at byte `offset`" (resume support).
     FileWant {
@@ -124,6 +127,18 @@ pub enum Frame {
     /// "I am leaving this group."
     GroupLeave {
         group: String,
+    },
+    /// Something happened to a message, or to the chat. Sent until confirmed, in the order it
+    /// happened. `change` is a `MessageChange` as text, so a kind from a newer version can be
+    /// confirmed without being understood.
+    Change {
+        id: [u8; 16],
+        target: [u8; 16],
+        change: Vec<u8>,
+        group: Option<String>,
+    },
+    ChangeAck {
+        id: [u8; 16],
     },
 }
 
@@ -248,7 +263,15 @@ mod tests {
                 text: "hallo\nwereld".into(),
                 sent_at: 1_792_000_000_000,
                 group: Some("g:x".into()),
+                extra: vec![1, 2],
             },
+            Frame::Change {
+                id: [1; 16],
+                target: [2; 16],
+                change: b"Unsend".to_vec(),
+                group: None,
+            },
+            Frame::ChangeAck { id: [1; 16] },
             Frame::Receipt {
                 kind: ReceiptKind::Read,
                 ids: vec![[1; 16], [2; 16]],
@@ -267,6 +290,7 @@ mod tests {
                 caption: "kijk".into(),
                 duration_ms: Some(4200),
                 group: None,
+                extra: Vec::new(),
             },
             Frame::FileWant {
                 id: [3; 16],

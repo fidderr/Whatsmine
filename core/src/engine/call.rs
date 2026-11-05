@@ -132,6 +132,15 @@ impl Engine {
             .connected
             .map(|t| t.elapsed().as_millis() as u64)
             .unwrap_or(0);
+        self.db.add_call_record(&crate::rich::CallRecord {
+            id: id_from_bytes(&c.id),
+            contact_id: self.conversation_of(&c),
+            outgoing: c.outgoing,
+            video: c.video,
+            at: crate::model::now_ms() - c.started.elapsed().as_millis() as i64,
+            duration_ms,
+            missed: c.connected.is_none(),
+        });
         self.emit_call(CallEvent::Ended {
             call_id: id_from_bytes(&c.id),
             contact_id: self.conversation_of(&c),

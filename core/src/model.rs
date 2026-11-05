@@ -120,6 +120,8 @@ pub fn short_id(id: &str) -> String {
 /// Delivery state of a message we sent. Ordered: a status only moves forward.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum MessageStatus {
+    /// Waits for its moment, on this device only.
+    Scheduled = -2,
     /// We stopped trying. It can be tried again, and a late receipt still counts.
     NotDelivered = -1,
     /// Saved locally, waiting for the contact to be reachable.
@@ -135,6 +137,7 @@ pub enum MessageStatus {
 impl MessageStatus {
     pub fn from_i64(v: i64) -> Self {
         match v {
+            -2 => Self::Scheduled,
             -1 => Self::NotDelivered,
             1 => Self::Sent,
             2 => Self::Delivered,
@@ -144,7 +147,7 @@ impl MessageStatus {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Message {
     /// UUID v7 (time-ordered), chosen by the sender. Used for dedupe.
     pub id: String,
@@ -164,6 +167,9 @@ pub struct Message {
     pub attachment: Option<Attachment>,
     /// In a group: who wrote an incoming message (their key).
     pub sender: Option<String>,
+    /// Replies, reactions, polls and the rest.
+    #[serde(default)]
+    pub extra: crate::rich::MessageExtra,
 }
 
 /// Where a file transfer stands, on either side.
@@ -245,11 +251,12 @@ pub struct GroupInfo {
 }
 
 /// A chat-list row: contact plus last message and unread count.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ChatSummary {
     pub contact: Contact,
     pub last_message: Option<Message>,
     pub unread: u32,
+    pub prefs: crate::rich::ChatPrefs,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -324,7 +331,7 @@ impl Default for Settings {
 }
 
 /// Events the core pushes to the UI.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum CoreEvent {
     /// Something in the contact list changed; refresh it.
     ContactsChanged,
@@ -354,6 +361,15 @@ pub enum CoreEvent {
     MessageUpdated(Message),
     /// Something happened to a voice/video call.
     Call(crate::calls::CallEvent),
+    /// A message was removed: it disappeared, or was taken away.
+    MessageGone {
+        contact_id: String,
+        message_id: String,
+    },
+    /// You asked to be reminded of this message, now.
+    Reminder {
+        message_id: String,
+    },
     /// Nothing is held right now, and timers stop while the system sleeps: wake us in this long.
     WakeIn {
         ms: u64,

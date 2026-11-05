@@ -14,6 +14,7 @@ use crate::model::{
 };
 use crate::model::{ContactKeys, MyInvite};
 use crate::protocol::GroupState;
+use crate::rich::{CallRecord, ChatPrefs, MessageExtra};
 use crate::vault::Vault;
 
 const CURRENT_VERSION: u32 = 5;
@@ -50,9 +51,42 @@ CREATE TABLE IF NOT EXISTS messages (
     read               INTEGER NOT NULL DEFAULT 0,
     read_receipt_sent  INTEGER NOT NULL DEFAULT 0,
     attachment         BLOB,
-    sender             TEXT
+    sender             TEXT,
+    extra              BLOB,
+    expires_at         INTEGER,
+    saved              INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS messages_by_contact ON messages(contact_id, sent_at);
+CREATE INDEX IF NOT EXISTS messages_expiring ON messages(expires_at) WHERE expires_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS messages_scheduled ON messages(status) WHERE status = -2;
+CREATE TABLE IF NOT EXISTS changes_out (
+    seq      INTEGER PRIMARY KEY AUTOINCREMENT,
+    id       TEXT NOT NULL,
+    peer     TEXT NOT NULL,
+    target   TEXT NOT NULL,
+    group_id TEXT,
+    change   BLOB NOT NULL,
+    at       INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS changes_by_peer ON changes_out(peer, seq);
+CREATE TABLE IF NOT EXISTS reminders (
+    message_id   TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+    at           INTEGER NOT NULL,
+    if_no_answer INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS chat_prefs (
+    contact_id TEXT PRIMARY KEY REFERENCES contacts(id) ON DELETE CASCADE,
+    sealed     BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS calls (
+    id          TEXT PRIMARY KEY,
+    contact_id  TEXT NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+    outgoing    INTEGER NOT NULL,
+    video       INTEGER NOT NULL,
+    at          INTEGER NOT NULL,
+    duration_ms INTEGER NOT NULL,
+    missed      INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS drafts (
     contact_id TEXT PRIMARY KEY REFERENCES contacts(id) ON DELETE CASCADE,
     text       BLOB NOT NULL
@@ -176,7 +210,7 @@ impl Database {
     /// Deletes every row and compacts the file so nothing lingers on disk.
     pub fn wipe(&self) -> rusqlite::Result<()> {
         self.lock().execute_batch(
-            "DELETE FROM tombstones; DELETE FROM secrets; DELETE FROM olm_sessions; DELETE FROM contact_keys; DELETE FROM invites; DELETE FROM seen_ids; DELETE FROM drafts; DELETE FROM group_acks; DELETE FROM messages; DELETE FROM group_members; DELETE FROM groups; DELETE FROM contacts;
+            "DELETE FROM changes_out; DELETE FROM reminders; DELETE FROM chat_prefs; DELETE FROM calls; DELETE FROM tombstones; DELETE FROM secrets; DELETE FROM olm_sessions; DELETE FROM contact_keys; DELETE FROM invites; DELETE FROM seen_ids; DELETE FROM drafts; DELETE FROM group_acks; DELETE FROM messages; DELETE FROM group_members; DELETE FROM groups; DELETE FROM contacts;
              DELETE FROM settings; PRAGMA wal_checkpoint(TRUNCATE); VACUUM;",
         )
     }
@@ -355,7 +389,7 @@ impl Database {
                 let last_message = conn
                     .query_row(
                         &format!(
-                            "SELECT {MSG_COLS} FROM messages WHERE contact_id = ?1
+                            "SELECT {MSG_COLS} FROM messages WHERE contact_id = ?1 AND status != -2
                              ORDER BY sent_at DESC, id DESC LIMIT 1"
                         ),
                         params![contact.id],
@@ -372,10 +406,12 @@ impl Database {
                         |r| r.get(0),
                     )
                     .unwrap_or(0);
+                let prefs = chat_prefs_in(&conn, &self.vault, &contact.id);
                 ChatSummary {
                     contact,
                     last_message,
                     unread,
+                    prefs,
                 }
             })
             .collect()
@@ -405,8 +441,8 @@ impl Database {
         }
         let n = conn.execute(
             "INSERT OR IGNORE INTO messages
-             (id, contact_id, outgoing, body, sent_at, received_at, status, read, attachment, sender)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+             (id, contact_id, outgoing, body, sent_at, received_at, status, read, attachment, sender, extra, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 m.id,
                 m.contact_id,
@@ -419,7 +455,13 @@ impl Database {
                 m.attachment.as_ref().map(|a| self
                     .vault
                     .seal(&serde_json::to_vec(a).expect("attachment serializes"))),
-                m.sender
+                m.sender,
+                self.seal_extra(&m.extra),
+                // One waiting for its moment starts counting when it goes.
+                (m.status != MessageStatus::Scheduled)
+                    .then_some(m.extra.disappear_ms)
+                    .flatten()
+                    .map(|ms| m.received_at.saturating_add(ms)),
             ],
         )?;
         if n > 0 {
@@ -449,7 +491,7 @@ impl Database {
         let mut stmt = conn
             .prepare(&format!(
                 "SELECT {MSG_COLS} FROM messages
-                 WHERE contact_id = ?1 AND sent_at < ?2
+                 WHERE contact_id = ?1 AND sent_at < ?2 AND status != -2
                  ORDER BY sent_at DESC, id DESC LIMIT ?3"
             ))
             .expect("valid SQL");
@@ -506,7 +548,9 @@ impl Database {
         if let Ok(mut stmt) = conn.prepare(
             "SELECT a.member_id FROM group_acks a JOIN messages m ON m.id = a.message_id
              WHERE a.status < 2 AND m.status >= 0
-             UNION SELECT g.admin FROM groups g WHERE g.left = 1",
+             UNION SELECT g.admin FROM groups g WHERE g.left = 1
+             UNION SELECT o.peer FROM changes_out o JOIN contacts c ON c.id = o.peer
+                   WHERE c.state IN ('accepted', 'group_peer')",
         ) && let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0))
         {
             owed.extend(rows.filter_map(Result::ok));
@@ -514,6 +558,304 @@ impl Database {
         owed.sort();
         owed.dedup();
         owed
+    }
+
+    // ---- what happens to a message later ----
+
+    fn seal_extra(&self, extra: &MessageExtra) -> Option<Vec<u8>> {
+        (*extra != MessageExtra::default()).then(|| {
+            self.vault
+                .seal(&serde_json::to_vec(extra).expect("extra serializes"))
+        })
+    }
+
+    /// Writes back what changed in a message: its text, file and extras.
+    pub fn update_message(&self, m: &Message) {
+        let _ = self.lock().execute(
+            "UPDATE messages SET body = ?2, attachment = ?3, extra = ?4, saved = ?5 WHERE id = ?1",
+            params![
+                m.id,
+                self.vault.seal_str(&m.body),
+                m.attachment.as_ref().map(|a| self
+                    .vault
+                    .seal(&serde_json::to_vec(a).expect("attachment serializes"))),
+                self.seal_extra(&m.extra),
+                m.extra.saved,
+            ],
+        );
+    }
+
+    pub fn is_deleted(&self, id: &str) -> bool {
+        self.lock()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM tombstones WHERE id = ?1)",
+                params![id],
+                |r| r.get(0),
+            )
+            .unwrap_or(false)
+    }
+
+    /// One change for each of `peers`, to be sent until confirmed.
+    pub fn queue_change(
+        &self,
+        id: &str,
+        peers: &[String],
+        target: &str,
+        group: Option<&str>,
+        change: &[u8],
+    ) {
+        let conn = self.lock();
+        let sealed = self.vault.seal(change);
+        for peer in peers {
+            let _ = conn.execute(
+                "INSERT INTO changes_out (id, peer, target, group_id, change, at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![id, peer, target, group, sealed, now_ms()],
+            );
+        }
+    }
+
+    /// Changes still to reach this person, oldest first: id, target, group, change.
+    pub fn changes_for(&self, peer: &str) -> Vec<(String, String, Option<String>, Vec<u8>)> {
+        let conn = self.lock();
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT id, target, group_id, change FROM changes_out WHERE peer = ?1 ORDER BY seq",
+        ) else {
+            return Vec::new();
+        };
+        stmt.query_map(params![peer], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, Vec<u8>>(3)?,
+            ))
+        })
+        .map(|rows| {
+            rows.filter_map(Result::ok)
+                .filter_map(|(id, target, group, sealed)| {
+                    Some((id, target, group, self.vault.open(&sealed)?))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+    }
+
+    pub fn change_arrived(&self, id: &str, peer: &str) {
+        let _ = self.lock().execute(
+            "DELETE FROM changes_out WHERE id = ?1 AND peer = ?2",
+            params![id, peer],
+        );
+    }
+
+    /// Who was away this long does not need to hear about old reactions.
+    pub fn forget_old_changes(&self, before: Millis) {
+        let _ = self
+            .lock()
+            .execute("DELETE FROM changes_out WHERE at < ?1", params![before]);
+    }
+
+    pub fn chat_prefs(&self, contact_id: &str) -> ChatPrefs {
+        chat_prefs_in(&self.lock(), &self.vault, contact_id)
+    }
+
+    pub fn set_chat_prefs(&self, contact_id: &str, prefs: &ChatPrefs) {
+        let _ = self.lock().execute(
+            "INSERT INTO chat_prefs (contact_id, sealed) VALUES (?1, ?2)
+             ON CONFLICT(contact_id) DO UPDATE SET sealed = excluded.sealed",
+            params![
+                contact_id,
+                self.vault
+                    .seal(&serde_json::to_vec(prefs).expect("prefs serialize"))
+            ],
+        );
+    }
+
+    /// Messages waiting for their moment, soonest first.
+    pub fn scheduled(&self) -> Vec<Message> {
+        self.messages_where("status = -2 ORDER BY sent_at ASC, id ASC", params![])
+    }
+
+    pub fn set_scheduled_time(&self, id: &str, at: Millis) {
+        let _ = self.lock().execute(
+            "UPDATE messages SET sent_at = ?2 WHERE id = ?1 AND status = -2",
+            params![id, at],
+        );
+    }
+
+    /// The ones whose moment has come go in the queue, from now on counted as sent now.
+    pub fn take_due(&self, now: Millis) -> Vec<Message> {
+        let due = self.messages_where(
+            "status = -2 AND sent_at <= ?1 ORDER BY sent_at ASC, id ASC",
+            params![now],
+        );
+        let conn = self.lock();
+        for m in &due {
+            let _ = conn.execute(
+                "UPDATE messages SET status = 0, sent_at = ?2, received_at = ?2, expires_at = ?3
+                 WHERE id = ?1",
+                params![
+                    m.id,
+                    now,
+                    m.extra.disappear_ms.map(|ms| now.saturating_add(ms))
+                ],
+            );
+        }
+        drop(conn);
+        due.into_iter()
+            .filter_map(|m| self.message(&m.id))
+            .collect()
+    }
+
+    /// What is past its time.
+    pub fn expired(&self, now: Millis) -> Vec<Message> {
+        self.messages_where("expires_at <= ?1", params![now])
+    }
+
+    pub fn saved_messages(&self) -> Vec<Message> {
+        self.messages_where("saved = 1 ORDER BY sent_at DESC, id DESC", params![])
+    }
+
+    /// Everything that can be looked through, newest first. Text is sealed on disk, so a search
+    /// has to open it.
+    pub fn searchable(&self, chat: Option<&str>) -> Vec<Message> {
+        match chat {
+            Some(chat) => self.messages_where(
+                "contact_id = ?1 AND status != -2 ORDER BY sent_at DESC, id DESC",
+                params![chat],
+            ),
+            None => self.messages_where("status != -2 ORDER BY sent_at DESC, id DESC", params![]),
+        }
+    }
+
+    fn messages_where(&self, condition: &str, args: &[&dyn rusqlite::ToSql]) -> Vec<Message> {
+        let conn = self.lock();
+        let Ok(mut stmt) = conn.prepare(&format!(
+            "SELECT {MSG_COLS} FROM messages WHERE {condition}"
+        )) else {
+            return Vec::new();
+        };
+        stmt.query_map(args, |r| message_from_row(r, &self.vault))
+            .map(|rows| rows.filter_map(Result::ok).collect())
+            .unwrap_or_default()
+    }
+
+    pub fn add_reminder(&self, message_id: &str, at: Millis, if_no_answer: bool) {
+        let _ = self.lock().execute(
+            "INSERT INTO reminders (message_id, at, if_no_answer) VALUES (?1, ?2, ?3)
+             ON CONFLICT(message_id) DO UPDATE SET at = excluded.at, if_no_answer = excluded.if_no_answer",
+            params![message_id, at, if_no_answer],
+        );
+    }
+
+    pub fn drop_reminder(&self, message_id: &str) {
+        let _ = self.lock().execute(
+            "DELETE FROM reminders WHERE message_id = ?1",
+            params![message_id],
+        );
+    }
+
+    /// Message, moment: soonest first.
+    pub fn reminders(&self) -> Vec<(String, Millis)> {
+        let conn = self.lock();
+        let Ok(mut stmt) = conn.prepare("SELECT message_id, at FROM reminders ORDER BY at") else {
+            return Vec::new();
+        };
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .map(|rows| rows.filter_map(Result::ok).collect())
+            .unwrap_or_default()
+    }
+
+    /// The reminders whose moment has come leave the list. Those that only count without an
+    /// answer are left out if one came.
+    pub fn take_due_reminders(&self, now: Millis) -> Vec<String> {
+        let conn = self.lock();
+        let due: Vec<(String, bool)> = conn
+            .prepare("SELECT message_id, if_no_answer FROM reminders WHERE at <= ?1")
+            .and_then(|mut stmt| {
+                stmt.query_map(params![now], |r| Ok((r.get(0)?, r.get(1)?)))
+                    .map(|rows| rows.filter_map(Result::ok).collect())
+            })
+            .unwrap_or_default();
+        let mut out = Vec::new();
+        for (id, if_no_answer) in due {
+            let answered = if_no_answer
+                && conn
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM messages later, messages m
+                         WHERE m.id = ?1 AND later.contact_id = m.contact_id
+                         AND later.outgoing = 0 AND later.sent_at > m.sent_at)",
+                        params![id],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(false);
+            let _ = conn.execute("DELETE FROM reminders WHERE message_id = ?1", params![id]);
+            if !answered {
+                out.push(id);
+            }
+        }
+        out
+    }
+
+    /// When something is due next: a message to send, a reminder, something to remove.
+    pub fn next_timer(&self) -> Option<Millis> {
+        self.lock()
+            .query_row(
+                "SELECT MIN(at) FROM (
+                     SELECT MIN(sent_at) AS at FROM messages WHERE status = -2
+                     UNION ALL SELECT MIN(at) FROM reminders
+                     UNION ALL SELECT MIN(expires_at) FROM messages WHERE expires_at IS NOT NULL
+                 )",
+                [],
+                |r| r.get(0),
+            )
+            .ok()
+            .flatten()
+    }
+
+    pub fn add_call_record(&self, c: &CallRecord) {
+        let _ = self.lock().execute(
+            "INSERT OR IGNORE INTO calls (id, contact_id, outgoing, video, at, duration_ms, missed)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                c.id,
+                c.contact_id,
+                c.outgoing,
+                c.video,
+                c.at,
+                c.duration_ms as i64,
+                c.missed
+            ],
+        );
+    }
+
+    pub fn call_records(&self) -> Vec<CallRecord> {
+        let conn = self.lock();
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT id, contact_id, outgoing, video, at, duration_ms, missed FROM calls
+             ORDER BY at DESC LIMIT 500",
+        ) else {
+            return Vec::new();
+        };
+        stmt.query_map([], |r| {
+            Ok(CallRecord {
+                id: r.get(0)?,
+                contact_id: r.get(1)?,
+                outgoing: r.get(2)?,
+                video: r.get(3)?,
+                at: r.get(4)?,
+                duration_ms: r.get::<_, i64>(5)? as u64,
+                missed: r.get(6)?,
+            })
+        })
+        .map(|rows| rows.filter_map(Result::ok).collect())
+        .unwrap_or_default()
+    }
+
+    pub fn delete_call_record(&self, id: &str) {
+        let _ = self
+            .lock()
+            .execute("DELETE FROM calls WHERE id = ?1", params![id]);
     }
 
     /// Forgets which messages were seen after so long that no copy can still be under way.
@@ -1086,7 +1428,19 @@ impl Database {
 }
 
 const MSG_COLS: &str =
-    "id, contact_id, outgoing, body, sent_at, received_at, status, read, attachment, sender";
+    "id, contact_id, outgoing, body, sent_at, received_at, status, read, attachment, sender, extra";
+
+fn chat_prefs_in(conn: &Connection, vault: &Vault, contact_id: &str) -> ChatPrefs {
+    conn.query_row(
+        "SELECT sealed FROM chat_prefs WHERE contact_id = ?1",
+        params![contact_id],
+        |r| r.get::<_, Vec<u8>>(0),
+    )
+    .ok()
+    .and_then(|sealed| vault.open(&sealed))
+    .and_then(|json| serde_json::from_slice(&json).ok())
+    .unwrap_or_default()
+}
 
 fn contact_from_row(r: &Row<'_>, vault: &Vault) -> rusqlite::Result<Contact> {
     Ok(Contact {
@@ -1123,6 +1477,11 @@ fn message_from_row(r: &Row<'_>, vault: &Vault) -> rusqlite::Result<Message> {
             .and_then(|sealed| vault.open(&sealed))
             .and_then(|json| serde_json::from_slice(&json).ok()),
         sender: r.get(9)?,
+        extra: r
+            .get::<_, Option<Vec<u8>>>(10)?
+            .and_then(|sealed| vault.open(&sealed))
+            .and_then(|json| serde_json::from_slice(&json).ok())
+            .unwrap_or_default(),
     })
 }
 
@@ -1157,6 +1516,7 @@ mod tests {
             read: false,
             attachment: None,
             sender: None,
+            extra: MessageExtra::default(),
         }
     }
 

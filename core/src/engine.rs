@@ -42,6 +42,7 @@ use crate::protocol::{
 use crate::records::{self, Records};
 use crate::requests::{self, Request};
 use crate::retry;
+use crate::rich::{MessageChange, MessageExtra};
 use crate::sealing::{OpenError, Sealing};
 
 mod call;
@@ -65,6 +66,8 @@ const AWAKE_FOR: Duration = Duration::from_secs(30);
 const LOOK_AROUND_DIALS: usize = 8;
 /// A copy of a message can be under way for about as long as the sender keeps trying, at most.
 const SEEN_KEPT_MS: i64 = 400 * 24 * 3600 * 1000;
+/// Who was away this long does not need to hear about an old reaction.
+const CHANGES_KEPT_MS: i64 = 30 * 24 * 3600 * 1000;
 /// Republish where we are at least this often, also if nothing changed.
 const PUBLISH_EVERY: Duration = Duration::from_secs(3600);
 /// How long the other side gets to prove who it is.
@@ -113,6 +116,10 @@ pub(crate) enum Cmd {
     RadioActive,
     /// How the connection stands, for the screen that shows it.
     Report(tokio::sync::oneshot::Sender<crate::model::ConnectionReport>),
+    /// Something changed for these people: send it if they are connected, get to them otherwise.
+    SendChanges(Vec<PublicKey>),
+    /// A scheduled message, reminder or disappearing message was added or removed.
+    TimersChanged,
     /// Send this stored message if the contact is connected.
     SendOne {
         contact: PublicKey,
@@ -337,6 +344,9 @@ pub(crate) struct Engine {
     /// How often a download failed its hash check (retried once).
     corrupt_retries: HashMap<String, u8>,
     call: Option<CallState>,
+    /// When something is due, as far as known.
+    next_timer: Option<crate::model::Millis>,
+    timers_dirty: bool,
     group_calls: GroupCalls,
     media_in: MediaIn,
     video_inflight: Arc<std::sync::atomic::AtomicUsize>,
@@ -411,6 +421,8 @@ impl Engine {
             next_check: None,
             wanted: HashSet::new(),
             wanted_dirty: true,
+            next_timer: None,
+            timers_dirty: true,
             chat_open: None,
             blips: HashMap::new(),
             look_around: VecDeque::new(),
@@ -429,6 +441,7 @@ impl Engine {
         engine.look_around_all();
         engine.load_what_is_owed();
         engine.db.forget_old_seen(now_ms() - SEEN_KEPT_MS);
+        engine.db.forget_old_changes(now_ms() - CHANGES_KEPT_MS);
         loop {
             engine.reconcile();
             let sleep = tokio::time::sleep_until(engine.next_deadline());
@@ -482,6 +495,7 @@ impl Engine {
 
     /// Makes what is so match what should be so. Runs after everything that happens.
     fn reconcile(&mut self) {
+        self.run_timers();
         let now = Instant::now();
         if self.wanted_dirty {
             self.refresh_wanted();
@@ -699,6 +713,9 @@ impl Engine {
         if let Some(at) = self.next_check {
             sooner(at);
         }
+        if let Some(at) = self.timer_instant() {
+            sooner(at);
+        }
         if let Some(at) = self.awake_until.filter(|at| *at > now) {
             sooner(at);
         }
@@ -751,6 +768,9 @@ impl Engine {
                 }
             }
         }
+        if let Some(at) = self.timer_instant() {
+            next = Some(next.map_or(at, |n| n.min(at)));
+        }
         let Some(next) = next else { return };
         let moved = self
             .asked_wake
@@ -760,6 +780,163 @@ impl Engine {
             let ms = next.saturating_duration_since(now).as_millis() as u64;
             emit(&self.events, CoreEvent::WakeIn { ms });
         }
+    }
+
+    // ---- what is due at a moment ----
+
+    fn timer_instant(&self) -> Option<Instant> {
+        let wait = self.next_timer?.saturating_sub(now_ms()).max(0) as u64;
+        Some(Instant::now() + Duration::from_millis(wait))
+    }
+
+    /// Whatever has reached its moment: messages to send, reminders, what is to disappear.
+    fn run_timers(&mut self) {
+        if !self.timers_dirty && self.next_timer.is_none_or(|at| at > now_ms()) {
+            return;
+        }
+        let now = now_ms();
+        for m in self.db.take_due(now) {
+            self.wanted_dirty = true;
+            self.note_activity();
+            emit(&self.events, CoreEvent::MessageAdded(m.clone()));
+            emit(&self.events, CoreEvent::ContactsChanged);
+            if groups::is_group_id(&m.contact_id) {
+                let me = key_to_string(&self.me);
+                if let Some((state, _, _)) = self.db.group(&m.contact_id) {
+                    let others: Vec<String> =
+                        state.members.into_iter().filter(|k| *k != me).collect();
+                    self.db.add_group_acks(&m.id, &others);
+                }
+                self.send_group_message(&m.contact_id, &m.id);
+            } else if let Some(peer) = crate::identity::parse_key(&m.contact_id) {
+                self.backoff.remove(&peer);
+                if self.sessions.contains_key(&peer) {
+                    self.send_message(peer, &m);
+                }
+            }
+        }
+        for message_id in self.db.take_due_reminders(now) {
+            emit(&self.events, CoreEvent::Reminder { message_id });
+        }
+        for m in self.db.expired(now) {
+            self.remove_message_files(&m);
+            self.db.delete_message(&m.id);
+            emit(
+                &self.events,
+                CoreEvent::MessageGone {
+                    contact_id: m.contact_id,
+                    message_id: m.id,
+                },
+            );
+            emit(&self.events, CoreEvent::ContactsChanged);
+        }
+        self.timers_dirty = false;
+        self.next_timer = self.db.next_timer();
+    }
+
+    fn remove_message_files(&self, m: &Message) {
+        if let Some(path) = m.attachment.as_ref().and_then(|a| a.path.as_ref()) {
+            let _ = std::fs::remove_file(path);
+        }
+        let _ = std::fs::remove_file(files::partial_path(&self.media, &m.id));
+    }
+
+    // ---- changes to what was sent ----
+
+    /// Everything that still has to reach this person, in order. Stays queued until confirmed.
+    fn flush_changes(&self, peer: PublicKey) {
+        for (id, target, group, change) in self.db.changes_for(&key_to_string(&peer)) {
+            let Some(id) = protocol::id_to_bytes(&id) else {
+                continue;
+            };
+            self.send(
+                peer,
+                Frame::Change {
+                    id,
+                    target: protocol::id_to_bytes(&target).unwrap_or_default(),
+                    change,
+                    group,
+                },
+            );
+        }
+    }
+
+    fn on_change(
+        &mut self,
+        peer: PublicKey,
+        change_id: [u8; 16],
+        target: [u8; 16],
+        change: &[u8],
+        group: Option<String>,
+    ) {
+        let who = key_to_string(&peer);
+        let allowed = match &group {
+            Some(group) => self.group_allows(group, &who),
+            None => self.db.contact(&who).map(|c| c.state) == Some(ContactState::Accepted),
+        };
+        if !allowed {
+            return;
+        }
+        let chat = group.unwrap_or_else(|| who.clone());
+        let confirm = |engine: &Self| {
+            engine.send(peer, Frame::ChangeAck { id: change_id });
+        };
+        // From a newer version: nothing to do with it, and no reason to hear it again.
+        let Ok(change) = serde_json::from_slice::<MessageChange>(change) else {
+            return confirm(self);
+        };
+        if let MessageChange::ChatTimer(ms) = change {
+            let mut prefs = self.db.chat_prefs(&chat);
+            prefs.disappear_ms = ms.filter(|ms| *ms > 0);
+            self.db.set_chat_prefs(&chat, &prefs);
+            emit(&self.events, CoreEvent::ContactsChanged);
+            return confirm(self);
+        }
+        let message_id = id_from_bytes(&target);
+        let Some(mut m) = self.db.message(&message_id) else {
+            // Gone here: there is nothing left to change. Not here yet: it comes again.
+            if self.db.is_deleted(&message_id) {
+                confirm(self);
+            }
+            return;
+        };
+        if m.contact_id != chat {
+            return;
+        }
+        let writer = if m.outgoing {
+            key_to_string(&self.me)
+        } else {
+            m.sender.clone().unwrap_or_else(|| m.contact_id.clone())
+        };
+        match change {
+            MessageChange::React(emoji) => {
+                let emoji = emoji.filter(|e| e.len() <= 64);
+                m.extra.react(&who, emoji.as_deref());
+            }
+            MessageChange::Edit(text)
+                if writer == who && !m.extra.unsent && text.len() <= MAX_TEXT =>
+            {
+                m.body = text;
+                m.extra.edited = true;
+            }
+            MessageChange::Unsend if writer == who => {
+                self.remove_message_files(&m);
+                m.body = String::new();
+                m.attachment = None;
+                m.extra.rich = None;
+                m.extra.unsent = true;
+            }
+            MessageChange::Rich(change) => {
+                if let Some(rich) = &mut m.extra.rich {
+                    rich.apply(&who, &change);
+                }
+            }
+            _ => return confirm(self),
+        }
+        self.db.update_message(&m);
+        emit(&self.events, CoreEvent::MessageUpdated(m));
+        emit(&self.events, CoreEvent::ContactsChanged);
+        confirm(self);
     }
 
     // ---- being found ----
@@ -875,10 +1052,14 @@ impl Engine {
         let attempt = self.knocked.entry(peer).or_insert(0);
         *attempt += 1;
         let attempt = *attempt;
-        // The oldest text that fits. Files wait for a connection.
+        // The oldest plain text that fits. Files, replies and polls wait for a connection.
         let text = owed
             .iter()
-            .filter(|m| m.attachment.is_none() && m.body.len() <= knocks::MAX_SEALED_TEXT / 2)
+            .filter(|m| {
+                m.attachment.is_none()
+                    && m.extra.to_wire().is_empty()
+                    && m.body.len() <= knocks::MAX_SEALED_TEXT / 2
+            })
             .find_map(|m| {
                 let mid = protocol::id_to_bytes(&m.id)?;
                 let (kind, sealed) = self.sealing.seal(&id, m.body.as_bytes())?;
@@ -991,6 +1172,7 @@ impl Engine {
             read: false,
             attachment: None,
             sender: None,
+            extra: MessageExtra::default(),
         };
         if self.db.insert_message(&message).unwrap_or(false) {
             emit(&self.events, CoreEvent::MessageAdded(message));
@@ -1405,6 +1587,17 @@ impl Engine {
             Cmd::Report(answer) => {
                 let _ = answer.send(self.report());
             }
+            Cmd::SendChanges(peers) => {
+                self.note_activity();
+                self.wanted_dirty = true;
+                for peer in peers {
+                    self.backoff.remove(&peer);
+                    if self.sessions.contains_key(&peer) {
+                        self.flush_changes(peer);
+                    }
+                }
+            }
+            Cmd::TimersChanged => self.timers_dirty = true,
             Cmd::SendOne {
                 contact,
                 message_id,
@@ -1947,7 +2140,13 @@ impl Engine {
 
     fn on_opened_frame(&mut self, peer: PublicKey, frame: Frame) {
         match &frame {
-            Frame::Msg { .. } | Frame::FileOffer { .. } => self.note_activity(),
+            Frame::Msg { .. } | Frame::FileOffer { .. } => {
+                self.note_activity();
+                // It may have to disappear.
+                self.timers_dirty = true;
+            }
+            Frame::Change { .. } => self.note_activity(),
+            Frame::ChangeAck { .. } => self.wanted_dirty = true,
             Frame::Receipt { .. } | Frame::Accept { .. } | Frame::GroupUpdate { .. } => {
                 self.wanted_dirty = true;
             }
@@ -2074,6 +2273,7 @@ impl Engine {
             self.on_accepted_session(peer);
         }
         self.on_group_session(peer);
+        self.flush_changes(peer);
         self.call_on_session(peer);
     }
 
@@ -2173,12 +2373,14 @@ impl Engine {
                 text,
                 sent_at,
                 group: Some(group),
-            } => self.on_group_msg(peer, mid, text, sent_at, group),
+                extra,
+            } => self.on_group_msg(peer, mid, text, sent_at, group, extra),
             Frame::Msg {
                 id: mid,
                 text,
                 sent_at,
                 group: None,
+                extra,
             } => {
                 if state != Some(ContactState::Accepted) || text.len() > MAX_TEXT {
                     return;
@@ -2195,6 +2397,7 @@ impl Engine {
                     read: false,
                     attachment: None,
                     sender: None,
+                    extra: MessageExtra::from_wire(&extra),
                 };
                 if self.db.insert_message(&message).unwrap_or(false) {
                     emit(&self.events, CoreEvent::MessageAdded(message));
@@ -2249,6 +2452,15 @@ impl Engine {
                     }
                 }
             }
+            Frame::Change {
+                id: change_id,
+                target,
+                change,
+                group,
+            } => self.on_change(peer, change_id, target, &change, group),
+            Frame::ChangeAck { id: change_id } => {
+                self.db.change_arrived(&id_from_bytes(&change_id), &id);
+            }
             Frame::Typing => {
                 if state == Some(ContactState::Accepted) && self.settings().typing_indicators {
                     emit(&self.events, CoreEvent::Typing { contact_id: id });
@@ -2271,6 +2483,7 @@ impl Engine {
                 caption,
                 duration_ms,
                 group,
+                extra,
             } => {
                 if let Some(group) = group {
                     return self.on_group_file_offer(
@@ -2288,6 +2501,7 @@ impl Engine {
                         },
                         caption,
                         group,
+                        extra,
                     );
                 }
                 if state != Some(ContactState::Accepted) || caption.len() > MAX_TEXT {
@@ -2314,6 +2528,7 @@ impl Engine {
                             duration_ms,
                         }),
                         sender: None,
+                        extra: MessageExtra::from_wire(&extra),
                     },
                 );
             }
@@ -2540,6 +2755,7 @@ impl Engine {
                     caption: m.body.clone(),
                     duration_ms: a.duration_ms,
                     group,
+                    extra: m.extra.to_wire(),
                 }
             }
             None => Frame::Msg {
@@ -2547,6 +2763,7 @@ impl Engine {
                 text: m.body.clone(),
                 sent_at: m.sent_at,
                 group,
+                extra: m.extra.to_wire(),
             },
         };
         let sent = self.send(peer, frame);

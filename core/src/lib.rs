@@ -27,6 +27,7 @@ pub mod protocol;
 pub mod records;
 pub mod requests;
 pub mod retry;
+pub mod rich;
 pub mod sealing;
 #[cfg(feature = "test-hooks")]
 mod seed;
@@ -46,6 +47,28 @@ pub use model::*;
 
 use db::Database;
 use engine::{Cmd, Engine, Shared};
+use rich::{
+    CallRecord, ChatPrefs, Folder, MessageChange, MessageExtra, Rich, RichChange, SearchHit,
+    SearchIn,
+};
+
+/// Whether a message fits a search. `query` in lower case, and empty for all of the kind.
+fn message_fits(m: &Message, query: &str, within: SearchIn) -> bool {
+    let media = |a: &Attachment| a.mime.starts_with("image/") || a.mime.starts_with("video/");
+    let has_link = m.body.contains("http://") || m.body.contains("https://");
+    let kind = match within {
+        SearchIn::All => !query.is_empty(),
+        SearchIn::People => false,
+        SearchIn::Media => m.attachment.as_ref().is_some_and(media),
+        SearchIn::Files => m.attachment.as_ref().is_some_and(|a| !media(a)),
+        SearchIn::Links => has_link,
+    };
+    kind && (query.is_empty()
+        || m.body.to_lowercase().contains(query)
+        || m.attachment
+            .as_ref()
+            .is_some_and(|a| a.name.to_lowercase().contains(query)))
+}
 
 /// There is always a main invite: the plain link and the name code stand for it.
 fn ensure_main_invite(db: &Database) {
@@ -712,29 +735,363 @@ impl Core {
     /// Stores a message and sends it now, or as soon as the contact is
     /// reachable.
     pub fn send(&self, contact_id: &str, text: &str) -> anyhow::Result<Message> {
+        self.send_with(contact_id, text, MessageExtra::default(), None)
+    }
+
+    /// A text with a reply, a mention, no sound. `at`: not now but at this moment.
+    pub fn send_with(
+        &self,
+        contact_id: &str,
+        text: &str,
+        mut extra: MessageExtra,
+        at: Option<Millis>,
+    ) -> anyhow::Result<Message> {
         let text = text.trim();
         ensure!(!text.is_empty(), "empty");
         ensure!(text.len() <= protocol::MAX_TEXT, "too_long");
         let peer = self.recipient(contact_id)?;
+        extra.disappear_ms = self.inner.db.chat_prefs(contact_id).disappear_ms;
         let now = now_ms();
+        let later = at.filter(|at| *at > now);
         let message = Message {
             id: uuid::Uuid::now_v7().to_string(),
             contact_id: contact_id.to_string(),
             outgoing: true,
             body: text.to_string(),
-            sent_at: now,
+            sent_at: later.unwrap_or(now),
             received_at: now,
-            status: MessageStatus::Queued,
+            status: if later.is_some() {
+                MessageStatus::Scheduled
+            } else {
+                MessageStatus::Queued
+            },
             read: true,
             attachment: None,
             sender: None,
+            extra,
         };
         self.inner.db.insert_message(&message)?;
         self.inner.db.set_draft(contact_id, "");
+        if later.is_some() {
+            self.cmd(Cmd::TimersChanged);
+            self.emit(CoreEvent::ContactsChanged);
+            return Ok(message);
+        }
+        if message.extra.disappear_ms.is_some() {
+            self.cmd(Cmd::TimersChanged);
+        }
         self.emit(CoreEvent::MessageAdded(message.clone()));
         self.emit(CoreEvent::ContactsChanged);
         self.dispatch(contact_id, peer, &message);
         Ok(message)
+    }
+
+    pub fn send_reply(
+        &self,
+        contact_id: &str,
+        text: &str,
+        reply_to: Option<&str>,
+    ) -> anyhow::Result<Message> {
+        let extra = MessageExtra {
+            reply_to: reply_to.map(str::to_owned),
+            ..MessageExtra::default()
+        };
+        self.send_with(contact_id, text, extra, None)
+    }
+
+    pub fn send_later(&self, contact_id: &str, text: &str, at: Millis) -> anyhow::Result<Message> {
+        self.send_with(contact_id, text, MessageExtra::default(), Some(at))
+    }
+
+    /// A poll, list, plan, place or contact card. Its one line is what older versions show.
+    pub fn send_rich(&self, contact_id: &str, rich: Rich) -> anyhow::Result<Message> {
+        let summary = rich.summary().to_owned();
+        let extra = MessageExtra {
+            rich: Some(rich),
+            ..MessageExtra::default()
+        };
+        self.send_with(contact_id, &summary, extra, None)
+    }
+
+    /// Messages waiting for their moment.
+    pub fn scheduled(&self) -> Vec<Message> {
+        self.inner.db.scheduled()
+    }
+
+    pub fn cancel_scheduled(&self, message_id: &str) {
+        if self
+            .inner
+            .db
+            .message(message_id)
+            .is_some_and(|m| m.status == MessageStatus::Scheduled)
+        {
+            self.inner.db.delete_message(message_id);
+            self.cmd(Cmd::TimersChanged);
+            self.emit(CoreEvent::ContactsChanged);
+        }
+    }
+
+    /// Now instead of later.
+    pub fn send_scheduled_now(&self, message_id: &str) {
+        if let Some(mut m) = self.inner.db.message(message_id)
+            && m.status == MessageStatus::Scheduled
+        {
+            m.sent_at = now_ms();
+            self.inner.db.set_scheduled_time(message_id, m.sent_at);
+            self.cmd(Cmd::TimersChanged);
+        }
+    }
+
+    // ---- what happens to a message later ----
+
+    /// Who gets to hear about something in this chat.
+    fn people_in(&self, chat: &str) -> Vec<String> {
+        if groups::is_group_id(chat) {
+            let me = self.my_key();
+            return self
+                .inner
+                .db
+                .group(chat)
+                .map(|(state, _, _)| state.members.into_iter().filter(|k| *k != me).collect())
+                .unwrap_or_default();
+        }
+        vec![chat.to_owned()]
+    }
+
+    fn tell_chat(&self, chat: &str, target: &str, change: &MessageChange) {
+        let peers = self.people_in(chat);
+        let group = groups::is_group_id(chat).then_some(chat);
+        let id = uuid::Uuid::now_v7().to_string();
+        let Ok(bytes) = serde_json::to_vec(change) else {
+            return;
+        };
+        self.inner
+            .db
+            .queue_change(&id, &peers, target, group, &bytes);
+        self.cmd(Cmd::SendChanges(
+            peers
+                .iter()
+                .filter_map(|p| identity::parse_key(p))
+                .collect(),
+        ));
+    }
+
+    fn changed(&self, m: Message) {
+        self.inner.db.update_message(&m);
+        self.emit(CoreEvent::MessageUpdated(m));
+        self.emit(CoreEvent::ContactsChanged);
+    }
+
+    fn is_mine(&self, m: &Message) -> bool {
+        m.outgoing
+    }
+
+    /// `None` takes your reaction back.
+    pub fn react(&self, message_id: &str, emoji: Option<&str>) {
+        let Some(mut m) = self.inner.db.message(message_id) else {
+            return;
+        };
+        m.extra.react(&self.my_key(), emoji);
+        let chat = m.contact_id.clone();
+        self.changed(m);
+        self.tell_chat(
+            &chat,
+            message_id,
+            &MessageChange::React(emoji.map(str::to_owned)),
+        );
+    }
+
+    /// Only what you wrote yourself.
+    pub fn edit_message(&self, message_id: &str, text: &str) -> anyhow::Result<()> {
+        let text = text.trim();
+        ensure!(!text.is_empty(), "empty");
+        ensure!(text.len() <= protocol::MAX_TEXT, "too_long");
+        let mut m = self.inner.db.message(message_id).context("no_message")?;
+        ensure!(self.is_mine(&m) && !m.extra.unsent, "not_yours");
+        m.body = text.to_owned();
+        let waiting = m.status == MessageStatus::Scheduled;
+        m.extra.edited = !waiting;
+        let chat = m.contact_id.clone();
+        self.changed(m);
+        if !waiting {
+            self.tell_chat(&chat, message_id, &MessageChange::Edit(text.to_owned()));
+        }
+        Ok(())
+    }
+
+    /// Takes it back for everyone. What is left says so.
+    pub fn unsend_message(&self, message_id: &str) -> anyhow::Result<()> {
+        let mut m = self.inner.db.message(message_id).context("no_message")?;
+        ensure!(self.is_mine(&m), "not_yours");
+        self.remove_files(&m);
+        m.body = String::new();
+        m.attachment = None;
+        m.extra.rich = None;
+        m.extra.unsent = true;
+        let chat = m.contact_id.clone();
+        self.changed(m);
+        self.tell_chat(&chat, message_id, &MessageChange::Unsend);
+        Ok(())
+    }
+
+    /// A vote, a mark on a list, an answer to a plan.
+    pub fn change_rich(&self, message_id: &str, change: RichChange) {
+        let Some(mut m) = self.inner.db.message(message_id) else {
+            return;
+        };
+        let me = self.my_key();
+        let Some(rich) = &mut m.extra.rich else {
+            return;
+        };
+        rich.apply(&me, &change);
+        let chat = m.contact_id.clone();
+        self.changed(m);
+        self.tell_chat(&chat, message_id, &MessageChange::Rich(change));
+    }
+
+    // ---- how a chat is treated here ----
+
+    pub fn chat_prefs(&self, chat: &str) -> ChatPrefs {
+        self.inner.db.chat_prefs(chat)
+    }
+
+    /// A new disappearing time goes for the others as well.
+    pub fn set_chat_prefs(&self, chat: &str, prefs: &ChatPrefs) {
+        let before = self.inner.db.chat_prefs(chat);
+        self.inner.db.set_chat_prefs(chat, prefs);
+        if before.disappear_ms != prefs.disappear_ms {
+            self.tell_chat(chat, "", &MessageChange::ChatTimer(prefs.disappear_ms));
+        }
+        self.emit(CoreEvent::ContactsChanged);
+    }
+
+    pub fn folders(&self) -> Vec<Folder> {
+        self.inner
+            .db
+            .secret("folders")
+            .and_then(|json| serde_json::from_slice(&json).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save_folders(&self, folders: &[Folder]) {
+        if let Ok(json) = serde_json::to_vec(folders) {
+            let _ = self.inner.db.set_secret("folders", &json);
+        }
+        self.emit(CoreEvent::ContactsChanged);
+    }
+
+    /// The chats a folder holds: whatever matches any of its rules, and what was put there.
+    pub fn chats_in(&self, folder: &Folder) -> Vec<ChatSummary> {
+        self.chats()
+            .into_iter()
+            .filter(|c| {
+                let group = c.contact.kind == ContactKind::Group;
+                folder.chats.contains(&c.contact.id)
+                    || (folder.groups && group)
+                    || (folder.people && !group)
+                    || (folder.unread && (c.unread > 0 || c.prefs.marked_unread))
+                    || folder.labels.iter().any(|l| c.prefs.labels.contains(l))
+            })
+            .collect()
+    }
+
+    // ---- saved and reminded ----
+
+    /// On your own list, with these words. Nobody else hears of it.
+    pub fn save_message(&self, message_id: &str, tags: &[String]) {
+        if let Some(mut m) = self.inner.db.message(message_id) {
+            m.extra.saved = true;
+            m.extra.tags = tags.to_vec();
+            self.inner.db.update_message(&m);
+            self.emit(CoreEvent::MessageUpdated(m));
+        }
+    }
+
+    pub fn unsave_message(&self, message_id: &str) {
+        if let Some(mut m) = self.inner.db.message(message_id) {
+            m.extra.saved = false;
+            m.extra.tags = Vec::new();
+            self.inner.db.update_message(&m);
+            self.emit(CoreEvent::MessageUpdated(m));
+        }
+    }
+
+    pub fn saved_messages(&self) -> Vec<Message> {
+        self.inner.db.saved_messages()
+    }
+
+    pub fn remind_me(&self, message_id: &str, at: Millis) {
+        self.inner.db.add_reminder(message_id, at, false);
+        self.cmd(Cmd::TimersChanged);
+    }
+
+    /// Only if nothing came back from them by then.
+    pub fn remind_if_no_answer(&self, message_id: &str, at: Millis) {
+        self.inner.db.add_reminder(message_id, at, true);
+        self.cmd(Cmd::TimersChanged);
+    }
+
+    pub fn cancel_reminder(&self, message_id: &str) {
+        self.inner.db.drop_reminder(message_id);
+        self.cmd(Cmd::TimersChanged);
+    }
+
+    /// Message, moment: soonest first.
+    pub fn reminders(&self) -> Vec<(String, Millis)> {
+        self.inner.db.reminders()
+    }
+
+    // ---- finding ----
+
+    /// What fits, newest first. People before messages.
+    pub fn search(&self, query: &str, within: SearchIn) -> Vec<SearchHit> {
+        const MOST: usize = 500;
+        let query = query.trim().to_lowercase();
+        let mut hits = Vec::new();
+        if matches!(within, SearchIn::All | SearchIn::People) && !query.is_empty() {
+            for c in self.inner.db.contacts_in(&[ContactState::Accepted]) {
+                if c.display_name().to_lowercase().contains(&query) {
+                    hits.push(SearchHit::Person(c.id));
+                }
+            }
+        }
+        if within == SearchIn::People {
+            return hits;
+        }
+        for m in self.inner.db.searchable(None) {
+            if hits.len() >= MOST {
+                break;
+            }
+            if message_fits(&m, &query, within) {
+                hits.push(SearchHit::Message {
+                    chat: m.contact_id,
+                    id: m.id,
+                });
+            }
+        }
+        hits
+    }
+
+    /// One chat: what fits, newest first. Without words, everything of the kind.
+    pub fn search_chat(&self, chat: &str, query: &str, within: SearchIn) -> Vec<Message> {
+        let query = query.trim().to_lowercase();
+        self.inner
+            .db
+            .searchable(Some(chat))
+            .into_iter()
+            .filter(|m| message_fits(m, &query, within))
+            .collect()
+    }
+
+    // ---- calls that were ----
+
+    /// Newest first.
+    pub fn call_records(&self) -> Vec<CallRecord> {
+        self.inner.db.call_records()
+    }
+
+    pub fn delete_call_record(&self, id: &str) {
+        self.inner.db.delete_call_record(id);
     }
 
     /// Marks the chat as read (sends read receipts if enabled).
@@ -863,8 +1220,15 @@ impl Core {
                 duration_ms,
             }),
             sender: None,
+            extra: MessageExtra {
+                disappear_ms: self.inner.db.chat_prefs(contact_id).disappear_ms,
+                ..MessageExtra::default()
+            },
         };
         self.inner.db.insert_message(&message)?;
+        if message.extra.disappear_ms.is_some() {
+            self.cmd(Cmd::TimersChanged);
+        }
         self.emit(CoreEvent::MessageAdded(message.clone()));
         self.emit(CoreEvent::ContactsChanged);
         self.dispatch(contact_id, peer, &message);

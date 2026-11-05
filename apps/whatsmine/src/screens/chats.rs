@@ -305,7 +305,9 @@ fn ChatRow(chat: ChatSummary, on_menu: EventHandler<ChatSummary>) -> Element {
 #[component]
 pub fn StatusTicks(status: MessageStatus) -> Element {
     let (icon, class) = match status {
-        MessageStatus::NotDelivered | MessageStatus::Queued => (IconName::Clock, "ticks"),
+        MessageStatus::Scheduled | MessageStatus::NotDelivered | MessageStatus::Queued => {
+            (IconName::Clock, "ticks")
+        }
         MessageStatus::Sent => (IconName::Check, "ticks"),
         MessageStatus::Delivered => (IconName::CheckDouble, "ticks"),
         MessageStatus::Read => (IconName::CheckDouble, "ticks read"),

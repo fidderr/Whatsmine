@@ -239,6 +239,7 @@ impl Engine {
         text: String,
         sent_at: i64,
         group: String,
+        extra: Vec<u8>,
     ) {
         let sender = key_to_string(&peer);
         if text.len() > MAX_TEXT || !self.group_allows(&group, &sender) {
@@ -255,6 +256,7 @@ impl Engine {
             read: false,
             attachment: None,
             sender: Some(sender),
+            extra: crate::rich::MessageExtra::from_wire(&extra),
         };
         if self.db.insert_message(&message).unwrap_or(false) {
             emit(&self.events, CoreEvent::MessageAdded(message));
@@ -283,6 +285,7 @@ impl Engine {
         attachment: Attachment,
         caption: String,
         group: String,
+        extra: Vec<u8>,
     ) {
         let sender = key_to_string(&peer);
         if caption.len() > MAX_TEXT || !self.group_allows(&group, &sender) {
@@ -301,6 +304,7 @@ impl Engine {
                 read: false,
                 attachment: Some(attachment),
                 sender: Some(sender),
+                extra: crate::rich::MessageExtra::from_wire(&extra),
             },
         );
     }
