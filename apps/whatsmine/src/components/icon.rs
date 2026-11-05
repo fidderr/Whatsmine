@@ -2,6 +2,7 @@ use dioxus::prelude::*;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum IconName {
+    Hand,
     Mouse,
     Chat,
     Send,
@@ -286,6 +287,9 @@ pub fn Icon(name: IconName, #[props(default = 20)] size: u32) -> Element {
         }
         IconName::Monitor => &["M3 5h18v11H3zM8 20h8M12 16v4"],
         IconName::Mouse => &["M6 3l4 17 3-7 7-3z"],
+        IconName::Hand => &[
+            "M7 11V6a1.5 1.5 0 0 1 3 0v5M10 10V4.5a1.5 1.5 0 0 1 3 0V10M13 10V6a1.5 1.5 0 0 1 3 0v6M16 11V9a1.5 1.5 0 0 1 3 0v6a6 6 0 0 1-6 6h-1a6 6 0 0 1-5-2.7L3.6 14a1.5 1.5 0 0 1 2.4-1.8L7 13.5",
+        ],
         IconName::Storage => &[
             "M4 6c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3ZM4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3",
         ],

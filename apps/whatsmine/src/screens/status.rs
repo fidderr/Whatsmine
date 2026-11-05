@@ -445,6 +445,11 @@ pub fn StatusView(id: String) -> Element {
             .map(|c| c.display_name())
             .unwrap_or_default()
     };
+    let avatar_name = if mine {
+        core.settings().display_name
+    } else {
+        name.clone()
+    };
     let image = contact.and_then(|c| c.avatar);
     let when = fmt::list_time(&tr, post.at);
     let left_h = ((post.until - now_ms()).max(0) / 3_600_000).to_string();
@@ -521,7 +526,7 @@ pub fn StatusView(id: String) -> Element {
                     onclick: move |_| nav.go_back(),
                     Icon { name: IconName::Xmark }
                 }
-                Avatar { id: id.clone(), name: name.clone(), size: "small", image }
+                Avatar { id: id.clone(), name: avatar_name, size: "small", image }
                 div { class: "stack",
                     span { class: "row-t", "{name}" }
                     span { class: "small", "{when}" }

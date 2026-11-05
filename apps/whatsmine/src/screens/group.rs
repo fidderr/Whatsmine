@@ -21,6 +21,7 @@ pub fn NewGroup() -> Element {
     let mut toast_sig = use_context::<ToastSig>();
     let mut name = use_signal(String::new);
     let mut picked = use_signal(HashSet::<String>::new);
+    let mut room = use_signal(|| false);
 
     let _ = rev();
     let contacts: Vec<_> = core
@@ -37,7 +38,12 @@ pub fn NewGroup() -> Element {
         let core = core.clone();
         move |_| {
             let members: Vec<String> = picked.peek().iter().cloned().collect();
-            match core.create_group(&name.peek(), &members) {
+            let made = if *room.peek() {
+                core.create_room(&name.peek(), &members)
+            } else {
+                core.create_group(&name.peek(), &members)
+            };
+            match made {
                 Ok(g) => {
                     nav.replace(Route::Chat { id: g.id });
                 }
@@ -62,6 +68,15 @@ pub fn NewGroup() -> Element {
                         placeholder: "{t(&tr, \"group.name_placeholder\")}",
                         value: "{name}",
                         oninput: move |e| name.set(e.value()),
+                    }
+                }
+                div { class: "group",
+                    crate::components::SwitchRow {
+                        title: t(&tr, "room.switch"),
+                        note: t(&tr, "room.switch_note"),
+                        checked: room(),
+                        tag: "group-room",
+                        on_change: move |v: bool| room.set(v),
                     }
                 }
                 h2 { class: "gt", "{pick_label}" }

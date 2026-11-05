@@ -3350,6 +3350,64 @@ input[type='range'] {
   flex: none;
   accent-color: var(--primary);
 }
+#wm-call-media .wm-tile.speaking {
+  outline: 3px solid var(--primary);
+  outline-offset: -3px;
+}
+#wm-call-media .wm-tile.hand::after {
+  content: '\270B';
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  font-size: 1.5rem;
+}
+body.call-min #wm-call-media {
+  display: none;
+}
+body.call-min .screen {
+  padding-top: 40px;
+}
+body.call-min .chat {
+  height: calc(100vh - 40px);
+  height: calc(100dvh - 40px);
+  margin-top: 40px;
+}
+#wm-call-media.room .wm-tiles {
+  top: calc(120px + var(--safe-top, 0px));
+  bottom: calc(136px + var(--safe-bottom, 0px));
+  left: 12px;
+  right: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  grid-auto-rows: minmax(0, 1fr);
+  gap: 8px;
+}
+#wm-call-media.room .wm-tile {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.06);
+}
+.call-bar {
+  position: fixed;
+  z-index: 50;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: calc(40px + var(--safe-top, 0px));
+  padding: var(--safe-top, 0px) 12px 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: none;
+  background: var(--success);
+  color: var(--on-success);
+  font: inherit;
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+}
 /* In control of someone's screen: that screen, and a way out. */
 body.call-driving .call-top,
 body.call-driving #wm-call-media .wm-tiles,

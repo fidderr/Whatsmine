@@ -227,6 +227,25 @@ fn ChatView(id: String) -> Element {
         contact.state == ContactState::Accepted && id != core.my_key()
     };
     let ongoing_call = if is_group { core.group_call(&id) } else { None };
+    let is_room = is_group && core.group_info(&id).is_some_and(|g| g.rules.room);
+    let room_line = {
+        let me = core.my_key();
+        let names: Vec<String> = core
+            .group_call_people(&id)
+            .iter()
+            .filter(|who| **who != me)
+            .map(|who| {
+                core.contact(who)
+                    .map(|c| c.display_name())
+                    .unwrap_or_default()
+            })
+            .collect();
+        if names.is_empty() {
+            t(&tr, "room.nobody")
+        } else {
+            t(&tr, "room.who").replace("{names}", &names.join(", "))
+        }
+    };
     let group_status = group_info.as_ref().map(|g| {
         if g.active {
             t(&tr, "group.status")
@@ -510,7 +529,7 @@ fn ChatView(id: String) -> Element {
                         }
                     }
                 }
-                if call_ready {
+                if call_ready && !is_room {
                     button {
                         class: "ib call-start-video",
                         "data-t": "call-video",
@@ -544,7 +563,22 @@ fn ChatView(id: String) -> Element {
                     Icon { name: IconName::More, size: 22 }
                 }
             }
-            if ongoing_call.is_some() && *call_phase.read() == Phase::Idle {
+            if is_room && *call_phase.read() == Phase::Idle {
+                div { class: "call-banner room", "data-t": "room-banner",
+                    span { "{room_line}" }
+                    button {
+                        class: "call-join",
+                        "data-t": "room-join",
+                        onclick: {
+                            let (core, id) = (core.clone(), id.clone());
+                            move |_| call::join_group_call(&core, &id, &toast_sig, &tr)
+                        },
+                        Icon { name: IconName::Mic, size: 16 }
+                        "{t(&tr, \"room.join\")}"
+                    }
+                }
+            }
+            if !is_room && ongoing_call.is_some() && *call_phase.read() == Phase::Idle {
                 div { class: "call-banner",
                     span { "{t(&tr, \"group.call_going\")}" }
                     button {

@@ -926,5 +926,19 @@
   "status.delete": "Terugnemen",
   "status.previous": "Vorige",
   "status.next": "Volgende",
-  "status.a_photo": "Een foto"
+  "status.a_photo": "Een foto",
+  "room.switch": "Inloopruimte",
+  "room.switch_note": "Een groep met een spraakruimte waar mensen in en uit kunnen lopen, zonder overgaan. Maximaal 8 tegelijk.",
+  "room.limit": "maximaal 8",
+  "room.nobody": "Er is nog niemand in de ruimte",
+  "room.who": "In de ruimte: {names}",
+  "room.join": "Binnenkomen",
+  "room.leave": "Weggaan",
+  "room.full": "Deze ruimte is vol: maximaal 8 mensen, omdat iedereen met iedereen verbindt.",
+  "room.you": "Jij",
+  "room.hand": "Hand",
+  "room.hand_up": "Hand opsteken",
+  "room.hand_down": "Hand laten zakken",
+  "room.chat": "Chat",
+  "room.open_chat": "Chat openen en in de ruimte blijven"
 }

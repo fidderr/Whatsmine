@@ -926,5 +926,19 @@
   "status.delete": "Zurücknehmen",
   "status.previous": "Zurück",
   "status.next": "Weiter",
-  "status.a_photo": "Ein Foto"
+  "status.a_photo": "Ein Foto",
+  "room.switch": "Offener Raum",
+  "room.switch_note": "Eine Gruppe mit einem Sprachraum, in den man ohne Klingeln kommt und geht. Bis zu 8 gleichzeitig.",
+  "room.limit": "bis zu 8",
+  "room.nobody": "Noch niemand im Raum",
+  "room.who": "Im Raum: {names}",
+  "room.join": "Reinkommen",
+  "room.leave": "Gehen",
+  "room.full": "Dieser Raum ist voll: höchstens 8 Personen, weil sich alle mit allen verbinden.",
+  "room.you": "Du",
+  "room.hand": "Hand",
+  "room.hand_up": "Hand heben",
+  "room.hand_down": "Hand senken",
+  "room.chat": "Chat",
+  "room.open_chat": "Chat öffnen und im Raum bleiben"
 }

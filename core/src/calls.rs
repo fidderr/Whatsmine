@@ -132,6 +132,14 @@ pub enum CallEvent {
         /// They could be controlled, if they agree.
         can_control: bool,
     },
+    /// In a room: someone raised their hand, or took it down.
+    PeerHand {
+        call_id: String,
+        from: String,
+        up: bool,
+    },
+    /// This room has as many in it as it can take.
+    RoomFull { group_id: String },
     /// Someone asks to control this PC, and all the rules are met: time to ask the owner.
     ControlAsked { call_id: String, from: String },
     /// Someone asked, and the rules say no. The owner hears why.
@@ -179,6 +187,17 @@ pub enum CallEvent {
 
 /// The call, and who may send media for it, right now.
 pub(crate) type ActiveCall = Arc<Mutex<Option<([u8; 16], HashSet<PublicKey>)>>>;
+
+/// How many can be in a room. Everyone connects to everyone, so this is what the tests prove works.
+pub const ROOM_MOST: usize = 8;
+
+/// A room has one call, whoever came in first: two people coming in at once end up in the same one.
+pub fn room_call_id(group: &str) -> [u8; 16] {
+    let hash = blake3::derive_key("whatsmine room call v1", group.as_bytes());
+    let mut id = [0u8; 16];
+    id.copy_from_slice(&hash[..16]);
+    id
+}
 
 /// Where incoming media goes. The receiving end can be replaced at any time
 /// (the screen that plays the media comes and goes; the call does not).

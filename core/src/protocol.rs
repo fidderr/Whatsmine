@@ -221,6 +221,11 @@ pub enum Frame {
     StatusGone {
         id: [u8; 16],
     },
+    /// In a room: a hand goes up, or down.
+    CallHand {
+        call: [u8; 16],
+        up: bool,
+    },
 }
 
 /// What the admin signs. A higher `version` replaces a lower one.
@@ -251,6 +256,8 @@ pub struct GroupRules {
     /// How long someone waits between messages. 0 means no waiting.
     pub slow_ms: u32,
     pub about: String,
+    /// A drop-in room: its call is just there for whoever comes in, and nobody rings.
+    pub room: bool,
 }
 
 impl GroupState {

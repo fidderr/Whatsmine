@@ -926,5 +926,19 @@
   "status.delete": "Take back",
   "status.previous": "Previous",
   "status.next": "Next",
-  "status.a_photo": "A photo"
+  "status.a_photo": "A photo",
+  "room.switch": "Drop-in room",
+  "room.switch_note": "A group with a voice room people can come in and out of, without ringing. Up to 8 at once.",
+  "room.limit": "up to 8",
+  "room.nobody": "Nobody is in the room yet",
+  "room.who": "In the room: {names}",
+  "room.join": "Come in",
+  "room.leave": "Leave",
+  "room.full": "This room is full: 8 people at most, because everyone connects to everyone.",
+  "room.you": "You",
+  "room.hand": "Hand",
+  "room.hand_up": "Raise your hand",
+  "room.hand_down": "Lower your hand",
+  "room.chat": "Chat",
+  "room.open_chat": "Open the chat, and stay in the room"
 }

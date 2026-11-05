@@ -444,6 +444,8 @@ fn print_event(core: &Core, ev: &CoreEvent) {
                     if *on { "is" } else { "stopped" }
                 ),
                 CallEvent::ScreenKeyWanted { .. }
+                | CallEvent::PeerHand { .. }
+                | CallEvent::RoomFull { .. }
                 | CallEvent::ControlAsked { .. }
                 | CallEvent::ControlAskedAnyway { .. }
                 | CallEvent::ControlRefused { .. }

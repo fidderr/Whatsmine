@@ -241,6 +241,7 @@ pub(crate) enum Cmd {
     },
     /// We need a whole picture of the screen we are watching.
     CallScreenKey,
+    CallHand(bool),
     /// What we owe changed: posts to send, or one taken back. The app is in use.
     StatusOut,
     /// We looked at something.
@@ -364,6 +365,8 @@ pub(crate) struct Shared {
     pub net: Arc<Mutex<NetStatus>>,
     /// Group calls that can be joined: group id -> video.
     pub group_calls: Arc<Mutex<HashMap<String, bool>>>,
+    /// Who is in each group's call, as far as we heard.
+    pub group_call_people: Arc<Mutex<HashMap<String, Vec<String>>>>,
     /// The call we are in or being rung for, if any.
     pub call: Arc<Mutex<Option<CallSnapshot>>>,
 }
@@ -2446,6 +2449,7 @@ impl Engine {
                 data,
             } => self.call_screen_frame(ts, key, codec, &data),
             Cmd::CallScreenKey => self.call_screen_key(),
+            Cmd::CallHand(up) => self.call_hand(up),
             Cmd::SendGroup { group, message_id } => {
                 self.note_activity();
                 self.wanted_dirty = true;
@@ -3391,6 +3395,7 @@ impl Engine {
             | Frame::CallEnd { .. }
             | Frame::CallVideo { .. }
             | Frame::CallScreen { .. }
+            | Frame::CallHand { .. }
             | Frame::CallKeyRequest { .. }) => self.on_call_frame(peer, f),
             f @ (Frame::StatusPost { .. }
             | Frame::StatusPhoto { .. }

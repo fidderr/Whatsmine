@@ -37,6 +37,13 @@ pub fn Shell() -> Element {
     });
     let core = use_core();
     let nav = use_navigator();
+    // The call screen sits outside the router, and asks from there.
+    use_effect(move || {
+        if let Some(id) = crate::call::OPEN_CHAT() {
+            *crate::call::OPEN_CHAT.write() = None;
+            nav.push(crate::app::Route::Chat { id });
+        }
+    });
     let settings = use_context::<SettingsSig>().0;
     let stack = use_context::<BackStack>();
     let invite = use_context::<InviteSig>();

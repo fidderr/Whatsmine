@@ -202,6 +202,7 @@ impl Core {
             online: Arc::new(Mutex::new(HashSet::new())),
             net: Arc::new(Mutex::new(NetStatus::Connecting)),
             group_calls: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            group_call_people: Arc::new(Mutex::new(std::collections::HashMap::new())),
             call: Arc::new(Mutex::new(None)),
             tries: Arc::new(Mutex::new(std::collections::HashMap::new())),
         };
@@ -283,6 +284,23 @@ impl Core {
 
     /// If a call is going on in this group that we could join: whether it
     /// is a video call.
+    /// Who is in this group's call or room, as far as we heard.
+    pub fn group_call_people(&self, group_id: &str) -> Vec<String> {
+        self.inner
+            .shared
+            .group_call_people
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(group_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// In a room: our hand goes up or down.
+    pub fn call_hand(&self, up: bool) {
+        self.cmd(Cmd::CallHand(up));
+    }
+
     pub fn group_call(&self, group_id: &str) -> Option<bool> {
         self.inner
             .shared
@@ -2297,6 +2315,20 @@ impl Core {
 
     /// Creates a group of our contacts. We become its admin.
     pub fn create_group(&self, name: &str, members: &[String]) -> anyhow::Result<Contact> {
+        self.create_group_with(name, members, false)
+    }
+
+    /// A group whose call is just there, for whoever comes in.
+    pub fn create_room(&self, name: &str, members: &[String]) -> anyhow::Result<Contact> {
+        self.create_group_with(name, members, true)
+    }
+
+    fn create_group_with(
+        &self,
+        name: &str,
+        members: &[String],
+        room: bool,
+    ) -> anyhow::Result<Contact> {
         let name = engine::clean_name(name);
         ensure!(!name.is_empty(), "empty");
         let me = self.my_key();
@@ -2327,6 +2359,7 @@ impl Core {
                 signer: me.clone(),
                 only_admins_add: true,
                 only_admins_edit: true,
+                room,
                 ..protocol::GroupRules::default()
             },
         };

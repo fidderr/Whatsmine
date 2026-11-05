@@ -48,8 +48,17 @@ pub enum Phase {
         /// They could be controlled, if they agree.
         sharer_can_control: bool,
         control: ControlView,
+        /// A drop-in room.
+        room: bool,
+        /// Our hand is up, in a room.
+        my_hand: bool,
     },
 }
+
+/// The call goes on in a small bar, while someone looks at the chat.
+pub static CALL_SMALL: GlobalSignal<bool> = Signal::global(|| false);
+/// A chat to open, from the call screen: it sits outside the router.
+pub static OPEN_CHAT: GlobalSignal<Option<String>> = Signal::global(|| None);
 
 /// Who is in control of what, during a call.
 #[derive(Clone, PartialEq, Debug, Default)]
@@ -261,7 +270,7 @@ fn show_screen(core: &Core, phase: Signal<Phase>, tr: &Translations) {
 
 /// A screen that opens in the middle of a call (the app was in the
 /// background, or a notification brought it up) picks the call up where it is.
-pub fn restore(core: &Core, mut phase: Signal<Phase>, bridge: &CallBridge) {
+pub fn restore(core: &Core, mut phase: Signal<Phase>, bridge: &CallBridge, tr_of: &Translations) {
     use whatsmine_core::calls::CallPhase;
     let Some(c) = core.call_snapshot() else {
         return;
@@ -284,13 +293,17 @@ pub fn restore(core: &Core, mut phase: Signal<Phase>, bridge: &CallBridge) {
         }
         CallPhase::Active => {
             let group = c.contact_id.starts_with("g:");
+            let room = is_room(core, &c.contact_id);
             let named: Vec<Value> = c
                 .peers
                 .iter()
                 .map(|p| json!({ "id": p, "name": name_of(core, p) }))
                 .collect();
-            bridge
-                .send(json!({ "t": "start", "call": c.call_id, "video": c.video, "group": group }));
+            bridge.send(json!({
+                "t": "start", "call": c.call_id, "video": c.video, "group": group,
+                "room": room, "me": t(tr_of, "room.you"),
+                "initial": core.settings().display_name
+            }));
             bridge.send(json!({ "t": "peers", "peers": named }));
             if let Some(sharer) = &c.sharer {
                 bridge.send(json!({ "t": "peerScreen", "from": sharer, "on": true }));
@@ -307,9 +320,15 @@ pub fn restore(core: &Core, mut phase: Signal<Phase>, bridge: &CallBridge) {
                 sharer: c.sharer,
                 sharer_can_control: false,
                 control: ControlView::Nothing,
+                room,
+                my_hand: false,
             });
         }
     }
+}
+
+fn is_room(core: &Core, id: &str) -> bool {
+    core.group_info(id).is_some_and(|g| g.rules.room)
 }
 
 fn name_of(core: &Core, contact_id: &str) -> String {
@@ -350,8 +369,13 @@ pub fn on_event(
                 _ => false,
             };
             let group = contact_id.starts_with("g:");
+            let room = is_room(core, &contact_id);
             bridge.send(json!({ "t": "ring", "kind": Value::Null }));
-            bridge.send(json!({ "t": "start", "call": call_id, "video": video, "group": group }));
+            bridge.send(json!({
+                "t": "start", "call": call_id, "video": video, "group": group,
+                "room": room, "me": t(tr, "room.you"),
+                "initial": core.settings().display_name
+            }));
             phase.set(Phase::Active {
                 contact_id,
                 since: now_ms(),
@@ -364,6 +388,8 @@ pub fn on_event(
                 sharer: None,
                 sharer_can_control: false,
                 control: ControlView::Nothing,
+                room,
+                my_hand: false,
             });
         }
         CallEvent::PeerScreen {
@@ -414,6 +440,12 @@ pub fn on_event(
             bridge.send(json!({ "t": "peerVideo", "from": from, "on": on }));
         }
         CallEvent::GroupCall { .. } => {}
+        CallEvent::PeerHand { from, up, .. } => {
+            bridge.send(json!({ "t": "hand", "from": from, "up": up }));
+        }
+        CallEvent::RoomFull { .. } => {
+            toast(toast_sig, t(tr, "room.full"), ToastLevel::Info);
+        }
         CallEvent::ControlAsked { from, .. } => {
             set_control(phase, ControlView::Asked { from, at: now_ms() });
             come_forward();
@@ -501,6 +533,8 @@ pub fn on_event(
             contact_id, reason, ..
         } => {
             let was_incoming = matches!(&*phase.read(), Phase::Incoming { .. });
+            let was_room = matches!(&*phase.read(), Phase::Active { room: true, .. });
+            *CALL_SMALL.write() = false;
             crate::guard::set(crate::guard::Reason::Sharing, false);
             crate::control_win::shown_now(false, "", "", 0, 0);
             crate::control_win::off();
@@ -509,6 +543,7 @@ pub fn on_event(
             phase.set(Phase::Idle);
             let name = name_of(core, &contact_id);
             let key = match reason {
+                _ if was_room => None,
                 CallEndReason::Missed if was_incoming => Some("call.missed"),
                 CallEndReason::Missed => Some("call.no_answer"),
                 CallEndReason::Declined => Some("call.declined"),
@@ -733,6 +768,29 @@ pub fn CallOverlay() -> Element {
     });
 
     let current = phase.read().clone();
+    if CALL_SMALL() && matches!(&current, Phase::Active { .. }) {
+        let (title, since) = match &current {
+            Phase::Active {
+                contact_id, since, ..
+            } => (name_of(&core, contact_id), *since),
+            _ => (String::new(), 0),
+        };
+        let time = clock(now() - since);
+        let back = bridge.clone();
+        return rsx! {
+            button {
+                class: "call-bar",
+                "data-t": "call-bar",
+                onclick: move |_| {
+                    *CALL_SMALL.write() = false;
+                    back.send(json!({ "t": "small", "on": false }));
+                },
+                Icon { name: IconName::Mic, size: 16 }
+                span { "{title}" }
+                span { "{time}" }
+            }
+        };
+    }
     let (contact_id, status, video_ui) = match &current {
         Phase::Idle => return rsx! {},
         Phase::Outgoing { contact_id, .. } => (contact_id.clone(), t(&tr, "call.calling"), false),
@@ -767,6 +825,9 @@ pub fn CallOverlay() -> Element {
             let mut s = clock(now() - since);
             if *group {
                 s = format!("{s} · {}", peers.len() + 1);
+            }
+            if let Phase::Active { room: true, .. } = &current {
+                s = format!("{s} · {}", t(&tr, "room.limit"));
             }
             (
                 contact_id.clone(),
@@ -991,6 +1052,90 @@ pub fn CallOverlay() -> Element {
                                     move |_| core.call_end()
                                 },
                                 Icon { name: IconName::PhoneOff, size: 22 }
+                            }
+                        }
+                    }
+                    Phase::Active { muted, room: true, my_hand, contact_id, .. } => {
+                        let mute_label = t(&tr, if muted { "call.unmute" } else { "call.mute" });
+                        let hand_label = t(&tr, if my_hand { "room.hand_down" } else { "room.hand_up" });
+                        rsx! {
+                            button {
+                                class: if my_hand { "call-btn toggle" } else { "call-btn toggle on" },
+                                "data-t": "room-hand",
+                                aria_label: "{hand_label}",
+                                aria_pressed: "{my_hand}",
+                                "data-label": "{t(&tr, \"room.hand\")}",
+                                onclick: {
+                                    let core = core.clone();
+                                    move |_| {
+                                        let up = !my_hand;
+                                        if let Phase::Active { my_hand, .. } = &mut *phase.write() {
+                                            *my_hand = up;
+                                        }
+                                        core.call_hand(up);
+                                    }
+                                },
+                                Icon { name: IconName::Hand, size: 26 }
+                            }
+                            button {
+                                class: if muted { "call-btn toggle on" } else { "call-btn toggle" },
+                                "data-t": "room-mute",
+                                aria_label: "{mute_label}",
+                                "data-label": "{mute_label}",
+                                onclick: {
+                                    let bridge = bridge.clone();
+                                    move |_| {
+                                        let on = !muted;
+                                        if let Phase::Active { muted, .. } = &mut *phase.write() {
+                                            *muted = on;
+                                        }
+                                        bridge.send(json!({ "t": "mute", "on": on }));
+                                    }
+                                },
+                                Icon { name: if muted { IconName::MicOff } else { IconName::Mic }, size: 26 }
+                            }
+                            if cfg!(target_os = "android") {
+                                button {
+                                    class: if speaker() { "call-btn toggle" } else { "call-btn toggle on" },
+                                    "data-t": "call-speaker",
+                                    aria_label: "{t(&tr, \"call.speaker\")}",
+                                    "data-label": "{t(&tr, \"call.speaker\")}",
+                                    aria_pressed: "{speaker()}",
+                                    onclick: move |_| {
+                                        let on = !speaker();
+                                        speaker.set(on);
+                                        #[cfg(target_os = "android")]
+                                        mobile_sentinel::call_service::set_speaker(on);
+                                    },
+                                    Icon { name: IconName::Volume, size: 26 }
+                                }
+                            }
+                            button {
+                                class: "call-btn toggle on",
+                                "data-t": "room-chat",
+                                aria_label: "{t(&tr, \"room.open_chat\")}",
+                                "data-label": "{t(&tr, \"room.chat\")}",
+                                onclick: {
+                                    let bridge = bridge.clone();
+                                    let chat = contact_id.clone();
+                                    move |_| {
+                                        *CALL_SMALL.write() = true;
+                                        bridge.send(json!({ "t": "small", "on": true }));
+                                        *OPEN_CHAT.write() = Some(chat.clone());
+                                    }
+                                },
+                                Icon { name: IconName::Chat, size: 26 }
+                            }
+                            button {
+                                class: "call-btn decline",
+                                "data-t": "call-hangup",
+                                aria_label: "{t(&tr, \"room.leave\")}",
+                                "data-label": "{t(&tr, \"room.leave\")}",
+                                onclick: {
+                                    let core = core.clone();
+                                    move |_| core.call_end()
+                                },
+                                Icon { name: IconName::PhoneOff, size: 28 }
                             }
                         }
                     }

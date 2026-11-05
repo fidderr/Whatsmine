@@ -15,7 +15,7 @@ use iroh::endpoint::Connection;
 use tokio::time::Instant;
 
 use super::{Engine, emit};
-use crate::calls::{CallEndReason, CallEvent, CallPhase, CallSnapshot};
+use crate::calls::{CallEndReason, CallEvent, CallPhase, CallSnapshot, ROOM_MOST, room_call_id};
 use crate::identity::{key_to_string, parse_key};
 use crate::model::{ContactState, CoreEvent, GROUP_ID_PREFIX};
 use crate::protocol::{CallResult, Frame, RING_TIMEOUT, id_from_bytes};
@@ -40,6 +40,10 @@ pub(super) struct CallState {
     pub members: HashSet<PublicKey>,
     /// Who rang us (callee side).
     pub caller: Option<PublicKey>,
+    /// A drop-in room: nobody rings, being alone is fine, and it stays out of the list of calls.
+    pub room: bool,
+    /// Our hand is up, in a room.
+    pub hand: bool,
     /// Who is showing their screen to us.
     pub sharer: Option<PublicKey>,
     /// We are showing our screen: how big it is, how many frames so far, and the streams it goes
@@ -147,15 +151,17 @@ impl Engine {
             .connected
             .map(|t| t.elapsed().as_millis() as u64)
             .unwrap_or(0);
-        self.db.add_call_record(&crate::rich::CallRecord {
-            id: id_from_bytes(&c.id),
-            contact_id: self.conversation_of(&c),
-            outgoing: c.outgoing,
-            video: c.video,
-            at: crate::model::now_ms() - c.started.elapsed().as_millis() as i64,
-            duration_ms,
-            missed: c.connected.is_none(),
-        });
+        if !c.room {
+            self.db.add_call_record(&crate::rich::CallRecord {
+                id: id_from_bytes(&c.id),
+                contact_id: self.conversation_of(&c),
+                outgoing: c.outgoing,
+                video: c.video,
+                at: crate::model::now_ms() - c.started.elapsed().as_millis() as i64,
+                duration_ms,
+                missed: c.connected.is_none(),
+            });
+        }
         self.emit_call(CallEvent::Ended {
             call_id: id_from_bytes(&c.id),
             contact_id: self.conversation_of(&c),
@@ -193,11 +199,18 @@ impl Engine {
         } else {
             gc.participants.remove(&who);
         }
+        let people: Vec<String> = gc.participants.iter().map(key_to_string).collect();
         if gc.participants.is_empty() {
             let video = gc.video;
             self.group_calls.remove(group);
             self.group_call_changed(group, false, video);
         }
+        self.shared
+            .group_call_people
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(group.to_owned(), people);
+        emit(&self.events, CoreEvent::ContactsChanged);
     }
 
     // ---- starting and answering ----
@@ -219,6 +232,10 @@ impl Engine {
                 let Some((state, _, true)) = self.db.group(&target) else {
                     return ended(self, CallEndReason::Lost);
                 };
+                if state.rules.room {
+                    // A room has no ringing: this is coming in.
+                    return self.call_join(target);
+                }
                 let members = state
                     .members
                     .iter()
@@ -280,6 +297,8 @@ impl Engine {
             told: HashSet::new(),
             members,
             caller: None,
+            room: false,
+            hand: false,
             sharer: None,
             showing: None,
         });
@@ -352,10 +371,46 @@ impl Engine {
         if self.call.is_some() {
             return;
         }
-        let Some(gc) = self.group_calls.get(&group) else {
+        let Some((state, _, true)) = self.db.group(&group) else {
             return;
         };
-        let Some((state, _, true)) = self.db.group(&group) else {
+        let room = state.rules.room;
+        if room {
+            let call = room_call_id(&group);
+            let in_it = self
+                .group_calls
+                .get(&group)
+                .map_or(0, |gc| gc.participants.len());
+            if in_it >= ROOM_MOST {
+                self.emit_call(CallEvent::RoomFull { group_id: group });
+                return;
+            }
+            if !self.group_calls.contains_key(&group) {
+                self.group_calls.insert(
+                    group.clone(),
+                    GroupCall {
+                        call,
+                        video: false,
+                        participants: HashSet::new(),
+                    },
+                );
+                self.group_call_changed(&group, true, false);
+            }
+            // Whoever is around hears the room is on, without anything ringing.
+            for m in state.members.iter().filter_map(|m| parse_key(m)) {
+                if m != self.me && self.sessions.contains_key(&m) {
+                    self.send(
+                        m,
+                        Frame::CallInvite {
+                            call,
+                            video: false,
+                            group: Some(group.clone()),
+                        },
+                    );
+                }
+            }
+        }
+        let Some(gc) = self.group_calls.get(&group) else {
             return;
         };
         let (call, video) = (gc.call, gc.video);
@@ -386,11 +441,25 @@ impl Engine {
             told: HashSet::new(),
             members,
             caller: None,
+            room,
+            hand: false,
             sharer: None,
             showing: None,
         });
         self.publish_call_state();
         self.enter_call();
+    }
+
+    /// Our hand goes up or down, in a room.
+    pub(super) fn call_hand(&mut self, up: bool) {
+        let Some(c) = self.call.as_mut().filter(|c| c.room) else {
+            return;
+        };
+        c.hand = up;
+        let (call, peers) = (c.id, c.peers.iter().copied().collect::<Vec<_>>());
+        for p in peers {
+            self.send(p, Frame::CallHand { call, up });
+        }
     }
 
     /// Tells everyone we are out of this call, and notes it for ourselves.
@@ -548,6 +617,9 @@ impl Engine {
             self.announce_peers();
         }
         let Some(c) = self.call.as_ref() else { return };
+        if c.room {
+            return;
+        }
         let empty = c.peers.is_empty();
         if c.connected.is_some() {
             if empty {
@@ -591,6 +663,26 @@ impl Engine {
                         .is_some_and(|c| c.state == ContactState::Accepted),
                 };
                 if !allowed {
+                    return;
+                }
+                if let Some(g) = &group
+                    && self.db.group(g).is_some_and(|(s, _, _)| s.rules.room)
+                {
+                    // A room rings nobody. And it has one call, not one anyone can make up.
+                    if call == room_call_id(g) && !self.group_calls.contains_key(g) {
+                        self.group_calls.insert(
+                            g.clone(),
+                            GroupCall {
+                                call,
+                                video: false,
+                                participants: HashSet::new(),
+                            },
+                        );
+                        self.group_call_changed(g, true, false);
+                    }
+                    if call == room_call_id(g) {
+                        self.track_participant(g, call, peer, true);
+                    }
                     return;
                 }
                 if let Some(g) = &group {
@@ -646,6 +738,8 @@ impl Engine {
                     told: HashSet::new(),
                     members,
                     caller: Some(peer),
+                    room: false,
+                    hand: false,
                     sharer: None,
                     showing: None,
                 });
@@ -685,7 +779,15 @@ impl Engine {
                         } else if newly {
                             self.announce_peers();
                         }
-                        // Whoever just came in can see what is being shown.
+                        // Whoever just came in sees our hand, and what is being shown.
+                        if let Some((call, true)) = self
+                            .call
+                            .as_ref()
+                            .filter(|c| c.room)
+                            .map(|c| (c.id, c.hand))
+                        {
+                            self.send(peer, Frame::CallHand { call, up: true });
+                        }
                         if let Some((call, width, height)) = self
                             .call
                             .as_ref()
@@ -779,6 +881,18 @@ impl Engine {
                     can_control,
                 });
             }
+            Frame::CallHand { call, up }
+                if self
+                    .call
+                    .as_ref()
+                    .is_some_and(|c| c.id == call && c.room && c.peers.contains(&peer)) =>
+            {
+                self.emit_call(CallEvent::PeerHand {
+                    call_id: id_from_bytes(&call),
+                    from: id,
+                    up,
+                });
+            }
             Frame::CallKeyRequest { call }
                 if self.call.as_ref().is_some_and(|c| {
                     c.id == call && c.peers.contains(&peer) && c.showing.is_some()
@@ -808,6 +922,26 @@ impl Engine {
     /// Someone we are ringing but could not reach before is there now.
     pub(super) fn call_on_session(&mut self, peer: PublicKey) {
         let Some(c) = self.call.as_mut() else { return };
+        if c.room && c.connected.is_some() && c.members.contains(&peer) {
+            let (call, group) = (c.id, c.group.clone());
+            c.told.insert(peer);
+            self.send(
+                peer,
+                Frame::CallInvite {
+                    call,
+                    video: false,
+                    group,
+                },
+            );
+            self.send(
+                peer,
+                Frame::CallAnswer {
+                    call,
+                    result: CallResult::Accepted,
+                },
+            );
+            return;
+        }
         if !c.outgoing
             || c.connected.is_some()
             || !c.members.contains(&peer)

@@ -926,5 +926,19 @@
   "status.delete": "Retirar",
   "status.previous": "Anterior",
   "status.next": "Siguiente",
-  "status.a_photo": "Una foto"
+  "status.a_photo": "Una foto",
+  "room.switch": "Sala abierta",
+  "room.switch_note": "Un grupo con una sala de voz en la que se entra y se sale sin llamar. Hasta 8 a la vez.",
+  "room.limit": "hasta 8",
+  "room.nobody": "Aún no hay nadie en la sala",
+  "room.who": "En la sala: {names}",
+  "room.join": "Entrar",
+  "room.leave": "Salir",
+  "room.full": "La sala está llena: 8 personas como máximo, porque todos se conectan con todos.",
+  "room.you": "Tú",
+  "room.hand": "Mano",
+  "room.hand_up": "Levantar la mano",
+  "room.hand_down": "Bajar la mano",
+  "room.chat": "Chat",
+  "room.open_chat": "Abrir el chat sin salir de la sala"
 }

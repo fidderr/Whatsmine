@@ -926,5 +926,19 @@
   "status.delete": "Retirer",
   "status.previous": "Précédent",
   "status.next": "Suivant",
-  "status.a_photo": "Une photo"
+  "status.a_photo": "Une photo",
+  "room.switch": "Salon ouvert",
+  "room.switch_note": "Un groupe avec un salon vocal où l’on entre et sort sans sonnerie. Jusqu’à 8 à la fois.",
+  "room.limit": "jusqu’à 8",
+  "room.nobody": "Personne dans le salon",
+  "room.who": "Dans le salon : {names}",
+  "room.join": "Entrer",
+  "room.leave": "Partir",
+  "room.full": "Ce salon est plein : 8 personnes au plus, car chacun se connecte à tous.",
+  "room.you": "Vous",
+  "room.hand": "Main",
+  "room.hand_up": "Lever la main",
+  "room.hand_down": "Baisser la main",
+  "room.chat": "Chat",
+  "room.open_chat": "Ouvrir le chat et rester dans le salon"
 }

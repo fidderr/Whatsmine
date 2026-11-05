@@ -251,7 +251,7 @@ fn Main(core: AppCore) -> Element {
     use_context_provider(|| CallUi(call_phase));
     let bridge = call::use_call_bridge(&core.0, call_phase, toast_sig, translations);
     use_context_provider(|| bridge.clone());
-    use_hook(|| call::restore(&core.0, call_phase, &bridge));
+    use_hook(|| call::restore(&core.0, call_phase, &bridge, &translations));
     #[cfg(feature = "desktop")]
     crate::shell::desktop_shell(core.0.clone(), settings, crate::links::InviteSig(invite));
 

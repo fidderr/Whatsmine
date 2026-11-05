@@ -35,7 +35,7 @@
   const DECODE = ['vp8', 'vp09.00.10.08', 'avc1.42E01F']
   const stats = {
     aSent: 0, aRecv: 0, aDec: 0, vSent: 0, vRecv: 0, vDec: 0, vKeyWait: 0, errors: [],
-    sSent: 0, sBytes: 0, sRecv: 0, sDec: 0, sGaps: 0, sKeys: 0
+    sSent: 0, sBytes: 0, sRecv: 0, sDec: 0, sGaps: 0, sKeys: 0, speaking: 0
   }
   // For tests: a painted picture instead of what is really on screen.
   let driving = null
@@ -109,6 +109,21 @@
     p.letter.textContent = (Array.from(name)[0] || '?').toUpperCase()
   }
 
+  // Is someone saying something? Only looks, in a group, at a little of what came in anyway.
+  function loud (ad) {
+    const n = ad.numberOfFrames
+    if (!n) return false
+    const buf = new Float32Array(n)
+    try { ad.copyTo(buf, { planeIndex: 0, format: 'f32-planar' }) } catch (_) { return false }
+    let sum = 0
+    let count = 0
+    for (let i = 0; i < n; i += 4) {
+      sum += buf[i] * buf[i]
+      count++
+    }
+    return Math.sqrt(sum / count) > 0.015
+  }
+
   function ensurePeer (r, id, name) {
     let p = r.peers.get(id)
     if (p) {
@@ -138,6 +153,7 @@
       output: ad => {
         stats.aDec++
         p.nA++
+        if (r.group && loud(ad)) p.lastLoud = performance.now()
         p.agenW.write(ad).catch(() => quiet(() => ad.close()))
       },
       error: err => fail('audio-decoder', err)
@@ -236,6 +252,7 @@
         try { res = await reader.read() } catch (_) { break }
         if (res.done) break
         const ad = res.value
+        if (r.meTile && !r.muted && loud(ad)) r.meLoud = performance.now()
         try { if (!r.closed && !r.muted) r.aenc.encode(ad) } catch (e) { note('audio-encode', e) }
         ad.close()
       }
@@ -827,8 +844,34 @@
   async function start (m) {
     stop()
     const e = ensureEls()
-    const r = (run = { id: m.call, closed: false, muted: false, camOn: false, peers: new Map() })
+    const r = (run = { id: m.call, closed: false, muted: false, camOn: false, peers: new Map(), group: !!m.group })
     e.box.classList.toggle('group', !!m.group)
+    e.box.classList.toggle('room', !!m.room)
+    if (m.room) {
+      // In a room you see yourself as one of them, with who is talking outlined.
+      const tile = document.createElement('div')
+      tile.className = 'wm-tile me'
+      const letter = document.createElement('div')
+      letter.className = 'wm-letter'
+      letter.textContent = (Array.from(m.initial || '')[0] || '?').toUpperCase()
+      const label = document.createElement('div')
+      label.className = 'wm-label'
+      label.textContent = m.me || ''
+      tile.append(letter, label)
+      e.tiles.append(tile)
+      r.meTile = tile
+    }
+    if (m.group) {
+      r.talk = setInterval(() => {
+        const now = performance.now()
+        r.peers.forEach(p => {
+          const on = now - (p.lastLoud || 0) < 400
+          if (on) stats.speaking++
+          p.tile.classList.toggle('speaking', on)
+        })
+        if (r.meTile) r.meTile.classList.toggle('speaking', !r.muted && now - (r.meLoud || 0) < 400)
+      }, 200)
+    }
     try {
       r.mic = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1, sampleRate: 48000 }
@@ -853,6 +896,9 @@
     if (!r) return
     r.closed = true
     clearInterval(r.watch)
+    clearInterval(r.talk)
+    if (r.meTile) r.meTile.remove()
+    document.body.classList.remove('call-min')
     quiet(() => r.micReader && r.micReader.cancel())
     quiet(() => r.camReader && r.camReader.cancel())
     stopShowing(r)
@@ -899,6 +945,13 @@
       case 's': return onScreen(m)
       case 'share': return shareOn(!!m.on)
       case 'control': return driveOn(m)
+      case 'small': return document.body.classList.toggle('call-min', !!m.on)
+      case 'hand': {
+        const r = run
+        if (!r) return
+        ensurePeer(r, m.from).tile.classList.toggle('hand', !!m.up)
+        return
+      }
       case 'screenKey':
         if (run && run.share) run.share.forceKey = true
         return

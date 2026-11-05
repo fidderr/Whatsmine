@@ -161,6 +161,9 @@ fn core_action(core: &whatsmine_core::Core, what: &str) -> String {
             "ok".to_owned()
         }
         "control_log" => core.control_log().len().to_string(),
+        "room" => core
+            .create_room("Evening chat", &[rest.to_owned()])
+            .map_or_else(|e| format!("error: {e}"), |c| c.id),
         "requests" => core
             .requests()
             .iter()
