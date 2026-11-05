@@ -61,11 +61,12 @@ pub fn JoinDialog() -> Element {
         return rsx! {};
     };
     let text = link.link();
+    let title = t(&tr, "join.title").replace("{name}", &link.name);
     rsx! {
         div { class: "scrim center", onclick: move |_| shown.set(None),
             BackLayer { on_back: move |_| shown.set(None) }
             div { class: "confirm-dialog invite-dialog", "data-t": "join-dialog", onclick: move |e| e.stop_propagation(),
-                h3 { "{t(&tr, \"join.title\").replace(\"{name}\", &link.name)}" }
+                h3 { "{title}" }
                 p { "{t(&tr, \"join.body\")}" }
                 div { class: "btns",
                     button { class: "btn", onclick: move |_| shown.set(None),
