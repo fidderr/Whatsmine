@@ -3318,6 +3318,23 @@ input[type='range'] {
   width: 100%;
   font-weight: 600;
 }
+.space-open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border: none;
+  padding: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.space-open:disabled {
+  cursor: default;
+}
 .chat-note {
   align-self: center;
   margin: 8px auto;
@@ -3367,14 +3384,17 @@ body.call-min #wm-call-media {
 body.call-min .screen {
   padding-top: 40px;
 }
+body.call-min {
+  overflow: hidden;
+}
 body.call-min .chat {
   height: calc(100vh - 40px);
   height: calc(100dvh - 40px);
   margin-top: 40px;
 }
 #wm-call-media.room .wm-tiles {
-  top: calc(120px + var(--safe-top, 0px));
-  bottom: calc(136px + var(--safe-bottom, 0px));
+  top: calc(184px + var(--safe-top, 0px));
+  bottom: calc(160px + var(--safe-bottom, 0px));
   left: 12px;
   right: 12px;
   grid-template-columns: repeat(2, minmax(0, 1fr)) !important;

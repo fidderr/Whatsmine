@@ -161,6 +161,26 @@ impl Core {
             );
             db.add_status_seen_by("0190a000-0000-7000-8000-000000000006", &noor);
         }
+        {
+            let people = [noor.clone(), bas.clone()];
+            let space = self.create_space("Climbing club", &people)?.id;
+            let general = self.create_group("General", &people)?.id;
+            let trips = self.create_group("Trips", &people)?.id;
+            let evening = self.create_room("Evening chat", &people)?.id;
+            let training = self.create_room("Training talk", &people)?.id;
+            for child in [&general, &trips, &evening, &training] {
+                self.space_add_child(&space, child)?;
+            }
+            // Something run by someone else, that we are not in yet.
+            self.group_set_rules(&space, |r| {
+                r.children.push(protocol::SpaceChild {
+                    id: "g:demo-gear".into(),
+                    name: "Gear for sale".into(),
+                    kind: protocol::ChildKind::Group,
+                    link: String::new(),
+                });
+            })?;
+        }
         let sage = Look {
             id: "seed-sage".into(),
             name: "Soft sage".into(),

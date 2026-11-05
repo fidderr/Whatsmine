@@ -2315,12 +2315,126 @@ impl Core {
 
     /// Creates a group of our contacts. We become its admin.
     pub fn create_group(&self, name: &str, members: &[String]) -> anyhow::Result<Contact> {
-        self.create_group_with(name, members, false)
+        self.create_group_with(name, members, false, false)
     }
 
     /// A group whose call is just there, for whoever comes in.
     pub fn create_room(&self, name: &str, members: &[String]) -> anyhow::Result<Contact> {
-        self.create_group_with(name, members, true)
+        self.create_group_with(name, members, true, false)
+    }
+
+    /// A group of groups, rooms and channels.
+    pub fn create_space(&self, name: &str, members: &[String]) -> anyhow::Result<Contact> {
+        self.create_group_with(name, members, false, true)
+    }
+
+    /// What is in a space, and how that is for us.
+    pub fn space_children(&self, space: &str) -> Vec<groups::SpaceChildView> {
+        let Some(info) = self.group_info(space) else {
+            return Vec::new();
+        };
+        info.rules
+            .children
+            .into_iter()
+            .map(|child| {
+                let state = if self.group_info(&child.id).is_some_and(|g| g.active) {
+                    groups::ChildState::In
+                } else if self.asked_to_join(&child.link) {
+                    groups::ChildState::Asked
+                } else {
+                    groups::ChildState::Out
+                };
+                let people = self.group_call_people(&child.id);
+                groups::SpaceChildView {
+                    child,
+                    state,
+                    people,
+                }
+            })
+            .collect()
+    }
+
+    /// We left a request with the link's owner, and it has not been answered.
+    fn asked_to_join(&self, link: &str) -> bool {
+        let Some(link) = identity::parse_group_link(link) else {
+            return false;
+        };
+        let Some(owner) = link.invite.key() else {
+            return false;
+        };
+        self.inner
+            .db
+            .contact_keys(&identity::key_to_string(&owner))
+            .and_then(|keys| keys.join)
+            .is_some_and(|join| join.group == link.group)
+    }
+
+    /// What we could put in this space: what we run ourselves and is not in it yet.
+    pub fn space_can_add(&self, space: &str) -> Vec<(String, String)> {
+        let inside: Vec<String> = self
+            .group_info(space)
+            .map(|g| g.rules.children.into_iter().map(|c| c.id).collect())
+            .unwrap_or_default();
+        self.chats()
+            .into_iter()
+            .filter(|c| c.contact.kind == ContactKind::Group)
+            .filter(|c| c.contact.id != space && !inside.contains(&c.contact.id))
+            .filter_map(|c| {
+                let info = self.group_info(&c.contact.id)?;
+                (info.active && !info.rules.space && (info.i_am_admin || info.i_am_owner))
+                    .then(|| (c.contact.id.clone(), info.name))
+            })
+            .collect()
+    }
+
+    /// Puts a group or room we run in a space we run. Its own link goes along.
+    pub fn space_add_child(&self, space: &str, child: &str) -> anyhow::Result<()> {
+        let state = self.managed_state(space)?;
+        ensure!(state.rules.space, "not_a_space");
+        ensure!(
+            state.rules.children.len() < protocol::MOST_CHILDREN,
+            "too_many"
+        );
+        ensure!(
+            !state.rules.children.iter().any(|c| c.id == child),
+            "already_in"
+        );
+        let child_state = self.managed_state(child)?;
+        ensure!(!child_state.rules.space, "not_a_group");
+        let link = self.group_link(child)?;
+        let item = protocol::SpaceChild {
+            id: child.to_owned(),
+            name: child_state.name,
+            kind: if child_state.rules.room {
+                protocol::ChildKind::Room
+            } else {
+                protocol::ChildKind::Group
+            },
+            link,
+        };
+        self.group_set_rules(space, |r| r.children.push(item))
+    }
+
+    pub fn space_remove_child(&self, space: &str, child: &str) -> anyhow::Result<()> {
+        self.group_set_rules(space, |r| r.children.retain(|c| c.id != child))
+    }
+
+    /// Goes into something in a space, through its own link: it decides who gets in.
+    pub fn space_open_child(&self, space: &str, child: &str) -> anyhow::Result<()> {
+        let Some(info) = self.group_info(space) else {
+            bail!("not_in_space");
+        };
+        let Some(item) = info.rules.children.iter().find(|c| c.id == child) else {
+            bail!("not_in_space");
+        };
+        // The list comes from whoever runs the space. A link that goes somewhere else than it
+        // says is not followed.
+        let Some(link) = identity::parse_group_link(&item.link) else {
+            bail!("invalid_key");
+        };
+        ensure!(link.group == item.id, "wrong_link");
+        self.join_by_link(&item.link, "")?;
+        Ok(())
     }
 
     fn create_group_with(
@@ -2328,6 +2442,7 @@ impl Core {
         name: &str,
         members: &[String],
         room: bool,
+        space: bool,
     ) -> anyhow::Result<Contact> {
         let name = engine::clean_name(name);
         ensure!(!name.is_empty(), "empty");
@@ -2360,6 +2475,7 @@ impl Core {
                 only_admins_add: true,
                 only_admins_edit: true,
                 room,
+                space,
                 ..protocol::GroupRules::default()
             },
         };

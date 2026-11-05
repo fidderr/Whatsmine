@@ -258,6 +258,29 @@ pub struct GroupRules {
     pub about: String,
     /// A drop-in room: its call is just there for whoever comes in, and nobody rings.
     pub room: bool,
+    /// A space: a group of groups, rooms and channels.
+    pub space: bool,
+    /// What is in the space.
+    pub children: Vec<SpaceChild>,
+}
+
+/// What a space can hold. Signed along with the rest, so only who runs it decides this.
+pub const MOST_CHILDREN: usize = 64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChildKind {
+    Group,
+    Room,
+    Channel,
+}
+
+/// Something in a space, and the way in: its own link, with its own rule for who gets in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpaceChild {
+    pub id: String,
+    pub name: String,
+    pub kind: ChildKind,
+    pub link: String,
 }
 
 impl GroupState {

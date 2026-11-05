@@ -53,6 +53,24 @@ pub fn verify(state: &GroupState, sig: &[u8]) -> bool {
 }
 
 /// Whether this next state is one its signer may make, given the current one.
+/// Whether we are in something in a space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChildState {
+    In,
+    /// We asked, and someone there decides.
+    Asked,
+    Out,
+}
+
+/// Something in a space, as it is for us.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpaceChildView {
+    pub child: crate::protocol::SpaceChild,
+    pub state: ChildState,
+    /// For a room: who we heard is in it.
+    pub people: Vec<String>,
+}
+
 pub fn may_change(current: &GroupState, next: &GroupState) -> bool {
     let signer = signer_of(next);
     if !current.members.iter().any(|m| m == signer) {

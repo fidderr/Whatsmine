@@ -393,6 +393,24 @@ if wanted status; then
     fi
 fi
 
+scenario space
+if wanted space; then
+    fresh "demo name=Roy theme=$THEME locale=$LOCALE"
+    if on_screen .bottom-nav 60; then
+        js "var r = [...document.querySelectorAll('.chat-row')].find(x => x.textContent.includes('Climbing club')); if (!r) return 'no'; r.click(); return 'ok'" > /dev/null
+        if on_screen '[data-t="space"]' 6; then
+            look_through space
+            tap space-add 0 0.3
+            on_screen '[data-t="space-add-sheet"]' 4 && picture space_add
+            pass
+        else
+            fail "no space"
+        fi
+    else
+        fail "the app did not come up"
+    fi
+fi
+
 scenario looks_used
 if wanted looks; then
     tap tab-settings

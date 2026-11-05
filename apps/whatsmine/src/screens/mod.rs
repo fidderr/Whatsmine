@@ -11,6 +11,7 @@ pub mod looks;
 mod people;
 mod requests;
 pub mod settings;
+mod space;
 mod start;
 mod status;
 
@@ -29,5 +30,6 @@ pub use settings::{
     AppearanceScreen, ConnectionScreen, DevicesScreen, HelpScreen, NotificationsScreen,
     PrivacyScreen, SettingsScreen, SpeedScreen, StorageScreen,
 };
+pub use space::SpaceScreen;
 pub use start::Start;
 pub use status::{StatusNew, StatusScreen, StatusView, StatusWho};

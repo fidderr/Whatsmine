@@ -21,7 +21,7 @@ pub fn NewGroup() -> Element {
     let mut toast_sig = use_context::<ToastSig>();
     let mut name = use_signal(String::new);
     let mut picked = use_signal(HashSet::<String>::new);
-    let mut room = use_signal(|| false);
+    let mut kind = use_signal(|| "group".to_owned());
 
     let _ = rev();
     let contacts: Vec<_> = core
@@ -38,10 +38,10 @@ pub fn NewGroup() -> Element {
         let core = core.clone();
         move |_| {
             let members: Vec<String> = picked.peek().iter().cloned().collect();
-            let made = if *room.peek() {
-                core.create_room(&name.peek(), &members)
-            } else {
-                core.create_group(&name.peek(), &members)
+            let made = match kind.peek().as_str() {
+                "room" => core.create_room(&name.peek(), &members),
+                "space" => core.create_space(&name.peek(), &members),
+                _ => core.create_group(&name.peek(), &members),
             };
             match made {
                 Ok(g) => {
@@ -70,14 +70,20 @@ pub fn NewGroup() -> Element {
                         oninput: move |e| name.set(e.value()),
                     }
                 }
-                div { class: "group",
-                    crate::components::SwitchRow {
-                        title: t(&tr, "room.switch"),
-                        note: t(&tr, "room.switch_note"),
-                        checked: room(),
-                        tag: "group-room",
-                        on_change: move |v: bool| room.set(v),
-                    }
+                crate::components::Chips {
+                    options: vec![
+                        ("group".to_owned(), t(&tr, "group.kind_group")),
+                        ("room".to_owned(), t(&tr, "room.switch")),
+                        ("space".to_owned(), t(&tr, "space.title")),
+                    ],
+                    value: kind(),
+                    on_change: move |v: String| kind.set(v),
+                }
+                if kind() == "room" {
+                    p { class: "note", style: "padding:0 4px", "{t(&tr, \"room.switch_note\")}" }
+                }
+                if kind() == "space" {
+                    p { class: "note", style: "padding:0 4px", "{t(&tr, \"space.note\")}" }
                 }
                 h2 { class: "gt", "{pick_label}" }
                 if contacts.is_empty() {

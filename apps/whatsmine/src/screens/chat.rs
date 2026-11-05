@@ -40,8 +40,19 @@ enum Attach {
     Video,
 }
 
+/// A chat, or what a space shows instead: a space has no chat of its own.
 #[component]
 pub fn Chat(id: String) -> Element {
+    let core = use_core();
+    if core.group_info(&id).is_some_and(|g| g.rules.space) {
+        rsx! { super::SpaceScreen { key: "{id}", id } }
+    } else {
+        rsx! { ChatBody { key: "{id}", id } }
+    }
+}
+
+#[component]
+fn ChatBody(id: String) -> Element {
     // Keyed so switching chats starts with fresh state (draft, paging).
     rsx! {
         ChatView { key: "{id}", id: id.clone() }
