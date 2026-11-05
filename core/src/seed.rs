@@ -94,6 +94,73 @@ impl Core {
             );
         }
         person("Pushy Pete", ContactState::Blocked)?;
+        {
+            use crate::status::{Backdrop, LASTS, Post};
+            let now = now_ms();
+            let post = |id: &str, author: &str, ago: i64, text: &str, backdrop, seen| Post {
+                id: format!("0190a000-0000-7000-8000-00000000{id}"),
+                author: author.to_owned(),
+                text: text.to_owned(),
+                backdrop,
+                at: now - ago,
+                until: now - ago + LASTS,
+                parts: 0,
+                seen,
+                seen_told: seen,
+            };
+            for p in [
+                post(
+                    "0001",
+                    &noor,
+                    720_000,
+                    "Finally at the top. Worth every step.",
+                    Backdrop::Dusk,
+                    false,
+                ),
+                post(
+                    "0002",
+                    &sam,
+                    3_600_000,
+                    "New bike, who wants to ride on Sunday?",
+                    Backdrop::Forest,
+                    false,
+                ),
+                post(
+                    "0003",
+                    &lieke,
+                    14_400_000,
+                    "Coffee at mine, door is open",
+                    Backdrop::Sand,
+                    false,
+                ),
+                post(
+                    "0004",
+                    &mum,
+                    50_000_000,
+                    "The tulips are out",
+                    Backdrop::Plum,
+                    true,
+                ),
+                post("0005", &bas, 60_000_000, "Back home", Backdrop::Night, true),
+            ] {
+                db.add_status(&p);
+            }
+            let me = self.my_key();
+            db.add_status(&post(
+                "0006",
+                &me,
+                1_800_000,
+                "At the lake all afternoon, come by",
+                Backdrop::Sea,
+                true,
+            ));
+            db.owe_status(
+                "0190a000-0000-7000-8000-000000000006",
+                std::slice::from_ref(&noor),
+                now + LASTS,
+            );
+            db.add_status_seen_by("0190a000-0000-7000-8000-000000000006", &noor);
+        }
         let sage = Look {
             id: "seed-sage".into(),
             name: "Soft sage".into(),

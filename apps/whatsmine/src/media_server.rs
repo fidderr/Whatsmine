@@ -233,6 +233,31 @@ pub fn serve_avatar(core: &Core, path: &str) -> Served {
 }
 
 /// A look's photo. It lies sealed in the database, and comes from there.
+/// A post's photo, by the id of the post. Goes with the post.
+pub fn serve_status_photo(core: &Core, path: &str) -> Served {
+    let id = path
+        .trim_start_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or("");
+    match core.status_photo(id) {
+        Some(body) => Served {
+            status: 200,
+            headers: vec![
+                ("Content-Type", "image/jpeg".to_string()),
+                ("X-Content-Type-Options", "nosniff".to_string()),
+                ("Cache-Control", "no-store".to_string()),
+            ],
+            body,
+        },
+        None => Served {
+            status: 404,
+            headers: Vec::new(),
+            body: Vec::new(),
+        },
+    }
+}
+
 pub fn serve_look_photo(core: &Core, path: &str) -> Served {
     let id = path
         .trim_start_matches('/')
@@ -357,6 +382,10 @@ pub fn use_media_server(core: Core) {
         let c = core.clone();
         host::use_asset_handler("look-photo", move |req, responder| {
             reply(responder, serve_look_photo(&c, req.uri().path()));
+        });
+        let c = core.clone();
+        host::use_asset_handler("status-photo", move |req, responder| {
+            reply(responder, serve_status_photo(&c, req.uri().path()));
         });
         let c = core.clone();
         host::use_asset_handler("font", move |req, responder| {

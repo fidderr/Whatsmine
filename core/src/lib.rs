@@ -36,6 +36,7 @@ pub mod sealing;
 #[cfg(feature = "test-hooks")]
 mod seed;
 pub mod sibling;
+pub mod status;
 pub mod vault;
 
 use std::collections::HashSet;
@@ -413,6 +414,141 @@ impl Core {
             self.emit(CoreEvent::MessageAdded(message));
             self.emit(CoreEvent::ContactsChanged);
         }
+    }
+
+    /// Posts something for the people chosen in the settings, for a day.
+    pub fn status_post(
+        &self,
+        text: &str,
+        backdrop: status::Backdrop,
+        photo: Option<&Path>,
+    ) -> anyhow::Result<String> {
+        self.status_post_lasting(text, backdrop, photo, status::LASTS)
+    }
+
+    /// For tests, which have no day to wait. Otherwise see [`Self::status_post`].
+    #[doc(hidden)]
+    pub fn status_post_lasting(
+        &self,
+        text: &str,
+        backdrop: status::Backdrop,
+        photo: Option<&Path>,
+        lasts: Millis,
+    ) -> anyhow::Result<String> {
+        let text = status::clean_text(text);
+        let jpeg = photo.map(files::wallpaper_jpeg).transpose()?;
+        anyhow::ensure!(!text.is_empty() || jpeg.is_some(), "nothing to post");
+        let parts = jpeg
+            .as_ref()
+            .map_or(0, |j| j.len().div_ceil(status::PHOTO_PART));
+        anyhow::ensure!(
+            parts <= usize::from(status::MOST_PARTS),
+            "this photo is too big"
+        );
+        let id = uuid::Uuid::now_v7().to_string();
+        let now = now_ms();
+        let until = now + lasts;
+        let db = &self.inner.db;
+        db.add_status(&status::Post {
+            id: id.clone(),
+            author: self.my_key(),
+            text,
+            backdrop,
+            at: now,
+            until,
+            parts: parts as u16,
+            seen: true,
+            seen_told: true,
+        });
+        if let Some(jpeg) = jpeg {
+            for (part, bytes) in jpeg.chunks(status::PHOTO_PART).enumerate() {
+                db.set_status_photo_part(&id, part as u16, bytes);
+            }
+        }
+        let audience = self.settings().status_audience;
+        let peers: Vec<String> = db
+            .contacts_in(&[ContactState::Accepted])
+            .into_iter()
+            .filter(|c| c.kind == ContactKind::Person && audience.includes(&c.id))
+            .map(|c| c.id)
+            .collect();
+        db.owe_status(&id, &peers, until);
+        self.cmd(Cmd::StatusOut);
+        self.emit(CoreEvent::StatusChanged);
+        Ok(id)
+    }
+
+    /// What a photo would look like as a post, cleaned and scaled. It can take a moment.
+    pub fn status_photo_preview(&self, path: &Path) -> anyhow::Result<Vec<u8>> {
+        files::wallpaper_jpeg(path)
+    }
+
+    /// Everything still around, newest first. Our own too.
+    pub fn status_posts(&self) -> Vec<status::Post> {
+        self.inner.db.status_posts()
+    }
+
+    pub fn status_post_by_id(&self, id: &str) -> Option<status::Post> {
+        self.inner.db.status_post(id)
+    }
+
+    /// The photo of a post, when all of it is here.
+    pub fn status_photo(&self, id: &str) -> Option<Vec<u8>> {
+        self.inner
+            .db
+            .status_photo_parts(id)
+            .map(|parts| parts.concat())
+    }
+
+    /// We looked at it. They hear so if read receipts are on, the next time we are connected.
+    pub fn status_seen(&self, id: &str) {
+        if self.inner.db.set_status_seen(id) {
+            self.cmd(Cmd::StatusTell);
+            self.emit(CoreEvent::StatusChanged);
+        }
+    }
+
+    /// Who looked at a post of ours.
+    pub fn status_seen_by(&self, id: &str) -> Vec<String> {
+        self.inner.db.status_seen_by(id)
+    }
+
+    /// Takes a post of ours back, also from whoever has it already.
+    pub fn status_delete(&self, id: &str) {
+        let me = self.my_key();
+        if self
+            .inner
+            .db
+            .status_post(id)
+            .is_some_and(|p| p.author == me)
+        {
+            self.inner.db.status_taken_back(id);
+            self.cmd(Cmd::StatusOut);
+            self.emit(CoreEvent::StatusChanged);
+        }
+    }
+
+    /// A reply is a normal message in the chat with whoever posted it, that says what it is about.
+    pub fn status_reply(&self, id: &str, text: &str) -> anyhow::Result<Message> {
+        let post = self
+            .inner
+            .db
+            .status_post(id)
+            .ok_or_else(|| anyhow::anyhow!("that post is gone"))?;
+        self.send_rich(
+            &post.author,
+            Rich::StatusReply {
+                quote: status::quote_of(&post),
+                photo: post.has_photo(),
+                text: text.to_owned(),
+            },
+        )
+    }
+
+    /// How many people still have to hear about our posts. For tests.
+    #[doc(hidden)]
+    pub fn status_owed_to(&self, peer: &str) -> usize {
+        self.inner.db.status_owed(peer).len()
     }
 
     /// Who controlled this PC, newest first.
@@ -1201,6 +1337,8 @@ impl Core {
         self.inner
             .db
             .upsert_contact(id, ContactState::Blocked, None, None)?;
+        self.inner.db.delete_status_from(id);
+        self.emit(CoreEvent::StatusChanged);
         self.cmd(Cmd::Disconnect(peer));
         // They knew where we were. Not any more, and contacts are told.
         self.cmd(Cmd::Rotate { network: true });

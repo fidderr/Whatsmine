@@ -42,6 +42,15 @@ pub fn People() -> Element {
     let all = core.address_book();
     let blocked = core.blocked().len();
     let requests = core.requests().len();
+    let new_posts = {
+        let me = core.my_key();
+        core.status_posts()
+            .iter()
+            .filter(|p| !p.seen && p.author != me)
+            .map(|p| p.author.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+    };
     let q = query().trim().to_lowercase();
     let people: Vec<Contact> = all
         .iter()
@@ -101,6 +110,14 @@ pub fn People() -> Element {
                     }
                 }
                 div { class: "group",
+                    Row {
+                        icon: IconName::Clock,
+                        title: t(&tr, "status.title"),
+                        value: if new_posts > 0 { new_posts.to_string() } else { String::new() },
+                        small: true,
+                        to: Route::StatusScreen {},
+                        tag: "status-row",
+                    }
                     Row {
                         icon: IconName::UserPlus,
                         title: t(&tr, "add.title"),

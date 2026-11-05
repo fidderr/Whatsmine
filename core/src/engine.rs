@@ -50,6 +50,7 @@ use crate::sibling::{DeviceState, SyncEvent};
 mod call;
 mod control;
 mod group;
+mod status;
 pub(crate) use group::{group_link_state, join_asked_name, save_group_link_state};
 
 use call::{CallState, GroupCalls};
@@ -240,6 +241,10 @@ pub(crate) enum Cmd {
     },
     /// We need a whole picture of the screen we are watching.
     CallScreenKey,
+    /// What we owe changed: posts to send, or one taken back. The app is in use.
+    StatusOut,
+    /// We looked at something.
+    StatusTell,
     ControlAsk,
     ControlAnswer {
         yes: bool,
@@ -947,6 +952,9 @@ impl Engine {
         }
         for message_id in self.db.take_due_reminders(now) {
             emit(&self.events, CoreEvent::Reminder { message_id });
+        }
+        if self.db.expire_status(now) {
+            emit(&self.events, CoreEvent::StatusChanged);
         }
         for m in self.db.expired(now) {
             self.remove_message_files(&m);
@@ -2408,6 +2416,15 @@ impl Engine {
                 height,
                 can_control,
             } => self.call_screen_on(on, width, height, can_control),
+            Cmd::StatusOut => self.status_out(),
+            Cmd::StatusTell => {
+                let peers: Vec<PublicKey> = self.sessions.keys().copied().collect();
+                for peer in peers {
+                    if peer != self.me {
+                        self.flush_status(peer);
+                    }
+                }
+            }
             Cmd::ControlAsk => self.control_ask(),
             Cmd::ControlAnswer { yes, scope } => {
                 self.control_scope_was_whole = scope == crate::control::Scope::WholeScreen;
@@ -3080,6 +3097,7 @@ impl Engine {
             self.send_message(peer, &m);
         }
         self.send_read_receipts(peer);
+        self.flush_status(peer);
     }
 
     fn on_closed(&mut self, peer: PublicKey, sid: u64) {
@@ -3374,6 +3392,11 @@ impl Engine {
             | Frame::CallVideo { .. }
             | Frame::CallScreen { .. }
             | Frame::CallKeyRequest { .. }) => self.on_call_frame(peer, f),
+            f @ (Frame::StatusPost { .. }
+            | Frame::StatusPhoto { .. }
+            | Frame::StatusGot { .. }
+            | Frame::StatusSeen { .. }
+            | Frame::StatusGone { .. }) => self.on_status_frame(peer, f),
             f @ (Frame::ControlAsk { .. }
             | Frame::ControlAnswer { .. }
             | Frame::ControlStop { .. }) => self.on_control_frame(peer, f),

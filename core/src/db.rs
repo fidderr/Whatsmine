@@ -141,6 +141,37 @@ CREATE TABLE IF NOT EXISTS contact_keys (
     contact_id TEXT PRIMARY KEY REFERENCES contacts(id) ON DELETE CASCADE,
     sealed     BLOB NOT NULL
 );
+CREATE TABLE IF NOT EXISTS status_posts (
+    id        TEXT PRIMARY KEY,
+    author    TEXT NOT NULL,
+    at        INTEGER NOT NULL,
+    until     INTEGER NOT NULL,
+    backdrop  INTEGER NOT NULL,
+    parts     INTEGER NOT NULL,
+    seen      INTEGER NOT NULL,
+    seen_told INTEGER NOT NULL,
+    sealed    BLOB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS status_until ON status_posts(until);
+CREATE TABLE IF NOT EXISTS status_photos (
+    id     TEXT NOT NULL,
+    part   INTEGER NOT NULL,
+    sealed BLOB NOT NULL,
+    PRIMARY KEY (id, part)
+);
+CREATE TABLE IF NOT EXISTS status_out (
+    id    TEXT NOT NULL,
+    peer  TEXT NOT NULL,
+    until INTEGER NOT NULL,
+    got   INTEGER NOT NULL DEFAULT 0,
+    gone  INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (id, peer)
+);
+CREATE TABLE IF NOT EXISTS status_seen (
+    id   TEXT NOT NULL,
+    peer TEXT NOT NULL,
+    PRIMARY KEY (id, peer)
+);
 CREATE TABLE IF NOT EXISTS control_log (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     who          TEXT NOT NULL,
@@ -1026,6 +1057,8 @@ impl Database {
                 "SELECT MIN(at) FROM (
                      SELECT MIN(sent_at) AS at FROM messages WHERE status = -2
                      UNION ALL SELECT MIN(at) FROM reminders
+                     UNION ALL SELECT MIN(until) FROM status_posts
+                     UNION ALL SELECT MIN(until) FROM status_out
                      UNION ALL SELECT MIN(expires_at) FROM messages WHERE expires_at IS NOT NULL
                  )",
                 [],
@@ -1041,6 +1074,272 @@ impl Database {
         if let Ok(json) = serde_json::to_vec(folders) {
             let _ = self.set_secret("folders", &json);
         }
+    }
+
+    /// Whether this post is new here.
+    pub fn add_status(&self, post: &crate::status::Post) -> bool {
+        self.lock()
+            .execute(
+                "INSERT OR IGNORE INTO status_posts
+                 (id, author, at, until, backdrop, parts, seen, seen_told, sealed)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    post.id,
+                    post.author,
+                    post.at,
+                    post.until,
+                    post.backdrop.byte(),
+                    post.parts,
+                    post.seen,
+                    post.seen_told,
+                    self.vault.seal_str(&post.text)
+                ],
+            )
+            .is_ok_and(|n| n > 0)
+    }
+
+    fn status_from_row(&self, r: &rusqlite::Row<'_>) -> rusqlite::Result<crate::status::Post> {
+        Ok(crate::status::Post {
+            id: r.get(0)?,
+            author: r.get(1)?,
+            at: r.get(2)?,
+            until: r.get(3)?,
+            backdrop: crate::status::Backdrop::from_byte(r.get(4)?),
+            parts: r.get(5)?,
+            seen: r.get(6)?,
+            seen_told: r.get(7)?,
+            text: self.vault.open_str(&r.get::<_, Vec<u8>>(8)?),
+        })
+    }
+
+    pub fn status_posts(&self) -> Vec<crate::status::Post> {
+        let conn = self.lock();
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT id, author, at, until, backdrop, parts, seen, seen_told, sealed
+             FROM status_posts WHERE until > ?1 ORDER BY at DESC",
+        ) else {
+            return Vec::new();
+        };
+        stmt.query_map(params![now_ms()], |r| self.status_from_row(r))
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default()
+    }
+
+    pub fn status_post(&self, id: &str) -> Option<crate::status::Post> {
+        self.lock()
+            .query_row(
+                "SELECT id, author, at, until, backdrop, parts, seen, seen_told, sealed
+                 FROM status_posts WHERE id = ?1",
+                params![id],
+                |r| self.status_from_row(r),
+            )
+            .ok()
+    }
+
+    pub fn set_status_photo_part(&self, id: &str, part: u16, bytes: &[u8]) {
+        let _ = self.lock().execute(
+            "INSERT OR REPLACE INTO status_photos (id, part, sealed) VALUES (?1, ?2, ?3)",
+            params![id, part, self.vault.seal(bytes)],
+        );
+    }
+
+    /// The parts of a post's photo, if all of them are here.
+    pub fn status_photo_parts(&self, id: &str) -> Option<Vec<Vec<u8>>> {
+        let parts: u16 = self
+            .lock()
+            .query_row(
+                "SELECT parts FROM status_posts WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .ok()?;
+        if parts == 0 {
+            return None;
+        }
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare("SELECT sealed FROM status_photos WHERE id = ?1 ORDER BY part")
+            .ok()?;
+        let found: Vec<Vec<u8>> = stmt
+            .query_map(params![id], |r| r.get::<_, Vec<u8>>(0))
+            .ok()?
+            .flatten()
+            .filter_map(|sealed| self.vault.open(&sealed))
+            .collect();
+        (found.len() == usize::from(parts)).then_some(found)
+    }
+
+    pub fn owe_status(&self, id: &str, peers: &[String], until: Millis) {
+        let conn = self.lock();
+        for peer in peers {
+            let _ = conn.execute(
+                "INSERT OR IGNORE INTO status_out (id, peer, until) VALUES (?1, ?2, ?3)",
+                params![id, peer, until],
+            );
+        }
+    }
+
+    /// What this person still has to hear: which post, and whether it is that it was taken back.
+    pub fn status_owed(&self, peer: &str) -> Vec<(String, bool)> {
+        let conn = self.lock();
+        let Ok(mut stmt) = conn
+            .prepare("SELECT id, gone FROM status_out WHERE peer = ?1 AND got = 0 AND until > ?2")
+        else {
+            return Vec::new();
+        };
+        stmt.query_map(params![peer, now_ms()], |r| Ok((r.get(0)?, r.get(1)?)))
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default()
+    }
+
+    /// They have it, or they heard it was taken back. Answers to what was not asked change nothing.
+    pub fn status_got(&self, id: &str, peer: &str, gone: bool) {
+        let conn = self.lock();
+        let result = if gone {
+            conn.execute(
+                "DELETE FROM status_out WHERE id = ?1 AND peer = ?2 AND gone = 1",
+                params![id, peer],
+            )
+        } else {
+            conn.execute(
+                "UPDATE status_out SET got = 1 WHERE id = ?1 AND peer = ?2 AND gone = 0",
+                params![id, peer],
+            )
+        };
+        if let Err(e) = result {
+            tracing::warn!("a status went unnoted: {e}");
+        }
+    }
+
+    pub fn status_went_to(&self, id: &str, peer: &str) -> bool {
+        self.lock()
+            .query_row(
+                "SELECT 1 FROM status_out WHERE id = ?1 AND peer = ?2 AND gone = 0",
+                params![id, peer],
+                |_| Ok(()),
+            )
+            .is_ok()
+    }
+
+    /// Whether this changed anything.
+    pub fn set_status_seen(&self, id: &str) -> bool {
+        self.lock()
+            .execute(
+                "UPDATE status_posts SET seen = 1 WHERE id = ?1 AND seen = 0",
+                params![id],
+            )
+            .is_ok_and(|n| n > 0)
+    }
+
+    pub fn status_seen_to_tell(&self, author: &str) -> Vec<String> {
+        let conn = self.lock();
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT id FROM status_posts WHERE author = ?1 AND seen = 1 AND seen_told = 0",
+        ) else {
+            return Vec::new();
+        };
+        stmt.query_map(params![author], |r| r.get(0))
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default()
+    }
+
+    pub fn status_seen_told(&self, id: &str) {
+        let _ = self.lock().execute(
+            "UPDATE status_posts SET seen_told = 1 WHERE id = ?1",
+            params![id],
+        );
+    }
+
+    pub fn add_status_seen_by(&self, id: &str, peer: &str) {
+        let _ = self.lock().execute(
+            "INSERT OR IGNORE INTO status_seen (id, peer) VALUES (?1, ?2)",
+            params![id, peer],
+        );
+    }
+
+    pub fn status_seen_by(&self, id: &str) -> Vec<String> {
+        let conn = self.lock();
+        let Ok(mut stmt) = conn.prepare("SELECT peer FROM status_seen WHERE id = ?1") else {
+            return Vec::new();
+        };
+        stmt.query_map(params![id], |r| r.get(0))
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default()
+    }
+
+    /// The post itself, and what belongs to it. Who still has to hear about it stays.
+    pub fn delete_status(&self, id: &str) {
+        let conn = self.lock();
+        let _ = conn.execute("DELETE FROM status_posts WHERE id = ?1", params![id]);
+        let _ = conn.execute("DELETE FROM status_photos WHERE id = ?1", params![id]);
+        let _ = conn.execute("DELETE FROM status_seen WHERE id = ?1", params![id]);
+    }
+
+    /// A post of ours taken back: whoever has it, or may get it, hears so. Those it never reached
+    /// have nothing to hear, but cannot be told apart from those who lost the answer: all of them.
+    pub fn status_taken_back(&self, id: &str) {
+        self.delete_status(id);
+        let _ = self.lock().execute(
+            "UPDATE status_out SET gone = 1, got = 0 WHERE id = ?1",
+            params![id],
+        );
+    }
+
+    pub fn delete_status_from(&self, author: &str) {
+        let ids: Vec<String> = {
+            let conn = self.lock();
+            let Ok(mut stmt) = conn.prepare("SELECT id FROM status_posts WHERE author = ?1") else {
+                return;
+            };
+            stmt.query_map(params![author], |r| r.get(0))
+                .map(|rows| rows.flatten().collect())
+                .unwrap_or_default()
+        };
+        for id in ids {
+            self.delete_status(&id);
+        }
+        let _ = self
+            .lock()
+            .execute("DELETE FROM status_out WHERE peer = ?1", params![author]);
+    }
+
+    /// Someone posts a lot: their oldest go.
+    pub fn status_keep_newest(&self, author: &str, keep: usize) {
+        let ids: Vec<String> = {
+            let conn = self.lock();
+            let Ok(mut stmt) = conn.prepare(
+                "SELECT id FROM status_posts WHERE author = ?1 ORDER BY at DESC, id DESC LIMIT -1 OFFSET ?2",
+            ) else {
+                return;
+            };
+            stmt.query_map(params![author, keep as i64], |r| r.get(0))
+                .map(|rows| rows.flatten().collect())
+                .unwrap_or_default()
+        };
+        for id in ids {
+            self.delete_status(&id);
+        }
+    }
+
+    /// Whatever is over goes, with all that belongs to it. Whether there was anything.
+    pub fn expire_status(&self, now: Millis) -> bool {
+        let ids: Vec<String> = {
+            let conn = self.lock();
+            let Ok(mut stmt) = conn.prepare("SELECT id FROM status_posts WHERE until <= ?1") else {
+                return false;
+            };
+            stmt.query_map(params![now], |r| r.get(0))
+                .map(|rows| rows.flatten().collect())
+                .unwrap_or_default()
+        };
+        let any = !ids.is_empty();
+        for id in ids {
+            self.delete_status(&id);
+        }
+        let _ = self
+            .lock()
+            .execute("DELETE FROM status_out WHERE until <= ?1", params![now]);
+        any
     }
 
     pub fn add_control_log(&self, entry: &crate::control::LogEntry) {

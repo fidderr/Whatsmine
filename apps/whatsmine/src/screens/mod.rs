@@ -12,6 +12,7 @@ mod people;
 mod requests;
 pub mod settings;
 mod start;
+mod status;
 
 pub use add::{AddContact, AddType};
 pub use address::PublicAddress;
@@ -29,3 +30,4 @@ pub use settings::{
     PrivacyScreen, SettingsScreen, SpeedScreen, StorageScreen,
 };
 pub use start::Start;
+pub use status::{StatusNew, StatusScreen, StatusView, StatusWho};

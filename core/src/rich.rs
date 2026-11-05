@@ -47,6 +47,12 @@ pub enum Rich {
     Look(Box<crate::look::Look>),
     /// A line this device wrote in the chat itself. Never leaves this device.
     Note(String),
+    /// A reply to someone's status, with what it was about: the post itself will be gone tomorrow.
+    StatusReply {
+        quote: String,
+        photo: bool,
+        text: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,7 +135,7 @@ impl Rich {
             Rich::Place { label, .. } => label,
             Rich::ContactCard { name, .. } => name,
             Rich::Look(look) => &look.name,
-            Rich::Note(text) => text,
+            Rich::Note(text) | Rich::StatusReply { text, .. } => text,
         }
     }
 }

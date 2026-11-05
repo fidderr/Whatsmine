@@ -319,6 +319,9 @@ pub struct Settings {
     pub app_lock: bool,
     /// How long the app may be away before it asks again, in seconds. 0 means at once.
     pub lock_after_s: u32,
+    /// Who sees what we post.
+    #[serde(default)]
+    pub status_audience: crate::status::Audience,
     /// Since when someone may ask to control this PC, if anyone. Never set during a call: what was
     /// turned on while a call runs does not count for that call.
     #[serde(default)]
@@ -375,6 +378,7 @@ impl Default for Settings {
             density: "normal".into(),
             quiet_requests: false,
             request_filter: Vec::new(),
+            status_audience: crate::status::Audience::All,
             control_on_since: None,
             app_lock: false,
             lock_after_s: 60,
@@ -400,6 +404,8 @@ impl Default for Settings {
 pub enum CoreEvent {
     /// Something in the contact list changed; refresh it.
     ContactsChanged,
+    /// Posts came, went, or were looked at.
+    StatusChanged,
     MessageAdded(Message),
     MessageStatus {
         contact_id: String,

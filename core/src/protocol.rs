@@ -193,6 +193,34 @@ pub enum Frame {
     ControlStop {
         call: [u8; 16],
     },
+    /// Something we post, for a day. Sent until they say they have it.
+    StatusPost {
+        id: [u8; 16],
+        at: crate::model::Millis,
+        lasts: crate::model::Millis,
+        text: String,
+        backdrop: u8,
+        /// How many `StatusPhoto` follow.
+        parts: u16,
+    },
+    StatusPhoto {
+        id: [u8; 16],
+        part: u16,
+        bytes: Vec<u8>,
+    },
+    /// We have all of it. `gone`: and we heard it was taken back.
+    StatusGot {
+        id: [u8; 16],
+        gone: bool,
+    },
+    /// We looked at it.
+    StatusSeen {
+        id: [u8; 16],
+    },
+    /// Taken back.
+    StatusGone {
+        id: [u8; 16],
+    },
 }
 
 /// What the admin signs. A higher `version` replaces a lower one.

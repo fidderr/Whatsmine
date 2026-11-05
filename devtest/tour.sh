@@ -357,6 +357,42 @@ else
     skip
 fi
 
+scenario status
+if wanted status; then
+    fresh "demo name=Roy theme=$THEME locale=$LOCALE"
+    if on_screen .bottom-nav 60; then
+        tap tab-people 0 0.3
+        on_screen '[data-t="status-row"]' 6 && tap status-row 0 0.3
+        if on_screen '[data-t="status-person"]' 6; then
+            look_through status_list
+            tap status-person 0 0.2
+            on_screen '[data-t="status-view"]' 6 && picture status_view
+            go_back
+            on_screen '[data-t="status-mine"]' 6
+            tap status-new 0 0.3
+            if on_screen '[data-t="status-text"]' 6; then
+                type_in '[data-t="status-text"]' 'At the lake all afternoon'
+                sleep 0.2
+                look_through status_new
+                tap status-who-row 0 0.3
+                on_screen '.chips' 6 && look_through status_who
+                go_back
+                on_screen '[data-t="status-post"]' 6 && tap status-post 0 0.5
+                on_screen '[data-t="status-mine"]' 6
+                tap status-mine 0 0.3
+                on_screen '[data-t="status-view"]' 6 && picture status_mine
+                pass
+            else
+                fail "no new post"
+            fi
+        else
+            fail "no posts"
+        fi
+    else
+        fail "the app did not come up"
+    fi
+fi
+
 scenario looks_used
 if wanted looks; then
     tap tab-settings

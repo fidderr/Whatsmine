@@ -16,6 +16,7 @@ use crate::screens::{
     NewGroup, NotificationsScreen, People, PrivacyScreen, PublicAddress, Requests, SavedScreen,
     SearchScreen, SettingsScreen, SharedMedia, SpeedScreen, Start, StorageScreen,
 };
+use crate::screens::{StatusNew, StatusScreen, StatusView, StatusWho};
 use crate::shell::Shell;
 
 pub type Translations = Signal<HashMap<String, String>>;
@@ -52,6 +53,14 @@ pub enum Route {
     ContactInfo { id: String },
     #[route("/look/:id")]
     ChatLook { id: String },
+    #[route("/status")]
+    StatusScreen {},
+    #[route("/status/new")]
+    StatusNew {},
+    #[route("/status/who")]
+    StatusWho {},
+    #[route("/status/view/:id")]
+    StatusView { id: String },
     #[route("/shared/:id")]
     SharedMedia { id: String },
     #[route("/search")]
@@ -337,6 +346,7 @@ fn Main(core: AppCore) -> Element {
                         );
                         *rev.write() += 1;
                     }
+                    Ok(CoreEvent::StatusChanged) => *rev.write() += 1,
                     Ok(CoreEvent::Presence {
                         contact_id, online, ..
                     }) => {

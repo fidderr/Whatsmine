@@ -56,6 +56,19 @@ pub fn RichView(message_id: String, rich: Rich) -> Element {
         } => rsx! { PlaceView { lat, lon, label, live_until } },
         Rich::ContactCard { name, invite } => rsx! { CardView { name, invite } },
         Rich::Note(text) => rsx! { div { class: "chat-note", "{text}" } },
+        Rich::StatusReply { quote, photo, text } => {
+            let tr = use_tr();
+            rsx! {
+                div { class: "status-quote", "data-t": "status-quote",
+                    span { class: "status-quote-what", "{t(&tr, \"status.title\")}" }
+                    if photo {
+                        span { "{t(&tr, \"status.a_photo\")} " }
+                    }
+                    span { "{quote}" }
+                }
+                div { class: "status-quote-text", "{text}" }
+            }
+        }
     }
 }
 
