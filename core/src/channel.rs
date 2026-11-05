@@ -33,6 +33,8 @@ pub const MAX_NAME: usize = 64;
 /// How many slots there are to leave an address in, per day.
 pub const SLOTS: u8 = 8;
 pub const KEEP_DAYS: u32 = 30;
+/// How many looks a missing post gets.
+pub const GIVE_UP_AFTER: u8 = 3;
 /// The reactions on a post.
 pub const EMOJI: [&str; 5] = ["👍", "❤️", "😂", "😮", "😢"];
 
@@ -64,12 +66,16 @@ pub struct Channel {
     pub at: Millis,
     /// The newest record as it sits in the DHT, to write it again.
     pub head: Option<Vec<u8>>,
-    /// Nothing at or below this number is looked for any more: nobody has it.
+    /// Posts that were not there when looked for, and how many times. At [`GIVE_UP_AFTER`] they are
+    /// no longer looked for. Each for itself: one gone post says nothing about the others.
     #[serde(default)]
-    pub floor: u64,
-    /// How many looks in a row found a post missing.
+    pub misses: std::collections::BTreeMap<u64, u8>,
+    /// Posts of ours that did not reach the DHT yet: written while offline, or a write that failed.
     #[serde(default)]
-    pub misses: u8,
+    pub to_publish: Vec<u64>,
+    /// Reactions of ours still to write, also on posts that are not among the newest.
+    #[serde(default)]
+    pub to_write: Vec<u64>,
     /// The followers we know of, for which week.
     #[serde(default)]
     pub sketch: Sketch,
@@ -186,8 +192,9 @@ pub fn new_channel(name: &str, now: Millis) -> Channel {
         muted: false,
         at: now,
         head: None,
-        floor: 0,
-        misses: 0,
+        misses: std::collections::BTreeMap::new(),
+        to_publish: Vec::new(),
+        to_write: Vec::new(),
         sketch: Sketch::default(),
         sketch_week: 0,
     }
@@ -208,8 +215,9 @@ pub fn from_link(link: &ChannelLink, now: Millis) -> Channel {
         muted: false,
         at: now,
         head: None,
-        floor: 0,
-        misses: 0,
+        misses: std::collections::BTreeMap::new(),
+        to_publish: Vec::new(),
+        to_write: Vec::new(),
         sketch: Sketch::default(),
         sketch_week: 0,
     }

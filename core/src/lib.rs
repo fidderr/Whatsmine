@@ -126,7 +126,6 @@ struct Inner {
     /// Where incoming call media goes (whoever called `call_media` last).
     media_sink: calls::MediaSink,
     control_sink: calls::ControlSink,
-    channel_writing: Mutex<()>,
 }
 
 impl Drop for Inner {
@@ -242,7 +241,6 @@ impl Core {
                 runtime: Mutex::new(Some(runtime)),
                 media_sink,
                 control_sink,
-                channel_writing: Mutex::new(()),
             }),
         };
         // Opened when the app last went down: that was the one time.
@@ -499,12 +497,9 @@ impl Core {
         // This can take seconds, so before anything else is looked at.
         let jpeg = photo.map(files::wallpaper_jpeg).transpose()?;
         ensure!(!text.is_empty() || jpeg.is_some(), "nothing_to_post");
-        // One at a time: two with one number would be two different signed posts.
-        let _one = self
-            .inner
-            .channel_writing
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        // One at a time, and nobody else on this row: two with one number would be two different
+        // signed posts.
+        let _one = db.channel_guard();
         let Some(mut c) = db.channel(id) else {
             bail!("no_channel");
         };
@@ -541,12 +536,13 @@ impl Core {
         let salt = channel::post_salt(number);
         let record = records::SignedRecord::sign(&secret, &value, seq, Some(&salt));
         let head = records::SignedRecord::sign(&secret, &value, seq, None);
-        db.add_channel_post(id, &post, &record);
+        db.add_channel_post(id, &post, Some(&record));
         if let (Some(more), Some(sealed)) = (&more, &sealed_body) {
             db.set_channel_body(id, number, more, sealed, &text);
         }
         c.last = number;
         c.head = Some(head.to_bytes());
+        c.to_publish.push(number);
         db.update_channel(&c);
         self.cmd(Cmd::ChannelOut(id.to_owned()));
         self.emit(CoreEvent::ChannelsChanged);
@@ -570,33 +566,29 @@ impl Core {
     }
 
     pub fn channel_set_muted(&self, id: &str, muted: bool) {
-        if let Some(mut c) = self.inner.db.channel(id) {
-            c.muted = muted;
-            self.inner.db.save_channel(&c);
-            self.emit(CoreEvent::ChannelsChanged);
-        }
+        self.inner.db.with_channel(id, |c| c.muted = muted);
+        self.emit(CoreEvent::ChannelsChanged);
     }
 
     pub fn channel_set_keep_days(&self, id: &str, days: u32) {
-        if let Some(mut c) = self.inner.db.channel(id) {
-            c.keep_days = days.clamp(1, 365);
-            self.inner.db.save_channel(&c);
-            self.emit(CoreEvent::ChannelsChanged);
-        }
+        self.inner
+            .db
+            .with_channel(id, |c| c.keep_days = days.clamp(1, 365));
+        self.emit(CoreEvent::ChannelsChanged);
     }
 
     /// One of [`channel::EMOJI`] on a post. Nobody can tell who, and it cannot be taken back.
     pub fn channel_react(&self, id: &str, number: u64, emoji: usize) {
         let db = &self.inner.db;
-        let (Some(c), Some(post)) = (db.channel(id), db.channel_post(id, number)) else {
-            return;
-        };
+        let Some(c) = db.channel(id) else { return };
         if emoji < channel::EMOJI.len() {
-            db.add_channel_reaction_of_mine(id, number, emoji as u8);
             // Kept here, and written at the next look, whenever that can be.
-            let mut sketch = post.sketch;
-            sketch.add(emoji, &c.follower);
-            db.set_channel_sketch(id, number, &sketch);
+            db.add_channel_reaction(id, number, emoji, &c.follower);
+            db.with_channel(id, |c| {
+                if !c.to_write.contains(&number) {
+                    c.to_write.push(number);
+                }
+            });
             self.cmd(Cmd::ChannelLookNow);
             self.emit(CoreEvent::ChannelsChanged);
         }

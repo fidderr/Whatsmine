@@ -231,6 +231,7 @@ pub enum DbRecovery {
 }
 
 pub struct Database {
+    channel_rows: Mutex<()>,
     conn: Mutex<Connection>,
     vault: Arc<Vault>,
 }
@@ -251,6 +252,7 @@ impl Database {
         conn.execute_batch(&format!("PRAGMA user_version = {CURRENT_VERSION}"))?;
         Ok(Self {
             conn: Mutex::new(conn),
+            channel_rows: Mutex::new(()),
             vault,
         })
     }
@@ -1108,6 +1110,21 @@ impl Database {
         );
     }
 
+    /// Held while a channel or its posts are read and written back, so nothing done in between gets
+    /// lost: the engine and whoever writes or reacts work on the same rows.
+    pub fn channel_guard(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.channel_rows.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Changes a channel that is still there. Whoever left it, stays gone.
+    pub fn with_channel(&self, id: &str, change: impl FnOnce(&mut crate::channel::Channel)) {
+        let _one = self.channel_guard();
+        if let Some(mut c) = self.channel(id) {
+            change(&mut c);
+            self.update_channel(&c);
+        }
+    }
+
     /// Only one that is still there: whoever left it, stays gone.
     pub fn update_channel(&self, c: &crate::channel::Channel) {
         let Ok(json) = serde_json::to_vec(c) else {
@@ -1183,12 +1200,12 @@ impl Database {
         );
     }
 
-    /// Whether this post is new here.
+    /// Whether this post is new here. Without a record, nothing of it gets written again by us.
     pub fn add_channel_post(
         &self,
         channel: &str,
         post: &crate::channel::Post,
-        record: &crate::records::SignedRecord,
+        record: Option<&crate::records::SignedRecord>,
     ) -> bool {
         self.write_channel_post(
             &crate::channel::ChannelPost {
@@ -1202,7 +1219,9 @@ impl Database {
                 mine: Vec::new(),
                 sketch: crate::channel::Reactions::default(),
             },
-            &record.to_bytes(),
+            &record
+                .map(crate::records::SignedRecord::to_bytes)
+                .unwrap_or_default(),
         )
     }
 
@@ -1272,6 +1291,23 @@ impl Database {
             .unwrap_or_default()
     }
 
+    /// A post as it sits in the DHT, to write it.
+    pub fn channel_record(
+        &self,
+        channel: &str,
+        number: u64,
+    ) -> Option<crate::records::SignedRecord> {
+        let bytes: Vec<u8> = self
+            .lock()
+            .query_row(
+                "SELECT record FROM channel_posts WHERE channel = ?1 AND number = ?2",
+                params![channel, number as i64],
+                |r| r.get(0),
+            )
+            .ok()?;
+        crate::records::SignedRecord::from_bytes(&bytes)
+    }
+
     /// What we still miss of the posts we know of.
     pub fn channel_wants(&self, channel: &str) -> Vec<(u64, crate::channel::More)> {
         self.channel_posts(channel, 64)
@@ -1322,16 +1358,36 @@ impl Database {
         }
     }
 
-    /// What we know of the reactions on a post, whatever is in the DHT right now.
-    pub fn set_channel_sketch(
+    /// Adds to what we know of the reactions on a post. Nothing we knew goes.
+    pub fn merge_channel_sketch(
         &self,
         channel: &str,
         number: u64,
         sketch: &crate::channel::Reactions,
     ) {
+        let _one = self.channel_guard();
         if let Some(mut post) = self.channel_post(channel, number) {
-            post.reactions = sketch.counts();
-            post.sketch = sketch.clone();
+            post.sketch.merge(sketch);
+            post.reactions = post.sketch.counts();
+            self.update_channel_post(&post);
+        }
+    }
+
+    /// Our own reaction on a post, here at once and written out at the next look.
+    pub fn add_channel_reaction(
+        &self,
+        channel: &str,
+        number: u64,
+        emoji: usize,
+        follower: &[u8; 16],
+    ) {
+        let _one = self.channel_guard();
+        if let Some(mut post) = self.channel_post(channel, number) {
+            if !post.mine.contains(&(emoji as u8)) {
+                post.mine.push(emoji as u8);
+            }
+            post.sketch.add(emoji, follower);
+            post.reactions = post.sketch.counts();
             self.update_channel_post(&post);
         }
     }
@@ -1347,15 +1403,6 @@ impl Database {
         post.reactions = counts.to_vec();
         self.update_channel_post(&post);
         true
-    }
-
-    pub fn add_channel_reaction_of_mine(&self, channel: &str, number: u64, emoji: u8) {
-        if let Some(mut post) = self.channel_post(channel, number)
-            && !post.mine.contains(&emoji)
-        {
-            post.mine.push(emoji);
-            self.update_channel_post(&post);
-        }
     }
 
     pub fn expire_channel_posts(&self, channel: &str, before: Millis) {

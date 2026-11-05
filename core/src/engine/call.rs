@@ -779,6 +779,25 @@ impl Engine {
                         } else if newly {
                             self.announce_peers();
                         }
+                        // Make sure they know we are in, too.
+                        let tell = self
+                            .call
+                            .as_mut()
+                            .filter(|c| c.connected.is_some() && !c.told.contains(&peer))
+                            .map(|c| {
+                                c.told.insert(peer);
+                                c.id
+                            });
+                        if let Some(call) = tell {
+                            self.send(
+                                peer,
+                                Frame::CallAnswer {
+                                    call,
+                                    result: CallResult::Accepted,
+                                },
+                            );
+                        }
+                        // After that, or they do not know us as someone in the call yet.
                         // Whoever just came in sees our hand, and what is being shown.
                         if let Some((call, true)) = self
                             .call
@@ -802,24 +821,6 @@ impl Engine {
                                     width,
                                     height,
                                     can_control,
-                                },
-                            );
-                        }
-                        // Make sure they know we are in, too.
-                        let tell = self
-                            .call
-                            .as_mut()
-                            .filter(|c| c.connected.is_some() && !c.told.contains(&peer))
-                            .map(|c| {
-                                c.told.insert(peer);
-                                c.id
-                            });
-                        if let Some(call) = tell {
-                            self.send(
-                                peer,
-                                Frame::CallAnswer {
-                                    call,
-                                    result: CallResult::Accepted,
                                 },
                             );
                         }

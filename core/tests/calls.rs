@@ -30,6 +30,69 @@ async fn call_event(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn someone_who_comes_in_late_sees_what_is_being_shown() {
+    let lookup = MemoryLookup::default();
+    let dirs: Vec<_> = (0..3).map(|_| tempfile::tempdir().unwrap()).collect();
+    let a = start(dirs[0].path(), &lookup, "Alice");
+    let b = start(dirs[1].path(), &lookup, "Bob");
+    let c = start(dirs[2].path(), &lookup, "Carol");
+    for (x, y) in [(&a, &b), (&a, &c)] {
+        let mut events = y.subscribe();
+        x.add_contact(&y.invite_link(), None).unwrap();
+        let wait = async {
+            loop {
+                if let Ok(CoreEvent::RequestReceived { .. }) = events.recv().await {
+                    return;
+                }
+            }
+        };
+        tokio::time::timeout(WAIT, wait).await.expect("a request");
+        y.accept(&x.my_key()).unwrap();
+        until("online", || x.is_online(&y.my_key())).await;
+    }
+    let group = a
+        .create_group("Weekend", &[b.my_key(), c.my_key()])
+        .unwrap()
+        .id;
+    for one in [&b, &c] {
+        until("the group", || one.group_info(&group).is_some()).await;
+    }
+    until("they find each other", || b.is_online(&c.my_key())).await;
+    let (mut eb, mut ec) = (b.subscribe(), c.subscribe());
+    a.call_invite(&group, false).unwrap();
+    call_event(&mut eb, "ringing", |e| {
+        matches!(e, CallEvent::Incoming { .. })
+    })
+    .await;
+    b.call_answer(true);
+    call_event(&mut eb, "connected", |e| {
+        matches!(e, CallEvent::Connected { .. })
+    })
+    .await;
+    until("Bob is there", || {
+        a.call_snapshot()
+            .is_some_and(|s| s.peers.contains(&b.my_key()))
+    })
+    .await;
+    a.call_screen_on(true, 800, 600, false);
+    until("Bob sees it", || {
+        b.call_snapshot().is_some_and(|s| s.sharer.is_some())
+    })
+    .await;
+    // Carol comes in now.
+    call_event(&mut ec, "ringing", |e| {
+        matches!(e, CallEvent::Incoming { .. })
+    })
+    .await;
+    c.call_answer(true);
+    until("Carol sees who shows", || {
+        c.call_snapshot()
+            .is_some_and(|s| s.sharer == Some(a.my_key()))
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_photo_seen_once_is_used_up_even_if_the_app_dies_while_it_is_open() {
     let lookup = MemoryLookup::default();
     let (a, b, _ka, _kb, _da, db) = online_pair(&lookup).await;

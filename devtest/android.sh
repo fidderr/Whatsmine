@@ -8,7 +8,7 @@ ADB="${ADB:-$LOCALAPPDATA/Android/Sdk/platform-tools/adb.exe}"
 SERIAL="${SERIAL:-emulator-5554}"
 PKG=com.fidderr.whatsmine.test
 ACTIVITY=dev.dioxus.main.MainActivity
-AVD="${AVD:-af36}"
+AVD="${AVD:-wm36}"
 EMULATOR="${EMULATOR:-$LOCALAPPDATA/Android/Sdk/emulator/emulator.exe}"
 
 on_emulator() { case "$SERIAL" in emulator-*) return 0 ;; *) return 1 ;; esac; }

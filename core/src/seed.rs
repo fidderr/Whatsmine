@@ -222,7 +222,7 @@ impl Core {
                         number as i64,
                         Some(&salt),
                     );
-                    db.add_channel_post(&follow.id, &post, &record);
+                    db.add_channel_post(&follow.id, &post, Some(&record));
                 }
             }
             db.set_channel_reactions(&follow.id, 1, &[47, 8, 0, 0, 0]);

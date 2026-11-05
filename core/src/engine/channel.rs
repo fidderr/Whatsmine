@@ -8,6 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use iroh::endpoint::{Connection, presets};
@@ -47,8 +48,6 @@ const MOST_WANTS: usize = 32;
 const WEEK: Millis = 7 * 24 * 3600 * 1000;
 /// How far back a follower looks.
 const WINDOW: u64 = 64;
-/// How many looks a missing post gets.
-const GIVE_UP_AFTER: u8 = 3;
 
 #[derive(Default)]
 pub(super) struct ChannelSide {
@@ -63,6 +62,8 @@ pub(super) struct ChannelSide {
     want_after: HashMap<String, (Instant, u32)>,
     /// Ends whatever is up.
     stop: Arc<Notify>,
+    /// How many times that was asked, for what was only just started.
+    stops: Arc<AtomicU64>,
 }
 
 /// What a look at one channel found.
@@ -71,9 +72,14 @@ pub(super) struct Found {
     head: Option<SignedRecord>,
     /// The newest number there is.
     newest: u64,
-    posts: Vec<(Post, SignedRecord)>,
-    /// How many of those looked for were not there.
-    missed: usize,
+    /// With its own record, to write again. The newest may only have come through the head.
+    posts: Vec<(Post, Option<SignedRecord>)>,
+    /// Those looked for that were not there.
+    missed: Vec<u64>,
+    /// Reactions of ours that went out.
+    written: Vec<u64>,
+    /// Posts of ours that reached the DHT.
+    published: Vec<u64>,
     sketch: Option<(u64, Sketch)>,
     reactions: Vec<(u64, Reactions)>,
 }
@@ -143,22 +149,23 @@ impl Engine {
         self.channel.looking = false;
         let mut changed = false;
         for f in found {
-            let Some(mut c) = self.db.channel(&f.id) else {
+            let Some(c) = self.db.channel(&f.id) else {
                 continue;
             };
-            if let Some(head) = f.head
-                && head.seq as u64 >= c.last
-            {
-                c.head = Some(head.to_bytes());
-            }
             let cutoff = now_ms() - i64::from(c.keep_days) * 24 * 3600 * 1000;
+            let mut too_old = Vec::new();
             for (post, record) in f.posts {
                 if post.at < cutoff {
+                    too_old.push(post.number);
                     continue;
                 }
-                let text = post.text.clone();
-                if self.db.add_channel_post(&c.id, &post, &record) {
+                let (text, more) = (post.text.clone(), post.more.is_some());
+                if self.db.add_channel_post(&c.id, &post, record.as_ref()) {
                     changed = true;
+                    // Something new to get: whatever nobody could give before says nothing of this.
+                    if more {
+                        self.channel.want_after.remove(&c.id);
+                    }
                     if !c.muted && !c.runs_it() {
                         emit(
                             &self.events,
@@ -171,33 +178,43 @@ impl Engine {
                     }
                 }
             }
-            c.last = c.last.max(f.newest);
-            // Gone from the DHT, and nobody who has them writes them again: not for ever.
-            if f.missed > 0 {
-                c.misses = c.misses.saturating_add(1);
-                if c.misses >= GIVE_UP_AFTER {
-                    c.floor = c.last;
-                    c.misses = 0;
+            let mut followers_changed = false;
+            let (head, newest, missed, written, published, sketch) =
+                (f.head, f.newest, f.missed, f.written, f.published, f.sketch);
+            self.db.with_channel(&c.id, |c| {
+                if let Some(head) = head
+                    && head.seq as u64 >= c.last
+                {
+                    c.head = Some(head.to_bytes());
                 }
-            } else {
-                c.misses = 0;
-            }
-            if let Some((week, sketch)) = f.sketch {
-                let estimate = sketch.estimate();
-                if estimate != c.followers {
+                c.last = c.last.max(newest);
+                // Gone from the DHT, and nobody who has them writes them again: not for ever. Each
+                // post for itself, and those we would throw away are not worth a look at all.
+                for number in missed {
+                    let tries = c.misses.entry(number).or_insert(0);
+                    *tries = tries.saturating_add(1);
+                }
+                for number in too_old {
+                    c.misses.insert(number, channel::GIVE_UP_AFTER);
+                }
+                let oldest = c.last.saturating_sub(WINDOW);
+                c.misses.retain(|number, _| *number > oldest);
+                c.to_write.retain(|number| !written.contains(number));
+                c.to_publish.retain(|number| !published.contains(number));
+                if let Some((week, sketch)) = sketch {
+                    let estimate = sketch.estimate();
+                    followers_changed = estimate != c.followers;
                     c.followers = estimate;
-                    changed = true;
+                    c.sketch = sketch;
+                    c.sketch_week = week;
                 }
-                c.sketch = sketch;
-                c.sketch_week = week;
-            }
-            self.db.update_channel(&c);
+            });
+            changed |= followers_changed;
             for (number, reactions) in f.reactions {
-                self.db.set_channel_sketch(&c.id, number, &reactions);
+                self.db.merge_channel_sketch(&c.id, number, &reactions);
                 changed = true;
             }
-            self.db
-                .expire_channel_posts(&c.id, now_ms() - i64::from(c.keep_days) * 24 * 3600 * 1000);
+            self.db.expire_channel_posts(&c.id, cutoff);
             self.channel_swarm_if_needed(&c, pass_on);
         }
         if changed {
@@ -254,6 +271,8 @@ impl Engine {
             wants,
             tx: self.tx.clone(),
             stop: self.channel.stop.clone(),
+            stops: self.channel.stops.clone(),
+            stops_at_start: self.channel.stops.load(Ordering::Relaxed),
             keys_used: self.shared.channel_swarm_keys.clone(),
         }));
     }
@@ -264,19 +283,6 @@ impl Engine {
         // Whenever the DHT is there, not at some later check.
         self.channel.check_at = Some(Instant::now());
         self.channel.next_look = self.channel.check_at;
-        let Some(records) = self.records.clone() else {
-            return;
-        };
-        let newest = self.db.channel_newest_records(id, KEEP_ALIVE);
-        let head = c.head.as_deref().and_then(SignedRecord::from_bytes);
-        // All at once: a write can take many seconds.
-        for record in head.into_iter().chain(newest) {
-            let records = records.clone();
-            tokio::spawn(async move {
-                let done = records.put_signed(&record).await;
-                tracing::debug!("a channel's post written: {done}");
-            });
-        }
         let pass_on = self.settings().channel_pass_on || c.runs_it();
         self.channel_swarm_if_needed(&c, pass_on);
     }
@@ -309,6 +315,7 @@ impl Engine {
 
     /// Everything goes down: with the app, or when the radio can rest.
     pub(super) fn channels_stop(&mut self) {
+        self.channel.stops.fetch_add(1, Ordering::Relaxed);
         self.channel.stop.notify_waiters();
         self.channel.looking = false;
     }
@@ -342,7 +349,9 @@ async fn look_at(records: &Records, db: &Database, c: &Channel, pass_on: bool) -
         head: None,
         newest: c.last,
         posts: Vec::new(),
-        missed: 0,
+        missed: Vec::new(),
+        written: Vec::new(),
+        published: Vec::new(),
         sketch: None,
         reactions: Vec::new(),
     };
@@ -358,12 +367,15 @@ async fn look_at(records: &Records, db: &Database, c: &Channel, pass_on: bool) -
         }
         // What we miss of the newest ones, newest first. Someone new starts with those, not with
         // what nobody has any more, and what could not be read now gets another chance.
-        let from = newest
-            .saturating_sub(WINDOW - 1)
-            .max(c.floor.saturating_add(1));
+        let from = newest.saturating_sub(WINDOW - 1).max(1);
         let missing: Vec<u64> = (from..=newest)
             .rev()
             .filter(|number| db.channel_post(&c.id, *number).is_none())
+            .filter(|number| {
+                c.misses
+                    .get(number)
+                    .is_none_or(|tries| *tries < channel::GIVE_UP_AFTER)
+            })
             .take(MOST_PER_LOOK as usize)
             .collect();
         let mut reads = tokio::task::JoinSet::new();
@@ -382,7 +394,7 @@ async fn look_at(records: &Records, db: &Database, c: &Channel, pass_on: bool) -
             let opened = record.and_then(|record| {
                 channel::open_post(&c.key, &c.read, &record.value)
                     .filter(|post| post.number == number)
-                    .map(|post| (post, record))
+                    .map(|post| (post, Some(record)))
             });
             match opened {
                 Some(item) => {
@@ -391,11 +403,13 @@ async fn look_at(records: &Records, db: &Database, c: &Channel, pass_on: bool) -
                 }
                 // The newest one is in the head as well.
                 None if number == newest => {}
-                None => found.missed += 1,
+                None => found.missed.push(number),
             }
         }
+        // Readable through the head. That is not this post's own record, so that stays with those
+        // who have it, and nothing old goes to the place of the newest.
         if looked_for_newest && !newest_found {
-            found.posts.push((post, head));
+            found.posts.push((post, None));
         }
         found.posts.sort_by_key(|(post, _)| post.number);
     }
@@ -422,7 +436,14 @@ async fn look_at(records: &Records, db: &Database, c: &Channel, pass_on: bool) -
     found.sketch = Some((week, sketch));
     // The same for reactions on the newest posts.
     let mut reads = tokio::task::JoinSet::new();
-    for number in db.channel_recent_numbers(&c.id, 5) {
+    // The newest ones, and whatever we reacted to, however old.
+    let mut numbers = db.channel_recent_numbers(&c.id, 5);
+    for number in &c.to_write {
+        if !numbers.contains(number) {
+            numbers.push(*number);
+        }
+    }
+    for number in numbers {
         let known = db
             .channel_post(&c.id, number)
             .map(|post| post.sketch)
@@ -441,8 +462,13 @@ async fn look_at(records: &Records, db: &Database, c: &Channel, pass_on: bool) -
         });
     }
     while let Some(read) = reads.join_next().await {
-        if let Ok((number, Some(merged))) = read {
-            found.reactions.push((number, merged));
+        if let Ok((number, merged)) = read {
+            if c.to_write.contains(&number) {
+                found.written.push(number);
+            }
+            if let Some(merged) = merged {
+                found.reactions.push((number, merged));
+            }
         }
     }
     // Keeps them there while the author is away. Who wrote them can do so whenever.
@@ -458,6 +484,23 @@ async fn look_at(records: &Records, db: &Database, c: &Channel, pass_on: bool) -
         }
         while writes.join_next().await.is_some() {}
     }
+    // Ours that did not get there yet, however many: it is not done until a write worked.
+    let mut writes = tokio::task::JoinSet::new();
+    for number in &c.to_publish {
+        let number = *number;
+        let Some(record) = db.channel_record(&c.id, number) else {
+            // Gone from here: nothing left to send.
+            found.published.push(number);
+            continue;
+        };
+        let records = records.clone();
+        writes.spawn(async move { (number, records.put_signed(&record).await) });
+    }
+    while let Some(write) = writes.join_next().await {
+        if let Ok((number, true)) = write {
+            found.published.push(number);
+        }
+    }
     found
 }
 
@@ -472,6 +515,8 @@ struct Swarm {
     wants: Vec<(u64, More)>,
     tx: mpsc::UnboundedSender<Internal>,
     stop: Arc<Notify>,
+    stops: Arc<AtomicU64>,
+    stops_at_start: u64,
     keys_used: KeysUsed,
 }
 
@@ -533,11 +578,21 @@ async fn swarm_inner(s: Swarm) -> anyhow::Result<()> {
         }
         used.push((s.channel.id.clone(), me));
     }
-    let ep = bind_swarm(key, &s.mode, s.only_relays, s.use_relays).await?;
+    // From here on a stop counts, also while the endpoint comes up.
+    let stop = s.stop.clone();
+    let stopped = stop.notified();
+    tokio::pin!(stopped);
+    if s.stops.load(Ordering::Relaxed) != s.stops_at_start {
+        return Ok(());
+    }
+    let ep = tokio::select! {
+        ep = bind_swarm(key, &s.mode, s.only_relays, s.use_relays) => ep?,
+        () = &mut stopped => return Ok(()),
+    };
     // However this ends, the endpoint goes: that also ends what is serving others.
     let result = tokio::select! {
         result = run_swarm(&s, &ep, me) => result,
-        () = s.stop.notified() => Ok(()),
+        () = &mut stopped => Ok(()),
     };
     let _ = tokio::time::timeout(Duration::from_secs(2), ep.close()).await;
     result

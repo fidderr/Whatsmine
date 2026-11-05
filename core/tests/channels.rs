@@ -430,6 +430,120 @@ async fn two_posts_at_once_get_a_number_each() {
     assert_eq!(author.channel_posts(&c.id).len(), 8);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn one_post_nobody_has_does_not_cost_the_others() {
+    let mut w = World::new();
+    let author = w.person("Roy");
+    let c = author.channel_create("News").unwrap();
+    for n in 0..5 {
+        author
+            .channel_write(&c.id, &format!("Post {n}"), None)
+            .unwrap();
+    }
+    // Gone: all but the newest. The author writes the newest three again.
+    w.lookup.forget_everything();
+    let later = w.person("Sam");
+    later.channel_follow(&c.link()).unwrap();
+    until("what is there", || later.channel_posts(&c.id).len() >= 3).await;
+    // Given up on those that are gone, after a few looks, and each for itself.
+    until("given up", || {
+        later
+            .channel(&c.id)
+            .unwrap()
+            .misses
+            .values()
+            .all(|tries| *tries >= channel::GIVE_UP_AFTER)
+    })
+    .await;
+    author.channel_write(&c.id, "Post 5", None).unwrap();
+    until("the next still comes", || {
+        later.channel_posts(&c.id).iter().any(|p| p.number == 6)
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reaction_on_an_older_post_gets_out_too() {
+    let mut w = World::new();
+    let author = w.person("Roy");
+    let f = w.person("Noor");
+    let c = author.channel_create("News").unwrap();
+    for n in 0..8 {
+        author
+            .channel_write(&c.id, &format!("Post {n}"), None)
+            .unwrap();
+    }
+    f.channel_follow(&c.link()).unwrap();
+    until("all of them", || f.channel_posts(&c.id).len() == 8).await;
+    // Not among the newest five.
+    f.channel_react(&c.id, 1, 0);
+    // Whoever looks at that post gets it: from the DHT, as anyone would.
+    let records = Records::Local(w.lookup.clone());
+    let seed = channel::reactions_seed(&c.read, 1);
+    let mut there = false;
+    for _ in 0..200 {
+        there = records.get(&seed).await.is_some();
+        if there {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(there, "never written");
+    until("nothing left to write", || {
+        f.channel(&c.id).unwrap().to_write.is_empty()
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn every_post_written_gets_out_however_many_there_are_at_once() {
+    let mut w = World::new();
+    let author = w.person("Roy");
+    let c = author.channel_create("News").unwrap();
+    // More than are written again by those who keep things alive.
+    for n in 0..20 {
+        author
+            .channel_write(&c.id, &format!("Post {n}"), None)
+            .unwrap();
+    }
+    until("all sent", || {
+        author.channel(&c.id).unwrap().to_publish.is_empty()
+    })
+    .await;
+    let later = w.person("Sam");
+    later.channel_follow(&c.link()).unwrap();
+    until("all there", || later.channel_posts(&c.id).len() == 20).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn writing_while_a_look_is_under_way_loses_nothing() {
+    let mut w = World::new();
+    let author = w.person("Roy");
+    let c = author.channel_create("News").unwrap();
+    let mut numbers = Vec::new();
+    for n in 0..200 {
+        numbers.push(
+            author
+                .channel_write(&c.id, &format!("Post {n}"), None)
+                .unwrap(),
+        );
+        if n % 40 == 0 {
+            author.channel_set_muted(&c.id, n % 80 == 0);
+        }
+    }
+    assert_eq!(
+        numbers,
+        (1..=200).collect::<Vec<u64>>(),
+        "every one a number of its own"
+    );
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(
+        author.channel(&c.id).unwrap().last,
+        200,
+        "and nothing went back"
+    );
+}
+
 /// As many followers as this proves, and the number the app may claim.
 #[tokio::test(flavor = "multi_thread")]
 async fn twenty_followers_all_get_it_with_the_author_away_for_the_rest() {

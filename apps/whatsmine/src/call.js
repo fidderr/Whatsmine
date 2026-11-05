@@ -568,7 +568,7 @@
     if (!r || r.closed) return
     const p = ensurePeer(r, m.from)
     // Frames come on a stream of their own, and can arrive after they said they stopped.
-    if (!p.sShowing) return
+    if (p.sOff) return
     screenTile(p)
     stats.sRecv++
     // A frame builds on the ones before it: one missing, and the rest waits for a whole picture.
@@ -759,9 +759,10 @@
     let wheelY = 0
     const onWheel = e => {
       e.preventDefault()
-      const lines = e.deltaMode === 1 ? 33 : 1
-      wheelX += e.deltaX * lines
-      wheelY += e.deltaY * lines
+      // In pixels, lines or pages: a notch of a normal wheel is about 100 pixels or 3 lines.
+      const unit = e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? 800 : 1
+      wheelX += e.deltaX * unit
+      wheelY += e.deltaY * unit
       // A notch of the real wheel at a time, however small the steps of a touchpad. On Windows
       // up and to the right count as positive.
       while (Math.abs(wheelY) >= 100) {
@@ -974,7 +975,7 @@
         const r = run
         if (!r) return
         const p = ensurePeer(r, m.from)
-        p.sShowing = !!m.on
+        p.sOff = !m.on
         if (m.on) {
           screenTile(p)
           p.sLost = true
