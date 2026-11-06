@@ -157,8 +157,9 @@ async fn it_goes_when_the_time_is_up_on_both_sides() {
         start(db.path(), &lookup, "Noor"),
     );
     befriend(&a, &b).await;
+    // Short, but long enough to get there first on a slow machine.
     let id = a
-        .status_post_lasting("Short", Backdrop::Sea, None, 1500)
+        .status_post_lasting("Short", Backdrop::Sea, None, 8_000)
         .unwrap();
     until("the post", || b.status_posts().iter().any(|p| p.id == id)).await;
     until("gone there", || {

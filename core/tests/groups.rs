@@ -116,6 +116,11 @@ async fn what_only_admins_may_change_stays_theirs_and_everyone_can_react() {
             .is_some_and(|m| !m.extra.reactions.is_empty())
     })
     .await;
+    // And its confirmation back: until then it still counts as owed, which a slow machine shows.
+    until("the reaction confirmed", || {
+        t.b.changes_owed_to(&t.a.my_key()) == 0
+    })
+    .await;
 
     // The disappearing time is not for a member to change: the app does not try.
     let mut prefs = t.b.chat_prefs(&t.group);
