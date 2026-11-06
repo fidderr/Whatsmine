@@ -11,6 +11,8 @@ use tokio::sync::mpsc;
 
 use crate::notify::Notice;
 
+/// What Windows knows the app by, for its toasts.
+#[cfg(windows)]
 const APP_ID: &str = "com.fidderr.whatsmine";
 
 /// What another launch of the app can ask the running one to do.
