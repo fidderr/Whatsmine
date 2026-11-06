@@ -186,8 +186,10 @@ async fn a_photo_arrives_whole_and_goes_with_the_post() {
         image::Rgb([(seed >> 24) as u8, (seed >> 16) as u8, (seed >> 8) as u8])
     });
     image.save(&path).unwrap();
+    // Long enough for the photo to get there on a slow machine first: at 6 s, a CI runner had the
+    // post gone, photo and all, before the photo arrived.
     let id = a
-        .status_post_lasting("With a photo", Backdrop::Sea, Some(&path), 6000)
+        .status_post_lasting("With a photo", Backdrop::Sea, Some(&path), 20_000)
         .unwrap();
     let sent = a.status_photo(&id).expect("the photo here");
     assert!(sent.len() > 64 * 1024, "more than one part: {}", sent.len());
