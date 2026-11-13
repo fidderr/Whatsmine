@@ -158,7 +158,10 @@ case "$MODE" in
 
     echo "=== [2/2] Wiring mobile-sentinel + icon + building the app ==="
     # shellcheck disable=SC2086
-    cargo run --manifest-path "$SENTINEL_DIR/Cargo.toml" --bin build_sentinel -- --app whatsmine $SENTINEL_FLAGS
+    # Newer SDKs keep the build tool behind the `build` feature.
+    SDK_FEATURES=""
+    grep -q '^build = ' "$SENTINEL_DIR/Cargo.toml" && SDK_FEATURES="--features build"
+    cargo run --manifest-path "$SENTINEL_DIR/Cargo.toml" $SDK_FEATURES --bin build_sentinel -- --app whatsmine $SENTINEL_FLAGS
 
     case "$MODE" in
       aab)
