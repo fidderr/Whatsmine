@@ -3,7 +3,6 @@
 // no `dangerous_inner_html` anywhere in this crate.
 #![allow(unreachable_code)] // the Routable derive trips this on rustc 1.100
 
-
 use std::collections::HashMap;
 
 use dioxus::prelude::*;
