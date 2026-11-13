@@ -1,6 +1,8 @@
 // SECURITY: Dioxus RSX string interpolation ("{var}") escapes HTML. Message
 // text and names from other people are only ever rendered that way; there is
 // no `dangerous_inner_html` anywhere in this crate.
+#![allow(unreachable_code)] // the Routable derive trips this on rustc 1.100
+
 
 use std::collections::HashMap;
 
