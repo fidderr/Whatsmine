@@ -70,7 +70,7 @@ It runs on Android 12 and newer (64-bit) and on Windows, from one Rust codebase.
 
 ## Build
 
-Requirements: Rust (stable), [`dx`](https://dioxuslabs.com/learn/0.7/getting_started) 0.7, a checkout of [mobile-sentinel](https://github.com/fidderr/mobile-sentinel) next to this repo, and for Android its SDK and NDK.
+Requirements: Rust (stable), [`dx`](https://dioxuslabs.com/learn/0.7/getting_started) 0.7, a checkout of [mobile-sentinel](https://github.com/fidderr/mobile-sentinel) (branch `main`) in a folder next to this repo (CI does the same), and for Android its SDK and NDK.
 
 ```sh
 ./build.sh desktop            # the Windows app
